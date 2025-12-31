@@ -41,6 +41,9 @@ typedef struct {
     BOOL showRecordingBorder;
     int maxRecordingSeconds;  // 0 = unlimited
     
+    // UI settings
+    int cancelKey;  // Virtual key code to close overlay (default: VK_ESCAPE)
+    
     // Save location
     char savePath[MAX_PATH];
     

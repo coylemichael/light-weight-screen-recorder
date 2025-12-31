@@ -28,6 +28,7 @@ void Config_Load(AppConfig* config) {
     config->captureMouse = TRUE;
     config->showRecordingBorder = TRUE;
     config->maxRecordingSeconds = 0;
+    config->cancelKey = VK_ESCAPE;  // Default cancel key
     
     // Default save path to Videos folder
     if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_MYVIDEO, NULL, 0, config->savePath))) {
@@ -51,6 +52,8 @@ void Config_Load(AppConfig* config) {
             "Recording", "ShowBorder", TRUE, configPath);
         config->maxRecordingSeconds = GetPrivateProfileIntA(
             "Recording", "MaxSeconds", 0, configPath);
+        config->cancelKey = GetPrivateProfileIntA(
+            "UI", "CancelKey", VK_ESCAPE, configPath);
         
         GetPrivateProfileStringA("Recording", "SavePath", config->savePath,
             config->savePath, MAX_PATH, configPath);
@@ -91,6 +94,9 @@ void Config_Save(const AppConfig* config) {
     
     sprintf(buffer, "%d", config->maxRecordingSeconds);
     WritePrivateProfileStringA("Recording", "MaxSeconds", buffer, configPath);
+    
+    sprintf(buffer, "%d", config->cancelKey);
+    WritePrivateProfileStringA("UI", "CancelKey", buffer, configPath);
     
     WritePrivateProfileStringA("Recording", "SavePath", config->savePath, configPath);
     

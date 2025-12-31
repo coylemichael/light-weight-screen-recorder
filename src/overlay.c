@@ -133,6 +133,7 @@ extern HWND g_controlWnd;
 #define ID_CMB_HOURS       1016
 #define ID_CMB_MINUTES     1017
 #define ID_CMB_SECONDS     1018
+#define ID_RECORDING_PANEL 1019  // Inline timer + stop button
 #define ID_TIMER_RECORD    2001
 #define ID_TIMER_LIMIT     2002
 #define ID_TIMER_DISPLAY   2003
@@ -163,6 +164,7 @@ typedef enum {
 // Window state
 static HINSTANCE g_hInstance;
 static CaptureMode g_currentMode = MODE_NONE;
+static CaptureMode g_recordingMode = MODE_NONE;  // Mode that started recording
 static SelectionState g_selState = SEL_NONE;
 static HandlePosition g_activeHandle = HANDLE_NONE;
 static BOOL g_isDragging = FALSE;
@@ -173,11 +175,12 @@ static RECT g_selectedRect;
 static RECT g_originalRect;    // Original rect before resize/move
 static HWND g_settingsWnd = NULL;
 static HWND g_crosshairWnd = NULL;
-static HWND g_timerWnd = NULL;     // Recording timer display
+static HWND g_recordingPanel = NULL;  // Inline timer + stop in control bar
 static EncoderState g_encoder;
 static HANDLE g_recordThread = NULL;
 static volatile BOOL g_stopRecording = FALSE;
 static DWORD g_recordStartTime = 0;
+static BOOL g_recordingPanelHovered = FALSE;  // Hover state for recording panel
 
 // Handle size
 #define HANDLE_SIZE 10
@@ -190,7 +193,6 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 static LRESULT CALLBACK CrosshairWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-static LRESULT CALLBACK TimerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 // Helper functions
 static HandlePosition HitTestHandle(POINT pt);
@@ -694,9 +696,12 @@ static void CaptureToFile(void) {
     ShowWindow(g_controlWnd, SW_SHOW);
 }
 
-// Update timer display position and text
+// Timer text for display
+static char g_timerText[32] = "00:00";
+
+// Update timer display text
 static void UpdateTimerDisplay(void) {
-    if (!g_timerWnd || !g_isRecording) return;
+    if (!g_recordingPanel || !g_isRecording) return;
     
     // Update timer text
     DWORD elapsed = GetTickCount() - g_recordStartTime;
@@ -704,30 +709,14 @@ static void UpdateTimerDisplay(void) {
     int mins = (elapsed / 60000) % 60;
     int hours = elapsed / 3600000;
     
-    char timeText[32];
     if (hours > 0) {
-        sprintf(timeText, "%d:%02d:%02d", hours, mins, secs);
+        sprintf(g_timerText, "%d:%02d:%02d", hours, mins, secs);
     } else {
-        sprintf(timeText, "%02d:%02d", mins, secs);  // MM:SS with leading zero
+        sprintf(g_timerText, "%02d:%02d", mins, secs);  // MM:SS with leading zero
     }
-    SetWindowTextA(g_timerWnd, timeText);
     
-    // Position in bottom-right corner of selection
-    int timerW = 175;
-    int timerH = 28;
-    RECT screenRect;
-    Capture_GetAllMonitorsBounds(&screenRect);
-    
-    // Position inside the bottom-right of selection
-    int posX = g_selectedRect.right - timerW - 8;
-    int posY = g_selectedRect.bottom - timerH - 8;
-    
-    // If too close to edge, move to opposite corner
-    if (posX < screenRect.left + 20) posX = g_selectedRect.left + 8;
-    if (posY < screenRect.top + 20) posY = g_selectedRect.top + 8;
-    
-    SetWindowPos(g_timerWnd, HWND_TOPMOST, posX, posY, timerW, timerH, SWP_NOACTIVATE);
-    InvalidateRect(g_timerWnd, NULL, TRUE);
+    // Trigger repaint of recording panel
+    InvalidateRect(g_recordingPanel, NULL, FALSE);
 }
 
 BOOL Overlay_Create(HINSTANCE hInstance) {
@@ -787,17 +776,6 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     // Initialize new action toolbar module
     ActionToolbar_Init(hInstance);
     ActionToolbar_SetCallbacks(Recording_Start, CaptureToClipboard, CaptureToFile, NULL);
-    
-    // Register timer display window class
-    WNDCLASSEXA wcTimer = {0};
-    wcTimer.cbSize = sizeof(wcTimer);
-    wcTimer.style = CS_HREDRAW | CS_VREDRAW;
-    wcTimer.lpfnWndProc = TimerWndProc;
-    wcTimer.hInstance = hInstance;
-    wcTimer.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wcTimer.hbrBackground = NULL;
-    wcTimer.lpszClassName = "LWSRTimer";
-    RegisterClassExA(&wcTimer);
     
     // Initialize border module
     Border_Init(hInstance);
@@ -861,20 +839,6 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     
     // Action toolbar is now managed by action_toolbar module
     
-    // Create stop recording button (hidden initially) - click to stop
-    g_timerWnd = CreateWindowExA(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-        "LWSRTimer",
-        NULL,
-        WS_POPUP,
-        -9999, -9999, 175, 28,  // Start off-screen to avoid capture issues
-        NULL, NULL, hInstance, NULL
-    );
-    
-    // Exclude timer window from screen capture (Windows 10 2004+)
-    // WDA_EXCLUDEFROMCAPTURE = 0x00000011
-    SetWindowDisplayAffinity(g_timerWnd, 0x00000011);
-    
     // Don't show overlay or crosshair initially - only when mode is selected
     g_isSelecting = FALSE;
     g_selState = SEL_NONE;
@@ -906,9 +870,9 @@ void Overlay_Destroy(void) {
     // Shutdown action toolbar module
     ActionToolbar_Shutdown();
     
-    if (g_timerWnd) {
-        DestroyWindow(g_timerWnd);
-        g_timerWnd = NULL;
+    if (g_recordingPanel) {
+        DestroyWindow(g_recordingPanel);
+        g_recordingPanel = NULL;
     }
     
     // Shutdown border module
@@ -995,30 +959,25 @@ void Recording_Start(void) {
         return;
     }
     
-    // Hide selection UI
+    // Hide selection UI (but keep control bar visible)
     ShowWindow(g_overlayWnd, SW_HIDE);
     ShowWindow(g_crosshairWnd, SW_HIDE);
     ActionToolbar_Hide();
-    ShowWindow(g_controlWnd, SW_HIDE);
     
     // Start recording
     g_isRecording = TRUE;
     g_isSelecting = FALSE;
     g_stopRecording = FALSE;
     g_recordStartTime = GetTickCount();
+    g_recordingMode = g_currentMode;  // Remember which mode started recording
+    strcpy(g_timerText, "00:00");
     
     // Show recording border if enabled
     if (g_config.showRecordingBorder) {
         Border_Show(g_selectedRect);
     }
     
-    // Show timer display
-    SetWindowTextA(g_timerWnd, "0");
-    UpdateTimerDisplay();
-    ShowWindow(g_timerWnd, SW_SHOW);
-    SetTimer(g_timerWnd, ID_TIMER_DISPLAY, 1000, NULL); // Update every second
-    
-    // Update control panel
+    // Update control panel to show inline timer/stop
     Overlay_SetRecordingState(TRUE);
     
     // Start recording thread
@@ -1051,19 +1010,20 @@ void Recording_Stop(void) {
     // Hide recording border
     Border_Hide();
     
-    // Hide timer
-    KillTimer(g_timerWnd, ID_TIMER_DISPLAY);
-    ShowWindow(g_timerWnd, SW_HIDE);
-    
+    // Stop timers
+    KillTimer(g_controlWnd, ID_TIMER_DISPLAY);
     KillTimer(g_controlWnd, ID_TIMER_LIMIT);
+    
+    // Restore control bar to normal state
+    Overlay_SetRecordingState(FALSE);
     
     // Save config with last capture rect
     g_config.lastCaptureRect = g_selectedRect;
     g_config.lastMode = g_currentMode;
     Config_Save(&g_config);
     
-    // Exit application
-    PostQuitMessage(0);
+    // Show control bar
+    ShowWindow(g_controlWnd, SW_SHOW);
 }
 
 static DWORD WINAPI RecordingThread(LPVOID param) {
@@ -1122,39 +1082,106 @@ static DWORD WINAPI RecordingThread(LPVOID param) {
 }
 
 void Overlay_SetRecordingState(BOOL isRecording) {
-    HWND btnStop = GetDlgItem(g_controlWnd, ID_BTN_STOP);
-    
     if (isRecording) {
-        // Hide mode buttons, show stop button
-        ShowWindow(GetDlgItem(g_controlWnd, ID_MODE_AREA), SW_HIDE);
-        ShowWindow(GetDlgItem(g_controlWnd, ID_MODE_WINDOW), SW_HIDE);
-        ShowWindow(GetDlgItem(g_controlWnd, ID_MODE_MONITOR), SW_HIDE);
-        ShowWindow(GetDlgItem(g_controlWnd, ID_MODE_ALL), SW_HIDE);
-        ShowWindow(GetDlgItem(g_controlWnd, ID_BTN_SETTINGS), SW_HIDE);
+        // Get button positions based on recording mode
+        HWND modeBtn = NULL;
+        RECT btnRect = {0};
         
-        if (btnStop) {
-            ShowWindow(btnStop, SW_SHOW);
-            SetWindowTextA(btnStop, "Stop Recording");
+        switch (g_recordingMode) {
+            case MODE_AREA:
+                modeBtn = GetDlgItem(g_controlWnd, ID_MODE_AREA);
+                break;
+            case MODE_WINDOW:
+                modeBtn = GetDlgItem(g_controlWnd, ID_MODE_WINDOW);
+                break;
+            case MODE_MONITOR:
+                modeBtn = GetDlgItem(g_controlWnd, ID_MODE_MONITOR);
+                break;
+            case MODE_ALL_MONITORS:
+                modeBtn = GetDlgItem(g_controlWnd, ID_MODE_ALL);
+                break;
+            default:
+                modeBtn = GetDlgItem(g_controlWnd, ID_MODE_AREA);
+                break;
         }
         
-        // Show recording border if enabled
-        if (g_config.showRecordingBorder) {
-            // Position control near capture area
-            SetWindowPos(g_controlWnd, HWND_TOPMOST,
-                         g_selectedRect.left, g_selectedRect.top - 60,
-                         200, 40, SWP_SHOWWINDOW);
+        if (modeBtn) {
+            GetWindowRect(modeBtn, &btnRect);
+            MapWindowPoints(HWND_DESKTOP, g_controlWnd, (LPPOINT)&btnRect, 2);
         }
+        
+        // Hide the active mode button
+        if (modeBtn) ShowWindow(modeBtn, SW_HIDE);
+        
+        // Disable (gray out) other mode buttons
+        HWND btnArea = GetDlgItem(g_controlWnd, ID_MODE_AREA);
+        HWND btnWindow = GetDlgItem(g_controlWnd, ID_MODE_WINDOW);
+        HWND btnMonitor = GetDlgItem(g_controlWnd, ID_MODE_MONITOR);
+        HWND btnAll = GetDlgItem(g_controlWnd, ID_MODE_ALL);
+        
+        if (btnArea != modeBtn) EnableWindow(btnArea, FALSE);
+        if (btnWindow != modeBtn) EnableWindow(btnWindow, FALSE);
+        if (btnMonitor != modeBtn) EnableWindow(btnMonitor, FALSE);
+        if (btnAll != modeBtn) EnableWindow(btnAll, FALSE);
+        
+        // Invalidate disabled buttons to show grayed state
+        InvalidateRect(btnArea, NULL, TRUE);
+        InvalidateRect(btnWindow, NULL, TRUE);
+        InvalidateRect(btnMonitor, NULL, TRUE);
+        InvalidateRect(btnAll, NULL, TRUE);
+        
+        // Create recording panel in place of the mode button
+        if (!g_recordingPanel) {
+            g_recordingPanel = CreateWindowW(L"BUTTON", L"",
+                WS_CHILD | BS_OWNERDRAW,
+                btnRect.left, btnRect.top, 
+                btnRect.right - btnRect.left, btnRect.bottom - btnRect.top,
+                g_controlWnd, (HMENU)ID_RECORDING_PANEL, g_hInstance, NULL);
+        } else {
+            SetWindowPos(g_recordingPanel, NULL,
+                btnRect.left, btnRect.top, 
+                btnRect.right - btnRect.left, btnRect.bottom - btnRect.top,
+                SWP_NOZORDER);
+        }
+        ShowWindow(g_recordingPanel, SW_SHOW);
+        
+        // Start timer for display updates
+        SetTimer(g_controlWnd, ID_TIMER_DISPLAY, 1000, NULL);
+        
+        // Keep control bar visible but ensure it's on top
+        ShowWindow(g_controlWnd, SW_SHOW);
+        SetWindowPos(g_controlWnd, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     } else {
-        // Show mode buttons, hide stop button
-        ShowWindow(GetDlgItem(g_controlWnd, ID_MODE_AREA), SW_SHOW);
-        ShowWindow(GetDlgItem(g_controlWnd, ID_MODE_WINDOW), SW_SHOW);
-        ShowWindow(GetDlgItem(g_controlWnd, ID_MODE_MONITOR), SW_SHOW);
-        ShowWindow(GetDlgItem(g_controlWnd, ID_MODE_ALL), SW_SHOW);
-        ShowWindow(GetDlgItem(g_controlWnd, ID_BTN_SETTINGS), SW_SHOW);
+        // Stop timer
+        KillTimer(g_controlWnd, ID_TIMER_DISPLAY);
         
-        if (btnStop) {
-            ShowWindow(btnStop, SW_HIDE);
+        // Hide recording panel
+        if (g_recordingPanel) {
+            ShowWindow(g_recordingPanel, SW_HIDE);
         }
+        
+        // Re-enable and show all mode buttons
+        HWND btnArea = GetDlgItem(g_controlWnd, ID_MODE_AREA);
+        HWND btnWindow = GetDlgItem(g_controlWnd, ID_MODE_WINDOW);
+        HWND btnMonitor = GetDlgItem(g_controlWnd, ID_MODE_MONITOR);
+        HWND btnAll = GetDlgItem(g_controlWnd, ID_MODE_ALL);
+        
+        EnableWindow(btnArea, TRUE);
+        EnableWindow(btnWindow, TRUE);
+        EnableWindow(btnMonitor, TRUE);
+        EnableWindow(btnAll, TRUE);
+        
+        ShowWindow(btnArea, SW_SHOW);
+        ShowWindow(btnWindow, SW_SHOW);
+        ShowWindow(btnMonitor, SW_SHOW);
+        ShowWindow(btnAll, SW_SHOW);
+        
+        InvalidateRect(btnArea, NULL, TRUE);
+        InvalidateRect(btnWindow, NULL, TRUE);
+        InvalidateRect(btnMonitor, NULL, TRUE);
+        InvalidateRect(btnAll, NULL, TRUE);
+        
+        g_recordingMode = MODE_NONE;
     }
 }
 
@@ -1394,8 +1421,11 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         }
         
         case WM_KEYDOWN:
-            if (wParam == VK_ESCAPE) {
-                if (g_selState == SEL_DRAWING || g_selState == SEL_MOVING || g_selState == SEL_RESIZING) {
+            // Check for configurable cancel key
+            if (wParam == (WPARAM)g_config.cancelKey) {
+                if (g_isRecording) {
+                    Recording_Stop();
+                } else if (g_selState == SEL_DRAWING || g_selState == SEL_MOVING || g_selState == SEL_RESIZING) {
                     ReleaseCapture();
                     g_selState = SEL_NONE;
                     SetRectEmpty(&g_selectedRect);
@@ -1442,21 +1472,22 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Symbol");
             
             // Create mode buttons (owner-drawn for Snipping Tool style)
+            // All buttons are 130px wide for consistency
             CreateWindowW(L"BUTTON", L"Capture Area",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                8, 7, 120, 30, hwnd, (HMENU)ID_MODE_AREA, g_hInstance, NULL);
+                8, 7, 130, 30, hwnd, (HMENU)ID_MODE_AREA, g_hInstance, NULL);
             
             CreateWindowW(L"BUTTON", L"Capture Window",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                132, 7, 130, 30, hwnd, (HMENU)ID_MODE_WINDOW, g_hInstance, NULL);
+                142, 7, 130, 30, hwnd, (HMENU)ID_MODE_WINDOW, g_hInstance, NULL);
             
             CreateWindowW(L"BUTTON", L"Capture Monitor",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                266, 7, 135, 30, hwnd, (HMENU)ID_MODE_MONITOR, g_hInstance, NULL);
+                276, 7, 130, 30, hwnd, (HMENU)ID_MODE_MONITOR, g_hInstance, NULL);
             
             CreateWindowW(L"BUTTON", L"Capture All Monitors",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                405, 7, 160, 30, hwnd, (HMENU)ID_MODE_ALL, g_hInstance, NULL);
+                410, 7, 130, 30, hwnd, (HMENU)ID_MODE_ALL, g_hInstance, NULL);
             
             // Small buttons on right side (square 28x28, vertically centered)
             int btnSize = 28;
@@ -1557,10 +1588,20 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     InvalidateRect(GetDlgItem(hwnd, ID_BTN_RECORD), NULL, TRUE);
                     break;
                 case ID_BTN_CLOSE:
+                    // Stop recording if in progress, then exit
+                    if (g_isRecording) {
+                        Recording_Stop();
+                    }
                     PostQuitMessage(0);
                     break;
                 case ID_BTN_STOP:
                     Recording_Stop();
+                    break;
+                case ID_RECORDING_PANEL:
+                    // Click on recording panel stops recording
+                    if (g_isRecording) {
+                        Recording_Stop();
+                    }
                     break;
             }
             return 0;
@@ -1569,6 +1610,9 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             if (wParam == ID_TIMER_LIMIT) {
                 // Time limit reached
                 Recording_Stop();
+            } else if (wParam == ID_TIMER_DISPLAY) {
+                // Update timer display
+                UpdateTimerDisplay();
             }
             return 0;
             
@@ -1675,6 +1719,102 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 textRect.right += 1;
                 // Use horizontal ellipsis or three dots
                 DrawTextW(dis->hDC, L"\u22EF", -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                return TRUE;
+            }
+            
+            // Recording panel (inline timer + stop button)
+            if (ctlId == ID_RECORDING_PANEL) {
+                RECT rect = dis->rcItem;
+                int width = rect.right - rect.left;
+                int centerX = width / 2;  // Divider at center (50/50 split)
+                
+                // Check hover state
+                POINT pt;
+                GetCursorPos(&pt);
+                ScreenToClient(dis->hwndItem, &pt);
+                BOOL isHover = PtInRect(&rect, pt);
+                
+                // Background - slightly lighter on hover
+                COLORREF bgColor = isHover ? RGB(48, 48, 48) : RGB(32, 32, 32);
+                HBRUSH bgBrush = CreateSolidBrush(bgColor);
+                FillRect(dis->hDC, &rect, bgBrush);
+                DeleteObject(bgBrush);
+                
+                // Draw rounded border
+                HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(80, 80, 80));
+                HPEN oldPen = (HPEN)SelectObject(dis->hDC, borderPen);
+                HBRUSH oldBrush = (HBRUSH)SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+                RoundRect(dis->hDC, rect.left, rect.top, rect.right, rect.bottom, 6, 6);
+                SelectObject(dis->hDC, oldPen);
+                SelectObject(dis->hDC, oldBrush);
+                DeleteObject(borderPen);
+                
+                // Left half: red dot + timer (centered)
+                // Measure timer text width
+                SelectObject(dis->hDC, g_uiFont);
+                SIZE timerSize;
+                GetTextExtentPoint32A(dis->hDC, g_timerText, (int)strlen(g_timerText), &timerSize);
+                int dotSize = 8;
+                int dotGap = 6;  // Gap between dot and text
+                int leftContentWidth = dotSize + dotGap + timerSize.cx;
+                int leftStartX = rect.left + (centerX - leftContentWidth) / 2;
+                
+                // Draw anti-aliased red recording dot using GDI+
+                if (GdipCreateFromHDC && GdipSetSmoothingMode && GdipCreateSolidFill && 
+                    GdipFillEllipse && GdipDeleteBrush && GdipDeleteGraphics) {
+                    GpGraphics* graphics = NULL;
+                    GdipCreateFromHDC(dis->hDC, &graphics);
+                    if (graphics) {
+                        GdipSetSmoothingMode(graphics, 4); // SmoothingModeAntiAlias
+                        GpBrush* redBrush = NULL;
+                        GdipCreateSolidFill(0xFFEA4335, &redBrush);
+                        if (redBrush) {
+                            int dotY = (rect.top + rect.bottom - dotSize) / 2;
+                            GdipFillEllipse(graphics, redBrush, (float)leftStartX, (float)dotY, (float)dotSize, (float)dotSize);
+                            GdipDeleteBrush(redBrush);
+                        }
+                        GdipDeleteGraphics(graphics);
+                    }
+                }
+                
+                // Draw timer text
+                SetBkMode(dis->hDC, TRANSPARENT);
+                COLORREF textColor = isHover ? RGB(230, 230, 230) : RGB(200, 200, 200);
+                SetTextColor(dis->hDC, textColor);
+                
+                RECT timerRect = rect;
+                timerRect.left = leftStartX + dotSize + dotGap;
+                timerRect.right = rect.left + centerX;
+                DrawTextA(dis->hDC, g_timerText, -1, &timerRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                
+                // Draw vertical divider at center
+                HPEN dividerPen = CreatePen(PS_SOLID, 1, RGB(80, 80, 80));
+                SelectObject(dis->hDC, dividerPen);
+                MoveToEx(dis->hDC, rect.left + centerX, rect.top + 6, NULL);
+                LineTo(dis->hDC, rect.left + centerX, rect.bottom - 6);
+                DeleteObject(dividerPen);
+                
+                // Right half: red stop square + "Stop" (centered)
+                SIZE stopSize;
+                GetTextExtentPoint32A(dis->hDC, "Stop", 4, &stopSize);
+                int stopSquareSize = 8;
+                int stopGap = 6;  // Gap between square and text
+                int rightContentWidth = stopSquareSize + stopGap + stopSize.cx;
+                int rightStartX = rect.left + centerX + (centerX - rightContentWidth) / 2;
+                
+                // Draw red stop square
+                int stopSquareY = (rect.top + rect.bottom - stopSquareSize) / 2;
+                HBRUSH stopBrush = CreateSolidBrush(RGB(234, 67, 53));
+                RECT stopSquareRect = { rightStartX, stopSquareY, rightStartX + stopSquareSize, stopSquareY + stopSquareSize };
+                FillRect(dis->hDC, &stopSquareRect, stopBrush);
+                DeleteObject(stopBrush);
+                
+                // Draw "Stop" text
+                RECT stopTextRect = rect;
+                stopTextRect.left = rightStartX + stopSquareSize + stopGap;
+                stopTextRect.right = rect.right - 4;
+                DrawTextA(dis->hDC, "Stop", -1, &stopTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+                
                 return TRUE;
             }
             
@@ -2059,144 +2199,4 @@ static LRESULT CALLBACK CrosshairWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 }
 
 // Timer display font
-static HFONT g_timerFont = NULL;
-static BOOL g_timerHovered = FALSE;
 
-// Timer display window procedure
-static LRESULT CALLBACK TimerWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    switch (msg) {
-        case WM_CREATE: {
-            // Same font style as overlay/toolbar - Segoe UI 12pt
-            g_timerFont = CreateFontW(-12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-            
-            // Apply rounded corners via DWM
-            HMODULE hDwm = LoadLibraryA("dwmapi.dll");
-            if (hDwm) {
-                typedef HRESULT (WINAPI *DwmSetWindowAttributeFunc)(HWND, DWORD, LPCVOID, DWORD);
-                DwmSetWindowAttributeFunc pDwmSetWindowAttribute = 
-                    (DwmSetWindowAttributeFunc)GetProcAddress(hDwm, "DwmSetWindowAttribute");
-                if (pDwmSetWindowAttribute) {
-                    // DWMWA_WINDOW_CORNER_PREFERENCE = 33, DWMWCP_ROUND = 2
-                    DWORD cornerPref = 2;
-                    pDwmSetWindowAttribute(hwnd, 33, &cornerPref, sizeof(cornerPref));
-                }
-            }
-            return 0;
-        }
-        
-        case WM_MOUSEMOVE:
-            if (!g_timerHovered) {
-                g_timerHovered = TRUE;
-                InvalidateRect(hwnd, NULL, FALSE);
-                
-                // Track mouse leave
-                TRACKMOUSEEVENT tme = {0};
-                tme.cbSize = sizeof(tme);
-                tme.dwFlags = TME_LEAVE;
-                tme.hwndTrack = hwnd;
-                TrackMouseEvent(&tme);
-            }
-            return 0;
-        
-        case WM_MOUSELEAVE:
-            g_timerHovered = FALSE;
-            InvalidateRect(hwnd, NULL, FALSE);
-            return 0;
-        
-        case WM_LBUTTONDOWN:
-            // Click to stop recording
-            if (g_isRecording) {
-                Recording_Stop();
-            }
-            return 0;
-        
-        case WM_SETCURSOR:
-            SetCursor(LoadCursor(NULL, IDC_HAND));
-            return TRUE;
-        
-        case WM_TIMER:
-            if (wParam == ID_TIMER_DISPLAY) {
-                UpdateTimerDisplay();
-            }
-            return 0;
-        
-        case WM_PAINT: {
-            PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hwnd, &ps);
-            
-            RECT rect;
-            GetClientRect(hwnd, &rect);
-            
-            // Dark background - slightly lighter on hover
-            COLORREF bgColor = g_timerHovered ? RGB(48, 48, 48) : RGB(32, 32, 32);
-            HBRUSH bgBrush = CreateSolidBrush(bgColor);
-            FillRect(hdc, &rect, bgBrush);
-            DeleteObject(bgBrush);
-            
-            // Use GDI+ for anti-aliased red dot
-            if (GdipCreateFromHDC && GdipSetSmoothingMode && GdipCreateSolidFill && 
-                GdipFillEllipse && GdipDeleteBrush && GdipDeleteGraphics) {
-                GpGraphics* graphics = NULL;
-                GdipCreateFromHDC(hdc, &graphics);
-                if (graphics) {
-                    GdipSetSmoothingMode(graphics, 4); // SmoothingModeAntiAlias
-                    
-                    // Red dot - ARGB format
-                    GpBrush* redBrush = NULL;
-                    GdipCreateSolidFill(0xFFEA4335, &redBrush); // Google red
-                    if (redBrush) {
-                        int dotSize = 8;
-                        int dotY = (rect.bottom - dotSize) / 2 - 1;  // Move up 1px
-                        GdipFillEllipse(graphics, redBrush, 8, (float)dotY, (float)dotSize, (float)dotSize);
-                        GdipDeleteBrush(redBrush);
-                    }
-                    GdipDeleteGraphics(graphics);
-                }
-            }
-            
-            // Get timer text
-            char timeText[32];
-            GetWindowTextA(hwnd, timeText, 32);
-            
-            // Use Segoe UI font matching overlay style
-            SelectObject(hdc, g_timerFont);
-            SetBkMode(hdc, TRANSPARENT);
-            // Slightly brighter text on hover
-            COLORREF textColor = g_timerHovered ? RGB(230, 230, 230) : RGB(200, 200, 200);
-            SetTextColor(hdc, textColor);
-            
-            // Draw timer
-            RECT timerRect = rect;
-            timerRect.left = 22;
-            timerRect.right = 62;
-            DrawTextA(hdc, timeText, -1, &timerRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            
-            // Draw vertical divider
-            HPEN dividerPen = CreatePen(PS_SOLID, 1, RGB(80, 80, 80));
-            SelectObject(hdc, dividerPen);
-            MoveToEx(hdc, 68, 6, NULL);
-            LineTo(hdc, 68, rect.bottom - 6);
-            DeleteObject(dividerPen);
-            
-            // Draw "Stop Recording" text
-            RECT stopRect = rect;
-            stopRect.left = 76;
-            stopRect.right = rect.right - 4;
-            DrawTextA(hdc, "Stop Recording", -1, &stopRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-            
-            EndPaint(hwnd, &ps);
-            return 0;
-        }
-        
-        case WM_DESTROY:
-            if (g_timerFont) {
-                DeleteObject(g_timerFont);
-                g_timerFont = NULL;
-            }
-            return 0;
-    }
-    
-    return DefWindowProc(hwnd, msg, wParam, lParam);
-}
