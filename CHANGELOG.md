@@ -1,5 +1,23 @@
 # Changelog
 
+## [0.9.1] - 2025-12-31
+
+### Added
+- Stop recording widget with timer display (MM:SS format counting up)
+- Click-to-stop functionality on the timer widget
+- Subtle hover effect on stop recording button
+- Anti-aliased red recording indicator dot using GDI+
+- Vertical divider separating timer from "Stop Recording" text
+
+### Fixed
+- Timer widget and border now excluded from screen capture (WDA_EXCLUDEFROMCAPTURE)
+- All overlay windows created off-screen to prevent capture artifacts
+- Improved window positioning to avoid black rectangle artifacts
+
+### Changed
+- Modern dark themed stop recording indicator with rounded corners
+- Consistent Segoe UI font across all UI elements
+
 ## [0.9] - 2025-12-07
 
 ### Added

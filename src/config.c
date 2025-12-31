@@ -22,9 +22,9 @@ void Config_Load(AppConfig* config) {
     char configPath[MAX_PATH];
     Config_GetPath(configPath, MAX_PATH);
     
-    // Set defaults
+    // Set defaults - LOSSLESS quality for crystal-clear screen recordings
     config->outputFormat = FORMAT_MP4;
-    config->quality = QUALITY_HIGH;
+    config->quality = QUALITY_LOSSLESS;
     config->captureMouse = TRUE;
     config->showRecordingBorder = TRUE;
     config->maxRecordingSeconds = 0;

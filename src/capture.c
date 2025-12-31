@@ -84,7 +84,10 @@ BOOL Capture_GetMonitorFromPoint(POINT pt, RECT* monitorRect, int* monitorIndex)
     if (!GetMonitorInfo(hMon, &mi)) return FALSE;
     
     *monitorRect = mi.rcMonitor;
-    *monitorIndex = 0; // Default to primary for now
+    
+    // Find the DXGI output index for this monitor
+    // We need to enumerate DXGI outputs and match coordinates
+    *monitorIndex = 0; // Will be updated by Capture_InitForRegion
     
     return TRUE;
 }
@@ -122,6 +125,97 @@ BOOL Capture_GetWindowRect(HWND hwnd, RECT* rect) {
     return GetWindowRect(hwnd, rect);
 }
 
+// Helper to release duplication resources without full cleanup
+static void ReleaseDuplication(CaptureState* state) {
+    if (state->stagingTexture) {
+        state->stagingTexture->lpVtbl->Release(state->stagingTexture);
+        state->stagingTexture = NULL;
+    }
+    if (state->duplication) {
+        state->duplication->lpVtbl->Release(state->duplication);
+        state->duplication = NULL;
+    }
+}
+
+// Initialize desktop duplication for a specific DXGI output index
+static BOOL InitDuplicationForOutput(CaptureState* state, IDXGIAdapter* adapter, int outputIndex) {
+    IDXGIOutput* dxgiOutput = NULL;
+    HRESULT hr = adapter->lpVtbl->EnumOutputs(adapter, outputIndex, &dxgiOutput);
+    if (FAILED(hr)) return FALSE;
+    
+    // Get output description
+    hr = dxgiOutput->lpVtbl->GetDesc(dxgiOutput, &state->outputDesc);
+    if (FAILED(hr)) {
+        dxgiOutput->lpVtbl->Release(dxgiOutput);
+        return FALSE;
+    }
+    
+    // Get refresh rate from display mode
+    DXGI_MODE_DESC desiredMode = {0};
+    desiredMode.Width = state->outputDesc.DesktopCoordinates.right - state->outputDesc.DesktopCoordinates.left;
+    desiredMode.Height = state->outputDesc.DesktopCoordinates.bottom - state->outputDesc.DesktopCoordinates.top;
+    desiredMode.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+    
+    DXGI_MODE_DESC closestMode = {0};
+    hr = dxgiOutput->lpVtbl->FindClosestMatchingMode(dxgiOutput, &desiredMode, &closestMode, (IUnknown*)state->device);
+    
+    if (SUCCEEDED(hr) && closestMode.RefreshRate.Denominator > 0) {
+        state->monitorRefreshRate = closestMode.RefreshRate.Numerator / closestMode.RefreshRate.Denominator;
+    } else {
+        state->monitorRefreshRate = 60;
+    }
+    
+    // Get Output1 interface for duplication
+    IDXGIOutput1* dxgiOutput1 = NULL;
+    hr = dxgiOutput->lpVtbl->QueryInterface(dxgiOutput, &IID_IDXGIOutput1, (void**)&dxgiOutput1);
+    dxgiOutput->lpVtbl->Release(dxgiOutput);
+    if (FAILED(hr)) return FALSE;
+    
+    // Create desktop duplication
+    hr = dxgiOutput1->lpVtbl->DuplicateOutput(dxgiOutput1, (IUnknown*)state->device, &state->duplication);
+    dxgiOutput1->lpVtbl->Release(dxgiOutput1);
+    if (FAILED(hr)) return FALSE;
+    
+    state->monitorIndex = outputIndex;
+    state->monitorWidth = state->outputDesc.DesktopCoordinates.right - 
+                          state->outputDesc.DesktopCoordinates.left;
+    state->monitorHeight = state->outputDesc.DesktopCoordinates.bottom - 
+                           state->outputDesc.DesktopCoordinates.top;
+    
+    // Default capture region is full monitor
+    state->captureRect = state->outputDesc.DesktopCoordinates;
+    state->captureWidth = state->monitorWidth;
+    state->captureHeight = state->monitorHeight;
+    
+    return TRUE;
+}
+
+// Find which DXGI output contains most of the given region
+static int FindOutputForRegion(IDXGIAdapter* adapter, RECT region) {
+    int bestOutput = 0;
+    int bestOverlap = 0;
+    
+    for (int i = 0; i < 8; i++) { // Max 8 monitors
+        IDXGIOutput* output = NULL;
+        if (FAILED(adapter->lpVtbl->EnumOutputs(adapter, i, &output))) break;
+        
+        DXGI_OUTPUT_DESC desc;
+        output->lpVtbl->GetDesc(output, &desc);
+        output->lpVtbl->Release(output);
+        
+        RECT overlap;
+        if (IntersectRect(&overlap, &region, &desc.DesktopCoordinates)) {
+            int overlapArea = (overlap.right - overlap.left) * (overlap.bottom - overlap.top);
+            if (overlapArea > bestOverlap) {
+                bestOverlap = overlapArea;
+                bestOutput = i;
+            }
+        }
+    }
+    
+    return bestOutput;
+}
+
 BOOL Capture_Init(CaptureState* state) {
     ZeroMemory(state, sizeof(CaptureState));
     
@@ -154,73 +248,20 @@ BOOL Capture_Init(CaptureState* state) {
         return FALSE;
     }
     
-    // Get DXGI adapter
-    IDXGIAdapter* dxgiAdapter = NULL;
-    hr = dxgiDevice->lpVtbl->GetAdapter(dxgiDevice, &dxgiAdapter);
+    // Get DXGI adapter and store it
+    hr = dxgiDevice->lpVtbl->GetAdapter(dxgiDevice, &state->adapter);
     dxgiDevice->lpVtbl->Release(dxgiDevice);
     if (FAILED(hr)) {
         state->device->lpVtbl->Release(state->device);
         return FALSE;
     }
     
-    // Get primary output
-    IDXGIOutput* dxgiOutput = NULL;
-    hr = dxgiAdapter->lpVtbl->EnumOutputs(dxgiAdapter, 0, &dxgiOutput);
-    dxgiAdapter->lpVtbl->Release(dxgiAdapter);
-    if (FAILED(hr)) {
+    // Initialize with primary output (output 0)
+    if (!InitDuplicationForOutput(state, state->adapter, 0)) {
+        state->adapter->lpVtbl->Release(state->adapter);
         state->device->lpVtbl->Release(state->device);
         return FALSE;
     }
-    
-    // Get output description
-    hr = dxgiOutput->lpVtbl->GetDesc(dxgiOutput, &state->outputDesc);
-    if (FAILED(hr)) {
-        dxgiOutput->lpVtbl->Release(dxgiOutput);
-        state->device->lpVtbl->Release(state->device);
-        return FALSE;
-    }
-    
-    // Get refresh rate from display mode
-    DXGI_MODE_DESC desiredMode = {0};
-    desiredMode.Width = state->outputDesc.DesktopCoordinates.right - state->outputDesc.DesktopCoordinates.left;
-    desiredMode.Height = state->outputDesc.DesktopCoordinates.bottom - state->outputDesc.DesktopCoordinates.top;
-    desiredMode.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-    
-    DXGI_MODE_DESC closestMode = {0};
-    hr = dxgiOutput->lpVtbl->FindClosestMatchingMode(dxgiOutput, &desiredMode, &closestMode, (IUnknown*)state->device);
-    
-    if (SUCCEEDED(hr) && closestMode.RefreshRate.Denominator > 0) {
-        state->monitorRefreshRate = closestMode.RefreshRate.Numerator / closestMode.RefreshRate.Denominator;
-    } else {
-        state->monitorRefreshRate = 60; // Default fallback
-    }
-    
-    // Get Output1 interface for duplication
-    IDXGIOutput1* dxgiOutput1 = NULL;
-    hr = dxgiOutput->lpVtbl->QueryInterface(dxgiOutput, &IID_IDXGIOutput1, (void**)&dxgiOutput1);
-    dxgiOutput->lpVtbl->Release(dxgiOutput);
-    if (FAILED(hr)) {
-        state->device->lpVtbl->Release(state->device);
-        return FALSE;
-    }
-    
-    // Create desktop duplication
-    hr = dxgiOutput1->lpVtbl->DuplicateOutput(dxgiOutput1, (IUnknown*)state->device, &state->duplication);
-    dxgiOutput1->lpVtbl->Release(dxgiOutput1);
-    if (FAILED(hr)) {
-        state->device->lpVtbl->Release(state->device);
-        return FALSE;
-    }
-    
-    state->monitorWidth = state->outputDesc.DesktopCoordinates.right - 
-                          state->outputDesc.DesktopCoordinates.left;
-    state->monitorHeight = state->outputDesc.DesktopCoordinates.bottom - 
-                           state->outputDesc.DesktopCoordinates.top;
-    
-    // Default capture region is full monitor
-    state->captureRect = state->outputDesc.DesktopCoordinates;
-    state->captureWidth = state->monitorWidth;
-    state->captureHeight = state->monitorHeight;
     
     state->initialized = TRUE;
     return TRUE;
@@ -229,8 +270,26 @@ BOOL Capture_Init(CaptureState* state) {
 BOOL Capture_SetRegion(CaptureState* state, RECT region) {
     if (!state->initialized) return FALSE;
     
+    // Check if region is on a different monitor than current
+    int targetOutput = FindOutputForRegion(state->adapter, region);
+    if (targetOutput != state->monitorIndex) {
+        // Need to switch to a different output
+        ReleaseDuplication(state);
+        if (!InitDuplicationForOutput(state, state->adapter, targetOutput)) {
+            // Failed to switch, try to restore original
+            InitDuplicationForOutput(state, state->adapter, state->monitorIndex);
+            return FALSE;
+        }
+    }
+    
     // Clamp to monitor bounds
     IntersectRect(&state->captureRect, &region, &state->outputDesc.DesktopCoordinates);
+    
+    // Check if we got a valid intersection
+    if (IsRectEmpty(&state->captureRect)) {
+        // Region doesn't overlap with any monitor we can capture
+        return FALSE;
+    }
     
     state->captureWidth = state->captureRect.right - state->captureRect.left;
     state->captureHeight = state->captureRect.bottom - state->captureRect.top;
@@ -281,14 +340,14 @@ BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
     IDXGIResource* desktopResource = NULL;
     DXGI_OUTDUPL_FRAME_INFO frameInfo;
     
-    // Try to acquire next frame
+    // Try to acquire next frame - wait up to 16ms for vsync
     HRESULT hr = state->duplication->lpVtbl->AcquireNextFrame(
-        state->duplication, 0, &frameInfo, &desktopResource);
+        state->duplication, 16, &frameInfo, &desktopResource);
     
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
-        // No new frame, return last frame if available
-        if (state->frameBuffer && state->lastFrameTime > 0) {
-            *timestamp = state->lastFrameTime;
+        // No new frame, return last frame if available (for static content)
+        if (state->frameBuffer) {
+            if (timestamp) *timestamp = state->lastFrameTime;
             return state->frameBuffer;
         }
         return NULL;
@@ -377,7 +436,7 @@ BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
     state->duplication->lpVtbl->ReleaseFrame(state->duplication);
     
     state->lastFrameTime = frameInfo.LastPresentTime.QuadPart;
-    *timestamp = state->lastFrameTime;
+    if (timestamp) *timestamp = state->lastFrameTime;
     
     return state->frameBuffer;
 }
@@ -404,6 +463,11 @@ void Capture_Shutdown(CaptureState* state) {
     if (state->duplication) {
         state->duplication->lpVtbl->Release(state->duplication);
         state->duplication = NULL;
+    }
+    
+    if (state->adapter) {
+        state->adapter->lpVtbl->Release(state->adapter);
+        state->adapter = NULL;
     }
     
     if (state->context) {

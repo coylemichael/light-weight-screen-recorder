@@ -18,7 +18,8 @@ typedef enum {
 
 // Capture modes
 typedef enum {
-    MODE_AREA = 0,
+    MODE_NONE = 0,    // No mode selected (initial state)
+    MODE_AREA,
     MODE_WINDOW,
     MODE_MONITOR,
     MODE_ALL_MONITORS

@@ -8,23 +8,33 @@
 #include <stdio.h>
 #include <time.h>
 
-// Quality to bitrate mapping (bits per second per pixel)
-static UINT32 GetBitrate(int width, int height, QualityPreset quality) {
-    int pixels = width * height;
-    float bpp; // bits per pixel
+// Quality to bitrate mapping for screen recording
+// Screen content (text, UI) needs higher bitrates than video for sharp edges
+// Bitrates scale with resolution for consistent quality across sizes
+static UINT32 GetBitrate(int width, int height, int fps, QualityPreset quality) {
+    // Base bitrate per megapixel at 60fps
+    // These are tuned for screen content which is more demanding than video
+    float mbpPerMegapixel;
     
     switch (quality) {
-        case QUALITY_LOW:      bpp = 0.1f; break;
-        case QUALITY_MEDIUM:   bpp = 0.2f; break;
-        case QUALITY_HIGH:     bpp = 0.4f; break;
-        case QUALITY_LOSSLESS: bpp = 1.0f; break;
-        default:               bpp = 0.3f; break;
+        case QUALITY_LOW:      mbpPerMegapixel = 8.0f;  break;  // ~30 Mbps at 1440p60
+        case QUALITY_MEDIUM:   mbpPerMegapixel = 15.0f; break;  // ~55 Mbps at 1440p60  
+        case QUALITY_HIGH:     mbpPerMegapixel = 25.0f; break;  // ~90 Mbps at 1440p60
+        case QUALITY_LOSSLESS: mbpPerMegapixel = 40.0f; break;  // ~150 Mbps at 1440p60 (visually lossless)
+        default:               mbpPerMegapixel = 40.0f; break;
     }
     
-    // Minimum 1 Mbps, maximum 50 Mbps
-    UINT32 bitrate = (UINT32)(pixels * bpp);
-    if (bitrate < 1000000) bitrate = 1000000;
-    if (bitrate > 50000000) bitrate = 50000000;
+    // Calculate megapixels and scale bitrate
+    float megapixels = (float)(width * height) / 1000000.0f;
+    float fpsScale = (float)fps / 60.0f; // Scale for framerate
+    if (fpsScale < 0.5f) fpsScale = 0.5f;
+    if (fpsScale > 1.0f) fpsScale = 1.0f; // Don't exceed 60fps scaling
+    
+    UINT32 bitrate = (UINT32)(megapixels * mbpPerMegapixel * fpsScale * 1000000.0f);
+    
+    // Reasonable bounds: 5 Mbps minimum, 200 Mbps maximum
+    if (bitrate < 5000000) bitrate = 5000000;
+    if (bitrate > 200000000) bitrate = 200000000;
     
     return bitrate;
 }
@@ -99,12 +109,20 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     }
     
     GUID videoFormat = GetVideoFormat(format);
-    UINT32 bitrate = GetBitrate(width, height, quality);
+    UINT32 bitrate = GetBitrate(width, height, fps, quality);
     
     outputType->lpVtbl->SetGUID(outputType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
     outputType->lpVtbl->SetGUID(outputType, &MF_MT_SUBTYPE, &videoFormat);
     outputType->lpVtbl->SetUINT32(outputType, &MF_MT_AVG_BITRATE, bitrate);
     outputType->lpVtbl->SetUINT32(outputType, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    
+    // Use H.264 High Profile for better compression efficiency at high bitrates
+    if (format == FORMAT_MP4 || format == FORMAT_AVI) {
+        // eAVEncH264VProfile_High = 100
+        outputType->lpVtbl->SetUINT32(outputType, &MF_MT_MPEG2_PROFILE, 100);
+        // Level 5.1 supports up to 4K60
+        outputType->lpVtbl->SetUINT32(outputType, &MF_MT_MPEG2_LEVEL, 51);
+    }
     
     // Set frame size
     UINT64 frameSize = ((UINT64)width << 32) | height;

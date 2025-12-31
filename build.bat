@@ -28,9 +28,9 @@ cl.exe /nologo /O2 /GL /GS- /MD ^
     /W3 ^
     /D "NDEBUG" /D "WIN32" /D "_WINDOWS" /D "_CRT_SECURE_NO_WARNINGS" ^
     /Fe"bin\lwsr.exe" ^
-    src\main.c src\config.c src\capture.c src\encoder.c src\overlay.c ^
+    src\main.c src\config.c src\capture.c src\encoder.c src\overlay.c src\action_toolbar.c src\border.c ^
     /link /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF ^
-    user32.lib gdi32.lib d3d11.lib dxgi.lib mfplat.lib mfreadwrite.lib mfuuid.lib ole32.lib shell32.lib comdlg32.lib comctl32.lib dwmapi.lib
+    user32.lib gdi32.lib d3d11.lib dxgi.lib mfplat.lib mfreadwrite.lib mfuuid.lib ole32.lib shell32.lib comdlg32.lib comctl32.lib dwmapi.lib winmm.lib
 
 if %ERRORLEVEL% neq 0 (
     echo Build failed!

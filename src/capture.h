@@ -16,6 +16,7 @@ typedef struct {
     ID3D11DeviceContext* context;
     IDXGIOutputDuplication* duplication;
     ID3D11Texture2D* stagingTexture;
+    IDXGIAdapter* adapter;  // Keep adapter for switching outputs
     
     // Monitor info
     DXGI_OUTPUT_DESC outputDesc;
