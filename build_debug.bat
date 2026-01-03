@@ -22,9 +22,9 @@ cl.exe /nologo /Od /Zi /MDd ^
     /D "DEBUG" /D "_DEBUG" /D "WIN32" /D "_WINDOWS" ^
     /Fe"bin\lwsr_debug.exe" ^
     /Fd"bin\lwsr_debug.pdb" ^
-    src\main.c src\config.c src\capture.c src\encoder.c src\overlay.c ^
+    src\main.c src\config.c src\capture.c src\encoder.c src\overlay.c src\action_toolbar.c src\border.c src\replay_buffer.c src\h264_encoder.c src\sample_buffer.c ^
     /link /DEBUG /SUBSYSTEM:WINDOWS ^
-    user32.lib gdi32.lib d3d11.lib dxgi.lib mfplat.lib mfreadwrite.lib mfuuid.lib ole32.lib shell32.lib comdlg32.lib comctl32.lib dwmapi.lib
+    user32.lib gdi32.lib d3d11.lib dxgi.lib mfplat.lib mfreadwrite.lib mfuuid.lib ole32.lib shell32.lib comdlg32.lib comctl32.lib dwmapi.lib winmm.lib propsys.lib oleaut32.lib strmiids.lib
 
 if %ERRORLEVEL% neq 0 (
     echo Build failed!

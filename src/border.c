@@ -176,3 +176,375 @@ static LRESULT CALLBACK BorderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
     
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
+
+// ============================================================================
+// Preview Border Implementation (for settings window)
+// ============================================================================
+
+static HWND g_previewBorderWnd = NULL;
+static BOOL g_previewVisible = FALSE;
+static RECT g_previewRect = {0};
+
+static void UpdatePreviewBorderBitmap(int width, int height) {
+    if (!g_previewBorderWnd || width < 1 || height < 1) return;
+    
+    HDC screenDC = GetDC(NULL);
+    HDC memDC = CreateCompatibleDC(screenDC);
+    
+    BITMAPINFO bmi = {0};
+    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
+    bmi.bmiHeader.biWidth = width;
+    bmi.bmiHeader.biHeight = -height;
+    bmi.bmiHeader.biPlanes = 1;
+    bmi.bmiHeader.biBitCount = 32;
+    bmi.bmiHeader.biCompression = BI_RGB;
+    
+    BYTE* pixels = NULL;
+    HBITMAP hBitmap = CreateDIBSection(memDC, &bmi, DIB_RGB_COLORS, (void**)&pixels, NULL, 0);
+    
+    if (!hBitmap || !pixels) {
+        DeleteDC(memDC);
+        ReleaseDC(NULL, screenDC);
+        return;
+    }
+    
+    HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, hBitmap);
+    memset(pixels, 0, width * height * 4);
+    
+    // Draw red border - BGRA format
+    BYTE r = 255, g = 50, b = 50, a = 200;
+    
+    for (int y = 0; y < height; y++) {
+        for (int x = 0; x < width; x++) {
+            BOOL isBorder = (x < PREVIEW_BORDER_THICKNESS || x >= width - PREVIEW_BORDER_THICKNESS ||
+                            y < PREVIEW_BORDER_THICKNESS || y >= height - PREVIEW_BORDER_THICKNESS);
+            
+            if (isBorder) {
+                int idx = (y * width + x) * 4;
+                pixels[idx + 0] = (BYTE)(b * a / 255);
+                pixels[idx + 1] = (BYTE)(g * a / 255);
+                pixels[idx + 2] = (BYTE)(r * a / 255);
+                pixels[idx + 3] = a;
+            }
+        }
+    }
+    
+    POINT ptSrc = {0, 0};
+    SIZE sizeWnd = {width, height};
+    BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
+    POINT ptDst = {g_previewRect.left, g_previewRect.top};
+    
+    UpdateLayeredWindow(g_previewBorderWnd, screenDC, &ptDst, &sizeWnd, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
+    
+    SelectObject(memDC, oldBitmap);
+    DeleteObject(hBitmap);
+    DeleteDC(memDC);
+    ReleaseDC(NULL, screenDC);
+}
+
+BOOL PreviewBorder_Init(HINSTANCE hInstance) {
+    WNDCLASSEXA wc = {0};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = BorderWndProc;  // Reuse same proc - click-through
+    wc.hInstance = hInstance;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.lpszClassName = "LWSRPreviewBorder";
+    
+    if (!RegisterClassExA(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        return FALSE;
+    }
+    
+    g_previewBorderWnd = CreateWindowExA(
+        WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        "LWSRPreviewBorder", NULL, WS_POPUP,
+        -9999, -9999, 1, 1,
+        NULL, NULL, hInstance, NULL
+    );
+    
+    return g_previewBorderWnd != NULL;
+}
+
+void PreviewBorder_Shutdown(void) {
+    if (g_previewBorderWnd) {
+        DestroyWindow(g_previewBorderWnd);
+        g_previewBorderWnd = NULL;
+    }
+    g_previewVisible = FALSE;
+}
+
+void PreviewBorder_Show(RECT rect) {
+    if (!g_previewBorderWnd) return;
+    
+    int pad = PREVIEW_BORDER_THICKNESS;
+    g_previewRect.left = rect.left - pad;
+    g_previewRect.top = rect.top - pad;
+    g_previewRect.right = rect.right + pad;
+    g_previewRect.bottom = rect.bottom + pad;
+    
+    int width = g_previewRect.right - g_previewRect.left;
+    int height = g_previewRect.bottom - g_previewRect.top;
+    
+    UpdatePreviewBorderBitmap(width, height);
+    ShowWindow(g_previewBorderWnd, SW_SHOWNA);
+    g_previewVisible = TRUE;
+}
+
+void PreviewBorder_Hide(void) {
+    if (g_previewBorderWnd) {
+        ShowWindow(g_previewBorderWnd, SW_HIDE);
+    }
+    g_previewVisible = FALSE;
+}
+
+// ============================================================================
+// Draggable Area Selector Implementation
+// ============================================================================
+
+static HWND g_areaSelectorWnd = NULL;
+static BOOL g_areaVisible = FALSE;
+static RECT g_areaRect = {0};
+static BOOL g_areaDragging = FALSE;
+static POINT g_dragOffset = {0};
+static int g_resizeEdge = 0;  // 0=none, 1=left, 2=right, 4=top, 8=bottom (can combine)
+static BOOL g_areaLocked = FALSE;  // When TRUE, cannot move or resize
+
+#define RESIZE_HANDLE_SIZE 8
+#define MIN_AREA_SIZE 100
+
+static int GetResizeEdge(HWND hwnd, int x, int y) {
+    RECT rc;
+    GetClientRect(hwnd, &rc);
+    int edge = 0;
+    
+    if (x < RESIZE_HANDLE_SIZE) edge |= 1;       // Left
+    if (x >= rc.right - RESIZE_HANDLE_SIZE) edge |= 2;  // Right
+    if (y < RESIZE_HANDLE_SIZE) edge |= 4;       // Top
+    if (y >= rc.bottom - RESIZE_HANDLE_SIZE) edge |= 8; // Bottom
+    
+    return edge;
+}
+
+static LRESULT CALLBACK AreaSelectorWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    switch (msg) {
+        case WM_PAINT: {
+            PAINTSTRUCT ps;
+            HDC hdc = BeginPaint(hwnd, &ps);
+            
+            RECT rc;
+            GetClientRect(hwnd, &rc);
+            
+            // Semi-transparent fill
+            HBRUSH fillBrush = CreateSolidBrush(RGB(255, 50, 50));
+            HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, fillBrush);
+            HPEN borderPen = CreatePen(PS_SOLID, 2, RGB(255, 0, 0));
+            HPEN oldPen = (HPEN)SelectObject(hdc, borderPen);
+            
+            Rectangle(hdc, 0, 0, rc.right, rc.bottom);
+            
+            // Draw resize handles at corners (only if not locked)
+            if (!g_areaLocked) {
+                HBRUSH handleBrush = CreateSolidBrush(RGB(255, 255, 255));
+                SelectObject(hdc, handleBrush);
+                
+                // Corner handles
+                Rectangle(hdc, 0, 0, RESIZE_HANDLE_SIZE, RESIZE_HANDLE_SIZE);
+                Rectangle(hdc, rc.right - RESIZE_HANDLE_SIZE, 0, rc.right, RESIZE_HANDLE_SIZE);
+                Rectangle(hdc, 0, rc.bottom - RESIZE_HANDLE_SIZE, RESIZE_HANDLE_SIZE, rc.bottom);
+                Rectangle(hdc, rc.right - RESIZE_HANDLE_SIZE, rc.bottom - RESIZE_HANDLE_SIZE, rc.right, rc.bottom);
+                DeleteObject(handleBrush);
+            }
+            
+            // Draw text in center
+            SetBkMode(hdc, TRANSPARENT);
+            SetTextColor(hdc, RGB(255, 255, 255));
+            HFONT font = CreateFontA(14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, 
+                                     ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                     CLEARTYPE_QUALITY, DEFAULT_PITCH, "Segoe UI");
+            HFONT oldFont = (HFONT)SelectObject(hdc, font);
+            const char* text = g_areaLocked ? "Capture Area" : "Drag to move, corners to resize";
+            DrawTextA(hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+            
+            SelectObject(hdc, oldFont);
+            SelectObject(hdc, oldPen);
+            SelectObject(hdc, oldBrush);
+            DeleteObject(font);
+            DeleteObject(fillBrush);
+            DeleteObject(borderPen);
+            
+            EndPaint(hwnd, &ps);
+            return 0;
+        }
+        
+        case WM_SETCURSOR: {
+            // If locked, just show arrow cursor
+            if (g_areaLocked) {
+                SetCursor(LoadCursor(NULL, IDC_ARROW));
+                return TRUE;
+            }
+            
+            POINT pt;
+            GetCursorPos(&pt);
+            ScreenToClient(hwnd, &pt);
+            int edge = GetResizeEdge(hwnd, pt.x, pt.y);
+            
+            LPCTSTR cursor = IDC_ARROW;
+            if (edge == 5 || edge == 10) cursor = IDC_SIZENWSE;      // Top-left or bottom-right
+            else if (edge == 6 || edge == 9) cursor = IDC_SIZENESW;  // Top-right or bottom-left
+            else if (edge == 1 || edge == 2) cursor = IDC_SIZEWE;    // Left or right
+            else if (edge == 4 || edge == 8) cursor = IDC_SIZENS;    // Top or bottom
+            else cursor = IDC_SIZEALL;  // Move
+            
+            SetCursor(LoadCursor(NULL, cursor));
+            return TRUE;
+        }
+        
+        case WM_LBUTTONDOWN: {
+            // Don't allow dragging if locked
+            if (g_areaLocked) return 0;
+            
+            int x = LOWORD(lParam);
+            int y = HIWORD(lParam);
+            
+            g_resizeEdge = GetResizeEdge(hwnd, x, y);
+            g_areaDragging = TRUE;
+            
+            POINT pt;
+            GetCursorPos(&pt);
+            g_dragOffset.x = pt.x - g_areaRect.left;
+            g_dragOffset.y = pt.y - g_areaRect.top;
+            
+            SetCapture(hwnd);
+            return 0;
+        }
+        
+        case WM_MOUSEMOVE:
+            if (g_areaDragging) {
+                POINT pt;
+                GetCursorPos(&pt);
+                
+                int width = g_areaRect.right - g_areaRect.left;
+                int height = g_areaRect.bottom - g_areaRect.top;
+                
+                if (g_resizeEdge == 0) {
+                    // Move
+                    g_areaRect.left = pt.x - g_dragOffset.x;
+                    g_areaRect.top = pt.y - g_dragOffset.y;
+                    g_areaRect.right = g_areaRect.left + width;
+                    g_areaRect.bottom = g_areaRect.top + height;
+                } else {
+                    // Resize
+                    if (g_resizeEdge & 1) g_areaRect.left = min(pt.x, g_areaRect.right - MIN_AREA_SIZE);
+                    if (g_resizeEdge & 2) g_areaRect.right = max(pt.x, g_areaRect.left + MIN_AREA_SIZE);
+                    if (g_resizeEdge & 4) g_areaRect.top = min(pt.y, g_areaRect.bottom - MIN_AREA_SIZE);
+                    if (g_resizeEdge & 8) g_areaRect.bottom = max(pt.y, g_areaRect.top + MIN_AREA_SIZE);
+                }
+                
+                SetWindowPos(hwnd, NULL, g_areaRect.left, g_areaRect.top,
+                            g_areaRect.right - g_areaRect.left,
+                            g_areaRect.bottom - g_areaRect.top,
+                            SWP_NOZORDER | SWP_NOACTIVATE);
+            }
+            return 0;
+        
+        case WM_LBUTTONUP:
+            g_areaDragging = FALSE;
+            g_resizeEdge = 0;
+            ReleaseCapture();
+            return 0;
+        
+        case WM_MOUSEACTIVATE:
+            // Prevent this window from being activated by mouse clicks
+            return MA_NOACTIVATE;
+        
+        case WM_ERASEBKGND:
+            return 1;
+    }
+    
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+BOOL AreaSelector_Init(HINSTANCE hInstance) {
+    WNDCLASSEXA wc = {0};
+    wc.cbSize = sizeof(wc);
+    wc.style = CS_HREDRAW | CS_VREDRAW;
+    wc.lpfnWndProc = AreaSelectorWndProc;
+    wc.hInstance = hInstance;
+    wc.hCursor = LoadCursor(NULL, IDC_SIZEALL);
+    wc.hbrBackground = NULL;
+    wc.lpszClassName = "LWSRAreaSelector";
+    
+    if (!RegisterClassExA(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        return FALSE;
+    }
+    
+    // Don't create window until needed
+    return TRUE;
+}
+
+void AreaSelector_Shutdown(void) {
+    if (g_areaSelectorWnd) {
+        DestroyWindow(g_areaSelectorWnd);
+        g_areaSelectorWnd = NULL;
+    }
+    g_areaVisible = FALSE;
+}
+
+void AreaSelector_Show(RECT initialRect, BOOL allowMove) {
+    // Set locked state
+    g_areaLocked = !allowMove;
+    
+    // Ensure minimum size (only if movable)
+    if (allowMove && (initialRect.right - initialRect.left < MIN_AREA_SIZE)) {
+        initialRect.right = initialRect.left + 400;
+        initialRect.bottom = initialRect.top + 300;
+    }
+    
+    g_areaRect = initialRect;
+    
+    if (!g_areaSelectorWnd) {
+        g_areaSelectorWnd = CreateWindowExA(
+            WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+            "LWSRAreaSelector", NULL,
+            WS_POPUP | WS_VISIBLE,
+            g_areaRect.left, g_areaRect.top,
+            g_areaRect.right - g_areaRect.left,
+            g_areaRect.bottom - g_areaRect.top,
+            NULL, NULL, GetModuleHandle(NULL), NULL
+        );
+    } else {
+        SetWindowPos(g_areaSelectorWnd, HWND_TOPMOST, 
+                    g_areaRect.left, g_areaRect.top,
+                    g_areaRect.right - g_areaRect.left,
+                    g_areaRect.bottom - g_areaRect.top,
+                    SWP_SHOWWINDOW | SWP_NOACTIVATE);
+        // Force repaint to update text and handles
+        InvalidateRect(g_areaSelectorWnd, NULL, TRUE);
+    }
+    
+    // Make it semi-transparent
+    SetLayeredWindowAttributes(g_areaSelectorWnd, 0, 128, LWA_ALPHA);
+    // Need to add WS_EX_LAYERED for transparency
+    SetWindowLongPtr(g_areaSelectorWnd, GWL_EXSTYLE, 
+                     GetWindowLongPtr(g_areaSelectorWnd, GWL_EXSTYLE) | WS_EX_LAYERED);
+    SetLayeredWindowAttributes(g_areaSelectorWnd, 0, 100, LWA_ALPHA);
+    
+    g_areaVisible = TRUE;
+}
+
+void AreaSelector_Hide(void) {
+    if (g_areaSelectorWnd) {
+        ShowWindow(g_areaSelectorWnd, SW_HIDE);
+    }
+    g_areaVisible = FALSE;
+}
+
+BOOL AreaSelector_GetRect(RECT* outRect) {
+    if (!g_areaVisible || !outRect) return FALSE;
+    *outRect = g_areaRect;
+    return TRUE;
+}
+
+BOOL AreaSelector_IsVisible(void) {
+    return g_areaVisible;
+}

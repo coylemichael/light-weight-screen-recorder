@@ -78,4 +78,7 @@ BOOL Capture_GetAllMonitorsBounds(RECT* bounds);
 typedef BOOL (*MonitorEnumProc)(int index, RECT bounds, BOOL isPrimary, void* userData);
 void Capture_EnumMonitors(MonitorEnumProc callback, void* userData);
 
+// Helper: Get monitor bounds by index
+BOOL Capture_GetMonitorBoundsByIndex(int monitorIndex, RECT* bounds);
+
 #endif // CAPTURE_H

@@ -16,6 +16,7 @@
 
 #include "action_toolbar.h"
 #include "border.h"
+#include "capture.h"
 
 // GDI+ Flat API for anti-aliased drawing
 #include <objbase.h>
@@ -101,14 +102,19 @@ typedef enum {
 #include "capture.h"
 #include "encoder.h"
 #include "config.h"
+#include "replay_buffer.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "dwmapi.lib")
 
+// Hotkey ID for replay save (must match main.c)
+#define HOTKEY_REPLAY_SAVE 1
+
 // External globals from main.c
 extern AppConfig g_config;
 extern CaptureState g_capture;
+extern ReplayBufferState g_replayBuffer;
 extern BOOL g_isRecording;
 extern BOOL g_isSelecting;
 extern HWND g_overlayWnd;
@@ -137,6 +143,20 @@ extern HWND g_controlWnd;
 #define ID_TIMER_RECORD    2001
 #define ID_TIMER_LIMIT     2002
 #define ID_TIMER_DISPLAY   2003
+
+// Replay buffer settings control IDs
+#define ID_CHK_REPLAY_ENABLED   4001
+#define ID_CMB_REPLAY_SOURCE    4002
+#define ID_CMB_REPLAY_ASPECT    4003
+#define ID_CMB_REPLAY_STORAGE   4004
+#define ID_STATIC_REPLAY_INFO   4005
+#define ID_BTN_REPLAY_HOTKEY    4006
+#define ID_CMB_REPLAY_HOURS     4007
+#define ID_CMB_REPLAY_MINS      4008
+#define ID_CMB_REPLAY_SECS      4009
+#define ID_CMB_REPLAY_FPS       4010
+#define ID_STATIC_REPLAY_RAM    4011
+#define ID_STATIC_REPLAY_CALC   4012
 
 // Action toolbar button IDs
 #define ID_ACTION_RECORD   3001
@@ -181,6 +201,7 @@ static HANDLE g_recordThread = NULL;
 static volatile BOOL g_stopRecording = FALSE;
 static DWORD g_recordStartTime = 0;
 static BOOL g_recordingPanelHovered = FALSE;  // Hover state for recording panel
+static BOOL g_waitingForHotkey = FALSE;       // Waiting for user to press hotkey
 
 // Handle size
 #define HANDLE_SIZE 10
@@ -725,8 +746,8 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     // Initialize GDI+ for anti-aliased drawing
     InitGdiPlus();
     
-    // Initialize common controls
-    INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_STANDARD_CLASSES };
+    // Initialize common controls (including trackbar)
+    INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES };
     InitCommonControlsEx(&icex);
     
     // Register overlay window class
@@ -1548,15 +1569,14 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 case ID_BTN_SETTINGS:
                     // Toggle settings window
                     if (g_settingsWnd) {
-                        // Close settings if already open
-                        DestroyWindow(g_settingsWnd);
-                        g_settingsWnd = NULL;
+                        // Close settings if already open (use WM_CLOSE to trigger cleanup)
+                        SendMessage(g_settingsWnd, WM_CLOSE, 0, 0);
                     } else {
                         // Open settings below control panel, centered
                         RECT ctrlRect;
                         GetWindowRect(hwnd, &ctrlRect);
                         int settingsW = 620;
-                        int settingsH = 240;
+                        int settingsH = 555;  // Height to fit all controls with RAM explanation
                         int ctrlCenterX = (ctrlRect.left + ctrlRect.right) / 2;
                         
                         g_settingsWnd = CreateWindowExA(
@@ -1843,6 +1863,36 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             return (LRESULT)hBrush;
         }
         
+        case WM_HOTKEY: {
+            if (wParam == HOTKEY_REPLAY_SAVE) {
+                // Check if replay buffer is actually running with frames
+                if (!g_replayBuffer.isBuffering) {
+                    MessageBeep(MB_ICONWARNING);
+                    return 0;
+                }
+                
+                // Generate filename with timestamp
+                char filename[MAX_PATH];
+                SYSTEMTIME st;
+                GetLocalTime(&st);
+                sprintf(filename, "%s\\Replay_%04d%02d%02d_%02d%02d%02d.mp4",
+                    g_config.savePath, st.wYear, st.wMonth, st.wDay,
+                    st.wHour, st.wMinute, st.wSecond);
+                
+                // Save the replay
+                BOOL success = ReplayBuffer_Save(&g_replayBuffer, filename);
+                
+                // Show notification
+                if (success) {
+                    MessageBeep(MB_OK);  // Success audio feedback
+                } else {
+                    // Not enough frames yet or save failed
+                    MessageBeep(MB_ICONERROR);
+                }
+            }
+            return 0;
+        }
+        
         case WM_DESTROY:
             if (g_uiFont) DeleteObject(g_uiFont);
             if (g_iconFont) DeleteObject(g_iconFont);
@@ -1852,12 +1902,288 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
+// Helper function to get key name from virtual key code
+static void GetKeyNameFromVK(int vk, char* buffer, int bufferSize) {
+    // Handle special keys
+    switch (vk) {
+        case VK_F1: strcpy(buffer, "F1"); return;
+        case VK_F2: strcpy(buffer, "F2"); return;
+        case VK_F3: strcpy(buffer, "F3"); return;
+        case VK_F4: strcpy(buffer, "F4"); return;
+        case VK_F5: strcpy(buffer, "F5"); return;
+        case VK_F6: strcpy(buffer, "F6"); return;
+        case VK_F7: strcpy(buffer, "F7"); return;
+        case VK_F8: strcpy(buffer, "F8"); return;
+        case VK_F9: strcpy(buffer, "F9"); return;
+        case VK_F10: strcpy(buffer, "F10"); return;
+        case VK_F11: strcpy(buffer, "F11"); return;
+        case VK_F12: strcpy(buffer, "F12"); return;
+        case VK_ESCAPE: strcpy(buffer, "Escape"); return;
+        case VK_TAB: strcpy(buffer, "Tab"); return;
+        case VK_RETURN: strcpy(buffer, "Enter"); return;
+        case VK_SPACE: strcpy(buffer, "Space"); return;
+        case VK_BACK: strcpy(buffer, "Backspace"); return;
+        case VK_DELETE: strcpy(buffer, "Delete"); return;
+        case VK_INSERT: strcpy(buffer, "Insert"); return;
+        case VK_HOME: strcpy(buffer, "Home"); return;
+        case VK_END: strcpy(buffer, "End"); return;
+        case VK_PRIOR: strcpy(buffer, "Page Up"); return;
+        case VK_NEXT: strcpy(buffer, "Page Down"); return;
+        case VK_LEFT: strcpy(buffer, "Left"); return;
+        case VK_RIGHT: strcpy(buffer, "Right"); return;
+        case VK_UP: strcpy(buffer, "Up"); return;
+        case VK_DOWN: strcpy(buffer, "Down"); return;
+        case VK_PAUSE: strcpy(buffer, "Pause"); return;
+        case VK_SCROLL: strcpy(buffer, "Scroll Lock"); return;
+        case VK_SNAPSHOT: strcpy(buffer, "Print Screen"); return;
+        case VK_NUMLOCK: strcpy(buffer, "Num Lock"); return;
+        default:
+            // For letters and numbers, just use the character
+            if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
+                buffer[0] = (char)vk;
+                buffer[1] = '\0';
+                return;
+            }
+            // Numpad keys
+            if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) {
+                sprintf(buffer, "Numpad %d", vk - VK_NUMPAD0);
+                return;
+            }
+            // Default: use scan code
+            UINT scanCode = MapVirtualKey(vk, MAPVK_VK_TO_VSC);
+            if (GetKeyNameTextA(scanCode << 16, buffer, bufferSize) == 0) {
+                sprintf(buffer, "Key 0x%02X", vk);
+            }
+            break;
+    }
+}
+
 // Settings window procedure
 static HFONT g_settingsFont = NULL;
 static HFONT g_settingsSmallFont = NULL;
 static HBRUSH g_settingsBgBrush = NULL;
 
+// Helper: Calculate aspect ratio dimensions (returns width:height ratio multiplied by 1000)
+static void GetAspectRatioDimensions(int aspectIndex, int* ratioW, int* ratioH) {
+    // 0=Native, 1=16:9, 2=9:16, 3=1:1, 4=4:5, 5=16:10, 6=4:3, 7=21:9, 8=32:9
+    switch (aspectIndex) {
+        case 1: *ratioW = 16; *ratioH = 9; break;   // 16:9 (YouTube, Standard)
+        case 2: *ratioW = 9;  *ratioH = 16; break;  // 9:16 (TikTok, Shorts, Reels)
+        case 3: *ratioW = 1;  *ratioH = 1; break;   // 1:1 (Square - Instagram)
+        case 4: *ratioW = 4;  *ratioH = 5; break;   // 4:5 (Instagram Portrait)
+        case 5: *ratioW = 16; *ratioH = 10; break;  // 16:10
+        case 6: *ratioW = 4;  *ratioH = 3; break;   // 4:3
+        case 7: *ratioW = 21; *ratioH = 9; break;   // 21:9 (Ultrawide)
+        case 8: *ratioW = 32; *ratioH = 9; break;   // 32:9 (Super Ultrawide)
+        default: *ratioW = 0; *ratioH = 0; break;   // Native
+    }
+}
+
+// Helper: Calculate aspect ratio rect centered on monitor bounds
+static RECT CalculateAspectRect(RECT monBounds, int aspectW, int aspectH) {
+    int monW = monBounds.right - monBounds.left;
+    int monH = monBounds.bottom - monBounds.top;
+    
+    int rectW, rectH;
+    
+    // Fit to monitor while maintaining aspect ratio
+    if (monW * aspectH > monH * aspectW) {
+        // Monitor is wider than aspect ratio - fit to height
+        rectH = monH;
+        rectW = (rectH * aspectW) / aspectH;
+    } else {
+        // Monitor is taller than aspect ratio - fit to width
+        rectW = monW;
+        rectH = (rectW * aspectH) / aspectW;
+    }
+    
+    // Center on monitor
+    RECT result;
+    result.left = monBounds.left + (monW - rectW) / 2;
+    result.top = monBounds.top + (monH - rectH) / 2;
+    result.right = result.left + rectW;
+    result.bottom = result.top + rectH;
+    
+    return result;
+}
+
+// Update RAM usage estimate label in settings
+static void UpdateReplayRAMEstimate(HWND hwndSettings) {
+    HWND lblRam = GetDlgItem(hwndSettings, ID_STATIC_REPLAY_RAM);
+    HWND lblCalc = GetDlgItem(hwndSettings, ID_STATIC_REPLAY_CALC);
+    if (!lblRam || !lblCalc) return;
+    
+    int durationSecs = g_config.replayDuration;
+    int fps = g_config.replayFPS;
+    
+    // Get monitor resolution for estimate
+    int estWidth = GetSystemMetrics(SM_CXSCREEN);
+    int estHeight = GetSystemMetrics(SM_CYSCREEN);
+    
+    // Adjust for aspect ratio if set
+    if (g_config.replayAspectRatio > 0) {
+        int ratioW, ratioH;
+        GetAspectRatioDimensions(g_config.replayAspectRatio, &ratioW, &ratioH);
+        if (ratioW > 0 && ratioH > 0) {
+            // Calculate effective resolution with aspect ratio applied
+            if (estWidth * ratioH > estHeight * ratioW) {
+                // Monitor is wider - fit to height
+                estWidth = (estHeight * ratioW) / ratioH;
+            } else {
+                // Monitor is taller - fit to width
+                estHeight = (estWidth * ratioH) / ratioW;
+            }
+        }
+    }
+    
+    int ramMB = ReplayBuffer_EstimateRAMUsage(durationSecs, estWidth, estHeight, fps);
+    
+    // Update explanation text
+    char explainText[256];
+    sprintf(explainText, "When enabled, ~%d MB of RAM is reserved for the video buffer. See the calculation below:", ramMB);
+    SetWindowTextA(lblRam, explainText);
+    
+    // Update calculation text
+    char calcText[128];
+    if (durationSecs >= 60) {
+        int mins = durationSecs / 60;
+        int secs = durationSecs % 60;
+        if (secs > 0) {
+            sprintf(calcText, "%dm %ds @ %d FPS, %dx%d = ~%d MB", mins, secs, fps, estWidth, estHeight, ramMB);
+        } else {
+            sprintf(calcText, "%dm @ %d FPS, %dx%d = ~%d MB", mins, fps, estWidth, estHeight, ramMB);
+        }
+    } else {
+        sprintf(calcText, "%ds @ %d FPS, %dx%d = ~%d MB", durationSecs, fps, estWidth, estHeight, ramMB);
+    }
+    SetWindowTextA(lblCalc, calcText);
+}
+
+// Update preview border based on current replay capture source
+static void UpdateReplayPreview(void) {
+    // Hide any existing overlays first
+    PreviewBorder_Hide();
+    AreaSelector_Hide();
+    
+    // Show appropriate preview based on capture source
+    switch (g_config.replayCaptureSource) {
+        case MODE_MONITOR: {
+            RECT monBounds;
+            if (Capture_GetMonitorBoundsByIndex(g_config.replayMonitorIndex, &monBounds)) {
+                // Check if aspect ratio is set (not Native)
+                if (g_config.replayAspectRatio > 0) {
+                    int ratioW, ratioH;
+                    GetAspectRatioDimensions(g_config.replayAspectRatio, &ratioW, &ratioH);
+                    
+                    // Use saved area rect if valid, otherwise calculate default
+                    RECT aspectRect = g_config.replayAreaRect;
+                    int areaW = aspectRect.right - aspectRect.left;
+                    int areaH = aspectRect.bottom - aspectRect.top;
+                    
+                    // Validate saved area is within monitor and has correct aspect ratio
+                    // If not, calculate a new default centered rect
+                    BOOL needsRecalc = FALSE;
+                    if (areaW <= 0 || areaH <= 0) needsRecalc = TRUE;
+                    if (aspectRect.left < monBounds.left || aspectRect.right > monBounds.right) needsRecalc = TRUE;
+                    if (aspectRect.top < monBounds.top || aspectRect.bottom > monBounds.bottom) needsRecalc = TRUE;
+                    
+                    if (needsRecalc) {
+                        aspectRect = CalculateAspectRect(monBounds, ratioW, ratioH);
+                        g_config.replayAreaRect = aspectRect;
+                    }
+                    
+                    AreaSelector_Show(aspectRect, TRUE);  // Allow moving aspect ratio regions
+                } else {
+                    // Native - show overlay covering full monitor (locked, no moving)
+                    AreaSelector_Show(monBounds, FALSE);
+                }
+            }
+            break;
+        }
+        case MODE_ALL_MONITORS: {
+            RECT allBounds;
+            if (Capture_GetAllMonitorsBounds(&allBounds)) {
+                // Check if aspect ratio is set (not Native)
+                if (g_config.replayAspectRatio > 0) {
+                    int ratioW, ratioH;
+                    GetAspectRatioDimensions(g_config.replayAspectRatio, &ratioW, &ratioH);
+                    
+                    RECT aspectRect = g_config.replayAreaRect;
+                    int areaW = aspectRect.right - aspectRect.left;
+                    int areaH = aspectRect.bottom - aspectRect.top;
+                    
+                    BOOL needsRecalc = FALSE;
+                    if (areaW <= 0 || areaH <= 0) needsRecalc = TRUE;
+                    if (aspectRect.left < allBounds.left || aspectRect.right > allBounds.right) needsRecalc = TRUE;
+                    if (aspectRect.top < allBounds.top || aspectRect.bottom > allBounds.bottom) needsRecalc = TRUE;
+                    
+                    if (needsRecalc) {
+                        aspectRect = CalculateAspectRect(allBounds, ratioW, ratioH);
+                        g_config.replayAreaRect = aspectRect;
+                    }
+                    
+                    AreaSelector_Show(aspectRect, TRUE);  // Allow moving aspect ratio regions
+                } else {
+                    // Native - show overlay covering all monitors (locked, no moving)
+                    AreaSelector_Show(allBounds, FALSE);
+                }
+            }
+            break;
+        }
+        case MODE_AREA: {
+            // Show draggable area selector
+            // Check if saved area is valid, otherwise create a centered default
+            RECT areaRect = g_config.replayAreaRect;
+            int areaW = areaRect.right - areaRect.left;
+            int areaH = areaRect.bottom - areaRect.top;
+            
+            if (areaW < 100 || areaH < 100) {
+                // Invalid or first-time - create a 640x480 box centered on primary monitor
+                HMONITOR hMon = MonitorFromPoint((POINT){0, 0}, MONITOR_DEFAULTTOPRIMARY);
+                MONITORINFO mi = { sizeof(mi) };
+                GetMonitorInfo(hMon, &mi);
+                int monW = mi.rcMonitor.right - mi.rcMonitor.left;
+                int monH = mi.rcMonitor.bottom - mi.rcMonitor.top;
+                int defaultW = 640;
+                int defaultH = 480;
+                areaRect.left = mi.rcMonitor.left + (monW - defaultW) / 2;
+                areaRect.top = mi.rcMonitor.top + (monH - defaultH) / 2;
+                areaRect.right = areaRect.left + defaultW;
+                areaRect.bottom = areaRect.top + defaultH;
+                g_config.replayAreaRect = areaRect;
+            }
+            
+            AreaSelector_Show(areaRect, TRUE);
+            break;
+        }
+        case MODE_WINDOW:
+            // No preview for window mode - user selects window separately
+            break;
+        default:
+            break;
+    }
+    
+    // Ensure settings window and control panel stay on top of the preview overlays
+    if (g_settingsWnd) {
+        SetWindowPos(g_settingsWnd, HWND_TOPMOST, 0, 0, 0, 0, 
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+    if (g_controlWnd) {
+        SetWindowPos(g_controlWnd, HWND_TOPMOST, 0, 0, 0, 0, 
+                     SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+    }
+}
+
+// Save area selector position to config
+static void SaveAreaSelectorPosition(void) {
+    if (AreaSelector_IsVisible()) {
+        AreaSelector_GetRect(&g_config.replayAreaRect);
+    }
+}
+
 static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
+    static HFONT g_settingsTitleFont = NULL;
+    
     switch (msg) {
         case WM_CREATE: {
             // Create fonts
@@ -1865,6 +2191,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
             g_settingsSmallFont = CreateFontW(11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+            g_settingsTitleFont = CreateFontW(16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
             g_settingsBgBrush = CreateSolidBrush(RGB(32, 32, 32));
@@ -1958,6 +2287,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
                 controlX, y, 55, 300, hwnd, (HMENU)ID_CMB_HOURS, g_hInstance, NULL);
             SendMessage(cmbHours, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            SendMessage(cmbHours, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
             for (int i = 0; i <= 24; i++) {
                 WCHAR buf[8]; wsprintfW(buf, L"%d", i);
                 SendMessageW(cmbHours, CB_ADDSTRING, 0, (LPARAM)buf);
@@ -1974,6 +2304,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
                 controlX + 78, y, 55, 300, hwnd, (HMENU)ID_CMB_MINUTES, g_hInstance, NULL);
             SendMessage(cmbMins, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            SendMessage(cmbMins, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
             for (int i = 0; i <= 59; i++) {
                 WCHAR buf[8]; wsprintfW(buf, L"%d", i);
                 SendMessageW(cmbMins, CB_ADDSTRING, 0, (LPARAM)buf);
@@ -1990,6 +2321,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
                 controlX + 158, y, 55, 300, hwnd, (HMENU)ID_CMB_SECONDS, g_hInstance, NULL);
             SendMessage(cmbSecs, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            SendMessage(cmbSecs, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
             for (int i = 0; i <= 59; i++) {
                 WCHAR buf[8]; wsprintfW(buf, L"%d", i);
                 SendMessageW(cmbSecs, CB_ADDSTRING, 0, (LPARAM)buf);
@@ -2020,6 +2352,256 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
                 controlX + controlW - 72, y, 72, 22, hwnd, (HMENU)ID_BTN_BROWSE, g_hInstance, NULL);
             SendMessage(btnBrowse, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            
+            y += rowH + 12;
+            
+            // ===== REPLAY BUFFER SECTION =====
+            // Separator line
+            CreateWindowW(L"STATIC", L"",
+                WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+                labelX, y, contentW, 2, hwnd, NULL, g_hInstance, NULL);
+            y += 14;
+            
+            // Enable replay checkbox
+            HWND chkReplayEnabled = CreateWindowW(L"BUTTON", L"Enable Instant Replay",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                labelX, y, 200, 24, hwnd, (HMENU)ID_CHK_REPLAY_ENABLED, g_hInstance, NULL);
+            SendMessage(chkReplayEnabled, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            CheckDlgButton(hwnd, ID_CHK_REPLAY_ENABLED, g_config.replayEnabled ? BST_CHECKED : BST_UNCHECKED);
+            y += 38;
+            
+            // Capture source dropdown
+            HWND lblReplaySource = CreateWindowW(L"STATIC", L"Capture source",
+                WS_CHILD | WS_VISIBLE,
+                labelX, y + 5, labelW, 20, hwnd, NULL, g_hInstance, NULL);
+            SendMessage(lblReplaySource, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            
+            HWND cmbReplaySource = CreateWindowW(L"COMBOBOX", L"",
+                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                controlX, y, controlW, 200, hwnd, (HMENU)ID_CMB_REPLAY_SOURCE, g_hInstance, NULL);
+            SendMessage(cmbReplaySource, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            
+            // Enumerate and add monitors dynamically
+            int monitorCount = GetSystemMetrics(SM_CMONITORS);
+            WCHAR monitorName[64];
+            for (int i = 0; i < monitorCount; i++) {
+                if (i == 0) {
+                    wsprintfW(monitorName, L"Monitor %d (Primary)", i + 1);
+                } else {
+                    wsprintfW(monitorName, L"Monitor %d", i + 1);
+                }
+                SendMessageW(cmbReplaySource, CB_ADDSTRING, 0, (LPARAM)monitorName);
+            }
+            SendMessageW(cmbReplaySource, CB_ADDSTRING, 0, (LPARAM)L"All Monitors");
+            SendMessageW(cmbReplaySource, CB_ADDSTRING, 0, (LPARAM)L"Specific Window");
+            SendMessageW(cmbReplaySource, CB_ADDSTRING, 0, (LPARAM)L"Custom Area");
+            
+            // Set current selection based on config
+            int sourceIndex = 0;
+            if (g_config.replayCaptureSource == MODE_MONITOR) {
+                // Specific monitor selected
+                sourceIndex = g_config.replayMonitorIndex;
+                if (sourceIndex >= monitorCount) sourceIndex = 0;
+            } else if (g_config.replayCaptureSource == MODE_ALL_MONITORS) {
+                sourceIndex = monitorCount;  // All Monitors is after individual monitors
+            } else if (g_config.replayCaptureSource == MODE_WINDOW) {
+                sourceIndex = monitorCount + 1;
+            } else if (g_config.replayCaptureSource == MODE_AREA) {
+                sourceIndex = monitorCount + 2;
+            }
+            SendMessage(cmbReplaySource, CB_SETCURSEL, sourceIndex, 0);
+            y += rowH;
+            
+            // Aspect ratio dropdown (only enabled for monitor capture)
+            HWND lblAspect = CreateWindowW(L"STATIC", L"Aspect ratio",
+                WS_CHILD | WS_VISIBLE,
+                labelX, y + 5, labelW, 20, hwnd, NULL, g_hInstance, NULL);
+            SendMessage(lblAspect, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            
+            HWND cmbAspect = CreateWindowW(L"COMBOBOX", L"",
+                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                controlX, y, controlW, 250, hwnd, (HMENU)ID_CMB_REPLAY_ASPECT, g_hInstance, NULL);
+            SendMessage(cmbAspect, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"Native (No change)");
+            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"16:9 (YouTube, Standard)");
+            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"9:16 (TikTok, Shorts, Reels)");
+            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"1:1 (Square - Instagram)");
+            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"4:5 (Instagram Portrait)");
+            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"16:10");
+            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"4:3");
+            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"21:9 (Ultrawide)");
+            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"32:9 (Super Ultrawide)");
+            SendMessage(cmbAspect, CB_SETCURSEL, g_config.replayAspectRatio, 0);
+            
+            // Enable/disable aspect ratio based on source
+            BOOL enableAspect = (g_config.replayCaptureSource == MODE_MONITOR || 
+                                 g_config.replayCaptureSource == MODE_ALL_MONITORS);
+            EnableWindow(cmbAspect, enableAspect);
+            y += rowH;
+            
+            // Frame rate dropdown
+            HWND lblFPS = CreateWindowW(L"STATIC", L"Frame rate",
+                WS_CHILD | WS_VISIBLE,
+                labelX, y + 5, labelW, 20, hwnd, NULL, g_hInstance, NULL);
+            SendMessage(lblFPS, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            
+            HWND cmbFPS = CreateWindowW(L"COMBOBOX", L"",
+                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                controlX, y, controlW, 150, hwnd, (HMENU)ID_CMB_REPLAY_FPS, g_hInstance, NULL);
+            SendMessage(cmbFPS, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"30 FPS");
+            SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"60 FPS");
+            SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"120 FPS");
+            // Set selection based on config
+            int fpsIdx = (g_config.replayFPS >= 120) ? 2 : (g_config.replayFPS >= 60) ? 1 : 0;
+            SendMessage(cmbFPS, CB_SETCURSEL, fpsIdx, 0);
+            y += rowH;
+            
+            // Buffer duration - using dropdowns for proper centering
+            HWND lblReplayDuration = CreateWindowW(L"STATIC", L"Duration",
+                WS_CHILD | WS_VISIBLE,
+                labelX, y + 5, labelW, 20, hwnd, NULL, g_hInstance, NULL);
+            SendMessage(lblReplayDuration, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            
+            // Calculate hours, minutes, seconds from config
+            int replayTotalSecs = g_config.replayDuration;
+            int replayHours = replayTotalSecs / 3600;
+            int replayMins = (replayTotalSecs % 3600) / 60;
+            int replaySecs = replayTotalSecs % 60;
+            
+            // Hours dropdown
+            HWND cmbReplayHours = CreateWindowW(L"COMBOBOX", L"",
+                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                controlX, y, 55, 300, hwnd, (HMENU)ID_CMB_REPLAY_HOURS, g_hInstance, NULL);
+            SendMessage(cmbReplayHours, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            SendMessage(cmbReplayHours, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
+            for (int i = 0; i <= 24; i++) {
+                WCHAR buf[8]; wsprintfW(buf, L"%d", i);
+                SendMessageW(cmbReplayHours, CB_ADDSTRING, 0, (LPARAM)buf);
+            }
+            SendMessage(cmbReplayHours, CB_SETCURSEL, replayHours, 0);
+            
+            HWND lblReplayH = CreateWindowW(L"STATIC", L"h",
+                WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                controlX + 58, y, 15, 26, hwnd, NULL, g_hInstance, NULL);
+            SendMessage(lblReplayH, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            
+            // Minutes dropdown
+            HWND cmbReplayMinutes = CreateWindowW(L"COMBOBOX", L"",
+                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                controlX + 78, y, 55, 300, hwnd, (HMENU)ID_CMB_REPLAY_MINS, g_hInstance, NULL);
+            SendMessage(cmbReplayMinutes, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            SendMessage(cmbReplayMinutes, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
+            for (int i = 0; i <= 59; i++) {
+                WCHAR buf[8]; wsprintfW(buf, L"%d", i);
+                SendMessageW(cmbReplayMinutes, CB_ADDSTRING, 0, (LPARAM)buf);
+            }
+            SendMessage(cmbReplayMinutes, CB_SETCURSEL, replayMins, 0);
+            
+            HWND lblReplayM = CreateWindowW(L"STATIC", L"m",
+                WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                controlX + 136, y, 18, 26, hwnd, NULL, g_hInstance, NULL);
+            SendMessage(lblReplayM, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            
+            // Seconds dropdown
+            HWND cmbReplaySecs = CreateWindowW(L"COMBOBOX", L"",
+                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+                controlX + 158, y, 55, 300, hwnd, (HMENU)ID_CMB_REPLAY_SECS, g_hInstance, NULL);
+            SendMessage(cmbReplaySecs, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            SendMessage(cmbReplaySecs, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
+            for (int i = 0; i <= 59; i++) {
+                WCHAR buf[8]; wsprintfW(buf, L"%d", i);
+                SendMessageW(cmbReplaySecs, CB_ADDSTRING, 0, (LPARAM)buf);
+            }
+            SendMessage(cmbReplaySecs, CB_SETCURSEL, replaySecs, 0);
+            
+            HWND lblReplayS = CreateWindowW(L"STATIC", L"s",
+                WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+                controlX + 216, y, 15, 26, hwnd, NULL, g_hInstance, NULL);
+            SendMessage(lblReplayS, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            y += rowH;
+            
+            // Save hotkey button
+            HWND lblHotkey = CreateWindowW(L"STATIC", L"Save hotkey",
+                WS_CHILD | WS_VISIBLE,
+                labelX, y + 6, labelW, 20, hwnd, NULL, g_hInstance, NULL);
+            SendMessage(lblHotkey, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            
+            // Get current hotkey name
+            char hotkeyName[64];
+            GetKeyNameFromVK(g_config.replaySaveKey, hotkeyName, sizeof(hotkeyName));
+            
+            // Create button showing current hotkey - click to change
+            HWND btnHotkey = CreateWindowExA(0, "BUTTON", hotkeyName,
+                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+                controlX, y + 1, 120, 26, hwnd, (HMENU)ID_BTN_REPLAY_HOTKEY, g_hInstance, NULL);
+            SendMessage(btnHotkey, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            
+            // Hint text - larger and more visible
+            HWND lblHotkeyHint = CreateWindowW(L"STATIC", L"(Click to change)",
+                WS_CHILD | WS_VISIBLE,
+                controlX + 130, y + 7, 140, 24, hwnd, NULL, g_hInstance, NULL);
+            SendMessage(lblHotkeyHint, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            
+            y += rowH;
+            
+            // RAM explanation and estimate
+            {
+                int durationSecs = g_config.replayDuration;
+                int fps = g_config.replayFPS;
+                int estWidth = GetSystemMetrics(SM_CXSCREEN);
+                int estHeight = GetSystemMetrics(SM_CYSCREEN);
+                
+                // Adjust for aspect ratio if set
+                if (g_config.replayAspectRatio > 0) {
+                    int ratioW, ratioH;
+                    GetAspectRatioDimensions(g_config.replayAspectRatio, &ratioW, &ratioH);
+                    if (ratioW > 0 && ratioH > 0) {
+                        if (estWidth * ratioH > estHeight * ratioW) {
+                            estWidth = (estHeight * ratioW) / ratioH;
+                        } else {
+                            estHeight = (estWidth * ratioH) / ratioW;
+                        }
+                    }
+                }
+                
+                int ramMB = ReplayBuffer_EstimateRAMUsage(durationSecs, estWidth, estHeight, fps);
+                
+                // Explanation text
+                char explainText[256];
+                sprintf(explainText, "When enabled, ~%d MB of RAM is reserved for the video buffer. See the calculation below:", ramMB);
+                HWND lblExplain = CreateWindowExA(0, "STATIC", explainText,
+                    WS_CHILD | WS_VISIBLE,
+                    labelX, y + 4, contentW, 20, hwnd, (HMENU)ID_STATIC_REPLAY_RAM, g_hInstance, NULL);
+                SendMessage(lblExplain, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+                y += 32;
+                
+                // Calculation breakdown
+                char calcText[128];
+                if (durationSecs >= 60) {
+                    int mins = durationSecs / 60;
+                    int secs = durationSecs % 60;
+                    if (secs > 0) {
+                        sprintf(calcText, "%dm %ds @ %d FPS, %dx%d = ~%d MB", mins, secs, fps, estWidth, estHeight, ramMB);
+                    } else {
+                        sprintf(calcText, "%dm @ %d FPS, %dx%d = ~%d MB", mins, fps, estWidth, estHeight, ramMB);
+                    }
+                } else {
+                    sprintf(calcText, "%ds @ %d FPS, %dx%d = ~%d MB", durationSecs, fps, estWidth, estHeight, ramMB);
+                }
+                
+                HWND lblCalc = CreateWindowExA(0, "STATIC", calcText,
+                    WS_CHILD | WS_VISIBLE,
+                    labelX + 20, y, contentW - 20, 20, hwnd, (HMENU)ID_STATIC_REPLAY_CALC, g_hInstance, NULL);
+                SendMessage(lblCalc, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            }
+            
+            // Initialize preview border and area selector
+            PreviewBorder_Init(g_hInstance);
+            AreaSelector_Init(g_hInstance);
+            
+            // Show preview for current capture source
+            UpdateReplayPreview();
             
             return 0;
         }
@@ -2108,10 +2690,157 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     }
                     break;
                 }
+                
+                // Replay buffer settings handlers
+                case ID_CHK_REPLAY_ENABLED: {
+                    BOOL wasEnabled = g_config.replayEnabled;
+                    g_config.replayEnabled = IsDlgButtonChecked(hwnd, ID_CHK_REPLAY_ENABLED) == BST_CHECKED;
+                    
+                    // Start or stop replay buffer based on new state
+                    if (g_config.replayEnabled && !wasEnabled) {
+                        // Starting replay buffer
+                        ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                        RegisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE, 0, g_config.replaySaveKey);
+                    } else if (!g_config.replayEnabled && wasEnabled) {
+                        // Stopping replay buffer
+                        UnregisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE);
+                        ReplayBuffer_Stop(&g_replayBuffer);
+                    }
+                    break;
+                }
+                    
+                case ID_CMB_REPLAY_SOURCE:
+                    if (HIWORD(wParam) == CBN_SELCHANGE) {
+                        int sel = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_SOURCE), CB_GETCURSEL, 0, 0);
+                        int monCount = GetSystemMetrics(SM_CMONITORS);
+                        
+                        if (sel < monCount) {
+                            // Individual monitor selected
+                            g_config.replayCaptureSource = MODE_MONITOR;
+                            g_config.replayMonitorIndex = sel;
+                        } else if (sel == monCount) {
+                            g_config.replayCaptureSource = MODE_ALL_MONITORS;
+                        } else if (sel == monCount + 1) {
+                            g_config.replayCaptureSource = MODE_WINDOW;
+                        } else {
+                            g_config.replayCaptureSource = MODE_AREA;
+                        }
+                        
+                        // Enable/disable aspect ratio dropdown
+                        BOOL enableAspect = (g_config.replayCaptureSource == MODE_MONITOR || 
+                                             g_config.replayCaptureSource == MODE_ALL_MONITORS);
+                        EnableWindow(GetDlgItem(hwnd, ID_CMB_REPLAY_ASPECT), enableAspect);
+                        
+                        // Update preview border/area selector
+                        UpdateReplayPreview();
+                    }
+                    break;
+                    
+                case ID_CMB_REPLAY_HOURS:
+                case ID_CMB_REPLAY_MINS:
+                case ID_CMB_REPLAY_SECS:
+                    if (HIWORD(wParam) == CBN_SELCHANGE) {
+                        // Update duration from dropdowns
+                        int h = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_HOURS), CB_GETCURSEL, 0, 0);
+                        int m = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_MINS), CB_GETCURSEL, 0, 0);
+                        int s = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_SECS), CB_GETCURSEL, 0, 0);
+                        
+                        int total = h * 3600 + m * 60 + s;
+                        if (total < 1) total = 1;  // Minimum 1 second
+                        if (total > 86400) total = 86400;  // Maximum 24 hours
+                        g_config.replayDuration = total;
+                        
+                        // Update RAM estimate
+                        UpdateReplayRAMEstimate(hwnd);
+                    }
+                    break;
+                    
+                case ID_CMB_REPLAY_ASPECT:
+                    if (HIWORD(wParam) == CBN_SELCHANGE) {
+                        g_config.replayAspectRatio = (int)SendMessage(
+                            GetDlgItem(hwnd, ID_CMB_REPLAY_ASPECT), CB_GETCURSEL, 0, 0);
+                        
+                        // Force recalculation of area for new aspect ratio
+                        if (g_config.replayAspectRatio > 0) {
+                            // Invalidate saved area to force recalc
+                            g_config.replayAreaRect.left = 0;
+                            g_config.replayAreaRect.top = 0;
+                            g_config.replayAreaRect.right = 0;
+                            g_config.replayAreaRect.bottom = 0;
+                        }
+                        
+                        // Update preview
+                        UpdateReplayPreview();
+                        
+                        // Update RAM estimate (resolution changes with aspect ratio)
+                        UpdateReplayRAMEstimate(hwnd);
+                    }
+                    break;
+                
+                case ID_CMB_REPLAY_FPS:
+                    if (HIWORD(wParam) == CBN_SELCHANGE) {
+                        int idx = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_FPS), CB_GETCURSEL, 0, 0);
+                        g_config.replayFPS = (idx == 2) ? 120 : (idx == 1) ? 60 : 30;
+                        
+                        // Update RAM estimate
+                        UpdateReplayRAMEstimate(hwnd);
+                    }
+                    break;
+                    
+                case ID_BTN_REPLAY_HOTKEY:
+                    // Enter hotkey capture mode
+                    g_waitingForHotkey = TRUE;
+                    SetWindowTextA(GetDlgItem(hwnd, ID_BTN_REPLAY_HOTKEY), "Press a key...");
+                    SetFocus(hwnd);  // Focus the window to receive key events
+                    break;
             }
             return 0;
+        
+        case WM_KEYDOWN:
+        case WM_SYSKEYDOWN:  // For Alt combinations
+            if (g_waitingForHotkey) {
+                // Get the virtual key code
+                int vk = (int)wParam;
+                
+                // Ignore modifier keys alone
+                if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU || 
+                    vk == VK_LSHIFT || vk == VK_RSHIFT || 
+                    vk == VK_LCONTROL || vk == VK_RCONTROL ||
+                    vk == VK_LMENU || vk == VK_RMENU) {
+                    return 0;
+                }
+                
+                // Unregister old hotkey if replay is enabled
+                if (g_config.replayEnabled) {
+                    UnregisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE);
+                }
+                
+                // Save the new hotkey
+                g_config.replaySaveKey = vk;
+                
+                // Re-register with new hotkey if replay is enabled
+                if (g_config.replayEnabled) {
+                    RegisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE, 0, g_config.replaySaveKey);
+                }
+                
+                // Update button text with key name
+                char keyName[64];
+                GetKeyNameFromVK(vk, keyName, sizeof(keyName));
+                SetWindowTextA(GetDlgItem(hwnd, ID_BTN_REPLAY_HOTKEY), keyName);
+                
+                g_waitingForHotkey = FALSE;
+                return 0;
+            }
+            break;
             
         case WM_CLOSE: {
+            // Save area selector position if visible
+            SaveAreaSelectorPosition();
+            
+            // Hide preview overlays
+            PreviewBorder_Hide();
+            AreaSelector_Hide();
+            
             // Save time limit from dropdowns
             int hours = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_HOURS), CB_GETCURSEL, 0, 0);
             int mins = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_MINUTES), CB_GETCURSEL, 0, 0);
@@ -2125,7 +2854,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             GetWindowTextA(GetDlgItem(hwnd, ID_EDT_PATH), g_config.savePath, MAX_PATH);
             Config_Save(&g_config);
             
-            // Clean up
+            // Clean up preview overlays
+            PreviewBorder_Shutdown();
+            AreaSelector_Shutdown();
+            
+            // Clean up fonts and brushes
             if (g_settingsFont) { DeleteObject(g_settingsFont); g_settingsFont = NULL; }
             if (g_settingsSmallFont) { DeleteObject(g_settingsSmallFont); g_settingsSmallFont = NULL; }
             if (g_settingsBgBrush) { DeleteObject(g_settingsBgBrush); g_settingsBgBrush = NULL; }

@@ -75,6 +75,22 @@ void Capture_EnumMonitors(MonitorEnumProc callback, void* userData) {
     EnumDisplayMonitors(NULL, NULL, MonitorEnumProcCallback, (LPARAM)&data);
 }
 
+BOOL Capture_GetMonitorBoundsByIndex(int monitorIndex, RECT* bounds) {
+    MonitorSearchData data;
+    data.targetIndex = monitorIndex;
+    data.currentIndex = 0;
+    data.found = FALSE;
+    SetRectEmpty(&data.bounds);
+    
+    EnumDisplayMonitors(NULL, NULL, MonitorEnumProcInternal, (LPARAM)&data);
+    
+    if (data.found) {
+        *bounds = data.bounds;
+        return TRUE;
+    }
+    return FALSE;
+}
+
 BOOL Capture_GetMonitorFromPoint(POINT pt, RECT* monitorRect, int* monitorIndex) {
     HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
     if (!hMon) return FALSE;

@@ -30,6 +30,22 @@ void Config_Load(AppConfig* config) {
     config->maxRecordingSeconds = 0;
     config->cancelKey = VK_ESCAPE;  // Default cancel key
     
+    // Replay buffer defaults
+    config->replayEnabled = FALSE;
+    config->replayStorageType = REPLAY_STORAGE_DISK;  // Always use encoded mode (like ShadowPlay)
+    config->replayDuration = 60;  // 1 minute default
+    config->replayCaptureSource = MODE_MONITOR;
+    config->replayMonitorIndex = 0;  // Primary monitor
+    config->replaySaveKey = VK_F9;  // F9 to save replay
+    
+    // Default replay area (will be centered on screen when first used)
+    config->replayAreaRect.left = 0;
+    config->replayAreaRect.top = 0;
+    config->replayAreaRect.right = 0;
+    config->replayAreaRect.bottom = 0;
+    config->replayAspectRatio = 0;  // Native (no aspect ratio cropping)
+    config->replayFPS = 60;          // 60 FPS default
+    
     // Default save path to Videos folder
     if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_MYVIDEO, NULL, 0, config->savePath))) {
         strcat(config->savePath, "\\Recordings");
@@ -54,6 +70,32 @@ void Config_Load(AppConfig* config) {
             "Recording", "MaxSeconds", 0, configPath);
         config->cancelKey = GetPrivateProfileIntA(
             "UI", "CancelKey", VK_ESCAPE, configPath);
+        
+        // Replay buffer settings
+        config->replayEnabled = GetPrivateProfileIntA(
+            "ReplayBuffer", "Enabled", FALSE, configPath);
+        config->replayStorageType = (ReplayStorageType)GetPrivateProfileIntA(
+            "ReplayBuffer", "StorageType", REPLAY_STORAGE_DISK, configPath);
+        config->replayDuration = GetPrivateProfileIntA(
+            "ReplayBuffer", "Duration", 60, configPath);
+        config->replayCaptureSource = (CaptureMode)GetPrivateProfileIntA(
+            "ReplayBuffer", "CaptureSource", MODE_MONITOR, configPath);
+        config->replayMonitorIndex = GetPrivateProfileIntA(
+            "ReplayBuffer", "MonitorIndex", 0, configPath);
+        config->replaySaveKey = GetPrivateProfileIntA(
+            "ReplayBuffer", "SaveKey", VK_F9, configPath);
+        config->replayAreaRect.left = GetPrivateProfileIntA(
+            "ReplayBuffer", "AreaLeft", 200, configPath);
+        config->replayAreaRect.top = GetPrivateProfileIntA(
+            "ReplayBuffer", "AreaTop", 200, configPath);
+        config->replayAreaRect.right = GetPrivateProfileIntA(
+            "ReplayBuffer", "AreaRight", 1000, configPath);
+        config->replayAreaRect.bottom = GetPrivateProfileIntA(
+            "ReplayBuffer", "AreaBottom", 800, configPath);
+        config->replayAspectRatio = GetPrivateProfileIntA(
+            "ReplayBuffer", "AspectRatio", 0, configPath);
+        config->replayFPS = GetPrivateProfileIntA(
+            "ReplayBuffer", "FPS", 60, configPath);
         
         GetPrivateProfileStringA("Recording", "SavePath", config->savePath,
             config->savePath, MAX_PATH, configPath);
@@ -97,6 +139,40 @@ void Config_Save(const AppConfig* config) {
     
     sprintf(buffer, "%d", config->cancelKey);
     WritePrivateProfileStringA("UI", "CancelKey", buffer, configPath);
+    
+    // Replay buffer settings
+    sprintf(buffer, "%d", config->replayEnabled);
+    WritePrivateProfileStringA("ReplayBuffer", "Enabled", buffer, configPath);
+    
+    sprintf(buffer, "%d", config->replayStorageType);
+    WritePrivateProfileStringA("ReplayBuffer", "StorageType", buffer, configPath);
+    
+    sprintf(buffer, "%d", config->replayDuration);
+    WritePrivateProfileStringA("ReplayBuffer", "Duration", buffer, configPath);
+    
+    sprintf(buffer, "%d", config->replayCaptureSource);
+    WritePrivateProfileStringA("ReplayBuffer", "CaptureSource", buffer, configPath);
+    
+    sprintf(buffer, "%d", config->replayMonitorIndex);
+    WritePrivateProfileStringA("ReplayBuffer", "MonitorIndex", buffer, configPath);
+    
+    sprintf(buffer, "%d", config->replaySaveKey);
+    WritePrivateProfileStringA("ReplayBuffer", "SaveKey", buffer, configPath);
+    
+    sprintf(buffer, "%ld", config->replayAreaRect.left);
+    WritePrivateProfileStringA("ReplayBuffer", "AreaLeft", buffer, configPath);
+    sprintf(buffer, "%ld", config->replayAreaRect.top);
+    WritePrivateProfileStringA("ReplayBuffer", "AreaTop", buffer, configPath);
+    sprintf(buffer, "%ld", config->replayAreaRect.right);
+    WritePrivateProfileStringA("ReplayBuffer", "AreaRight", buffer, configPath);
+    sprintf(buffer, "%ld", config->replayAreaRect.bottom);
+    WritePrivateProfileStringA("ReplayBuffer", "AreaBottom", buffer, configPath);
+    
+    sprintf(buffer, "%d", config->replayAspectRatio);
+    WritePrivateProfileStringA("ReplayBuffer", "AspectRatio", buffer, configPath);
+    
+    sprintf(buffer, "%d", config->replayFPS);
+    WritePrivateProfileStringA("ReplayBuffer", "FPS", buffer, configPath);
     
     WritePrivateProfileStringA("Recording", "SavePath", config->savePath, configPath);
     

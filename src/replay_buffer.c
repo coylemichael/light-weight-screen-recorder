@@ -1,0 +1,330 @@
+/*
+ * Replay Buffer - ShadowPlay-style instant replay
+ * 
+ * Uses RAM-based circular buffer of encoded H.264 samples.
+ * On save: muxes buffered samples to MP4 (no re-encoding).
+ */
+
+#include "replay_buffer.h"
+#include "h264_encoder.h"
+#include "sample_buffer.h"
+#include "capture.h"
+#include "config.h"
+#include <stdio.h>
+
+// Global state
+static volatile BOOL g_stopBuffering = FALSE;
+static H264MemoryEncoder g_encoder = {0};
+static SampleBuffer g_sampleBuffer = {0};
+
+extern CaptureState g_capture;
+extern AppConfig g_config;
+
+static DWORD WINAPI BufferThreadProc(LPVOID param);
+
+// Debug log - shared with h264_encoder.c
+FILE* g_replayLog = NULL;
+
+static void ReplayLog(const char* fmt, ...) {
+    if (!g_replayLog) {
+        g_replayLog = fopen("replay_debug.txt", "w");
+    }
+    if (g_replayLog) {
+        va_list args;
+        va_start(args, fmt);
+        vfprintf(g_replayLog, fmt, args);
+        va_end(args);
+        fflush(g_replayLog);
+    }
+}
+
+// ============================================================================
+// PUBLIC API
+// ============================================================================
+
+BOOL ReplayBuffer_Init(ReplayBufferState* state) {
+    if (!state) return FALSE;
+    ZeroMemory(state, sizeof(ReplayBufferState));
+    InitializeCriticalSection(&state->lock);
+    return TRUE;
+}
+
+void ReplayBuffer_Shutdown(ReplayBufferState* state) {
+    if (!state) return;
+    ReplayBuffer_Stop(state);
+    DeleteCriticalSection(&state->lock);
+    
+    if (g_replayLog) {
+        fclose(g_replayLog);
+        g_replayLog = NULL;
+    }
+}
+
+BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
+    if (!state || !config) return FALSE;
+    if (state->isBuffering) return TRUE;
+    
+    state->enabled = config->replayEnabled;
+    state->durationSeconds = config->replayDuration;
+    state->captureSource = config->replayCaptureSource;
+    state->monitorIndex = config->replayMonitorIndex;
+    
+    if (!state->enabled) return FALSE;
+    
+    state->saveRequested = FALSE;
+    state->saveComplete = FALSE;
+    state->savePath[0] = '\0';
+    
+    g_stopBuffering = FALSE;
+    state->bufferThread = CreateThread(NULL, 0, BufferThreadProc, state, 0, NULL);
+    state->isBuffering = (state->bufferThread != NULL);
+    
+    return state->isBuffering;
+}
+
+void ReplayBuffer_Stop(ReplayBufferState* state) {
+    if (!state || !state->isBuffering) return;
+    
+    g_stopBuffering = TRUE;
+    if (state->bufferThread) {
+        WaitForSingleObject(state->bufferThread, 10000);
+        CloseHandle(state->bufferThread);
+        state->bufferThread = NULL;
+    }
+    state->isBuffering = FALSE;
+}
+
+BOOL ReplayBuffer_Save(ReplayBufferState* state, const char* outputPath) {
+    if (!state || !outputPath || !state->isBuffering) return FALSE;
+    
+    strncpy(state->savePath, outputPath, MAX_PATH - 1);
+    state->saveComplete = FALSE;
+    state->saveRequested = TRUE;
+    
+    // Wait for completion (max 30 sec for muxing large buffers)
+    for (int i = 0; i < 3000 && !state->saveComplete; i++) {
+        Sleep(10);
+    }
+    
+    return state->saveComplete;
+}
+
+void ReplayBuffer_GetStatus(ReplayBufferState* state, char* buffer, int bufferSize) {
+    if (!state || !buffer || bufferSize < 1) return;
+    
+    if (state->isBuffering) {
+        double duration = SampleBuffer_GetDuration(&g_sampleBuffer);
+        size_t memMB = SampleBuffer_GetMemoryUsage(&g_sampleBuffer) / (1024 * 1024);
+        snprintf(buffer, bufferSize, "Replay: %.0fs (%zuMB)", duration, memMB);
+    } else {
+        strcpy(buffer, "Replay: OFF");
+    }
+}
+
+int ReplayBuffer_EstimateRAMUsage(int durationSec, int w, int h, int fps) {
+    // Estimate based on bitrate
+    // At 90 Mbps, 60 sec = 90 * 60 / 8 = 675 MB
+    float baseMbps = 75.0f;  // Medium quality default
+    float megapixels = (float)(w * h) / 1000000.0f;
+    float resScale = megapixels / 3.7f;
+    if (resScale < 0.5f) resScale = 0.5f;
+    if (resScale > 2.5f) resScale = 2.5f;
+    float fpsScale = (float)fps / 60.0f;
+    if (fpsScale < 0.5f) fpsScale = 0.5f;
+    if (fpsScale > 2.0f) fpsScale = 2.0f;
+    
+    float mbps = baseMbps * resScale * fpsScale;
+    float totalMB = (mbps * durationSec) / 8.0f;
+    
+    return (int)totalMB;
+}
+
+// ============================================================================
+// CAPTURE THREAD
+// ============================================================================
+
+static DWORD WINAPI BufferThreadProc(LPVOID param) {
+    ReplayBufferState* state = (ReplayBufferState*)param;
+    if (!state) return 1;
+    
+    ReplayLog("BufferThread started (ShadowPlay RAM mode)\n");
+    ReplayLog("Config: replayEnabled=%d, duration=%d, captureSource=%d, monitorIndex=%d\n",
+              g_config.replayEnabled, g_config.replayDuration, 
+              g_config.replayCaptureSource, g_config.replayMonitorIndex);
+    ReplayLog("Config: replayFPS=%d, replayAspectRatio=%d, quality=%d\n",
+              g_config.replayFPS, g_config.replayAspectRatio, g_config.quality);
+    
+    // Setup capture
+    CaptureState* capture = &g_capture;
+    RECT rect = {0};
+    
+    if (state->captureSource == MODE_ALL_MONITORS) {
+        Capture_GetAllMonitorsBounds(&rect);
+        Capture_SetAllMonitors(capture);
+    } else {
+        if (!Capture_GetMonitorBoundsByIndex(state->monitorIndex, &rect)) {
+            POINT pt = {0, 0};
+            Capture_GetMonitorFromPoint(pt, &rect, NULL);
+        }
+        Capture_SetMonitor(capture, state->monitorIndex);
+    }
+    
+    int width = rect.right - rect.left;
+    int height = rect.bottom - rect.top;
+    ReplayLog("Raw monitor bounds: %dx%d (rect: %d,%d,%d,%d)\n", 
+              width, height, rect.left, rect.top, rect.right, rect.bottom);
+    
+    // Apply aspect ratio adjustment if set
+    if (g_config.replayAspectRatio > 0) {
+        int ratioW = 0, ratioH = 0;
+        switch (g_config.replayAspectRatio) {
+            case 1: ratioW = 16; ratioH = 9; break;   // 16:9
+            case 2: ratioW = 9; ratioH = 16; break;   // 9:16
+            case 3: ratioW = 1; ratioH = 1; break;    // 1:1
+            case 4: ratioW = 4; ratioH = 5; break;    // 4:5
+            case 5: ratioW = 16; ratioH = 10; break;  // 16:10
+            case 6: ratioW = 4; ratioH = 3; break;    // 4:3
+            case 7: ratioW = 21; ratioH = 9; break;   // 21:9
+            case 8: ratioW = 32; ratioH = 9; break;   // 32:9
+        }
+        
+        if (ratioW > 0 && ratioH > 0) {
+            int oldW = width, oldH = height;
+            // Calculate new dimensions maintaining aspect ratio, fitting within original bounds
+            if (width * ratioH > height * ratioW) {
+                // Monitor is wider than target - fit to height, crop width
+                width = (height * ratioW) / ratioH;
+            } else {
+                // Monitor is taller than target - fit to width, crop height
+                height = (width * ratioH) / ratioW;
+            }
+            // Ensure dimensions are even (required for H.264)
+            width = (width / 2) * 2;
+            height = (height / 2) * 2;
+            
+            // Center the crop region
+            int cropX = (oldW - width) / 2;
+            int cropY = (oldH - height) / 2;
+            rect.left += cropX;
+            rect.top += cropY;
+            rect.right = rect.left + width;
+            rect.bottom = rect.top + height;
+            
+            ReplayLog("Aspect ratio %d:%d applied: %dx%d -> %dx%d (crop offset: %d,%d)\n",
+                      ratioW, ratioH, oldW, oldH, width, height, cropX, cropY);
+        }
+    }
+    
+    if (width <= 0 || height <= 0) {
+        ReplayLog("Invalid capture size: %dx%d\n", width, height);
+        return 1;
+    }
+    
+    // Update capture to use cropped region
+    Capture_SetRegion(capture, rect);
+    
+    state->frameWidth = width;
+    state->frameHeight = height;
+    
+    int fps = g_config.replayFPS;
+    if (fps < 30) fps = 30;
+    if (fps > 120) fps = 120;
+    
+    ReplayLog("Final capture params: %dx%d @ %d FPS, duration=%ds, quality=%d\n", 
+              width, height, fps, g_config.replayDuration, g_config.quality);
+    
+    // Initialize H.264 memory encoder
+    ReplayLog("Calling H264Encoder_Init(%d, %d, %d, %d)...\n", width, height, fps, g_config.quality);
+    if (!H264Encoder_Init(&g_encoder, width, height, fps, g_config.quality)) {
+        ReplayLog("H264Encoder_Init failed - check h264_encoder_debug.txt for details\n");
+        return 1;
+    }
+    ReplayLog("H264 encoder initialized\n");
+    
+    // Initialize sample buffer
+    if (!SampleBuffer_Init(&g_sampleBuffer, g_config.replayDuration, fps, 
+                           width, height, g_config.quality)) {
+        ReplayLog("SampleBuffer_Init failed\n");
+        H264Encoder_Shutdown(&g_encoder);
+        return 1;
+    }
+    ReplayLog("Sample buffer initialized (max %ds)\n", g_config.replayDuration);
+    
+    // Timing
+    DWORD frameIntervalMs = 1000 / fps;
+    LARGE_INTEGER perfFreq, lastFrameTime;
+    QueryPerformanceFrequency(&perfFreq);
+    QueryPerformanceCounter(&lastFrameTime);
+    
+    int frameCount = 0;
+    int lastLogFrame = 0;
+    
+    while (!g_stopBuffering) {
+        // === SAVE REQUEST ===
+        if (state->saveRequested) {
+            double duration = SampleBuffer_GetDuration(&g_sampleBuffer);
+            int count = SampleBuffer_GetCount(&g_sampleBuffer);
+            
+            ReplayLog("SAVE REQUEST: %d samples (%.1fs) -> %s\n", 
+                      count, duration, state->savePath);
+            
+            // Write buffer to file
+            BOOL ok = SampleBuffer_WriteToFile(&g_sampleBuffer, state->savePath);
+            
+            ReplayLog("SAVE %s\n", ok ? "OK" : "FAILED");
+            
+            state->saveComplete = TRUE;  // Even if failed, we're done
+            state->saveRequested = FALSE;
+        }
+        
+        // === FRAME CAPTURE ===
+        LARGE_INTEGER currentTime;
+        QueryPerformanceCounter(&currentTime);
+        double frameElapsedMs = (double)(currentTime.QuadPart - lastFrameTime.QuadPart) * 1000.0 / perfFreq.QuadPart;
+        
+        if (frameElapsedMs >= frameIntervalMs) {
+            lastFrameTime = currentTime;
+            
+            UINT64 timestamp = 0;
+            BYTE* frameData = Capture_GetFrame(capture, &timestamp);
+            
+            if (frameData) {
+                // Encode to H.264 with timestamp=0 to use internal real-time tracking
+                EncodedFrame encoded = {0};
+                if (H264Encoder_EncodeFrame(&g_encoder, frameData, 0, &encoded)) {
+                    // Add to buffer (buffer takes ownership)
+                    SampleBuffer_Add(&g_sampleBuffer, &encoded);
+                }
+                
+                frameCount++;
+                
+                // Periodic log
+                if (frameCount - lastLogFrame >= fps * 5) {  // Every 5 seconds
+                    double duration = SampleBuffer_GetDuration(&g_sampleBuffer);
+                    size_t memMB = SampleBuffer_GetMemoryUsage(&g_sampleBuffer) / (1024 * 1024);
+                    int count = SampleBuffer_GetCount(&g_sampleBuffer);
+                    ReplayLog("Status: %d frames, %.1fs buffered, %zu MB RAM\n", 
+                              count, duration, memMB);
+                    lastLogFrame = frameCount;
+                }
+            }
+        } else {
+            Sleep(1);
+        }
+    }
+    
+    // Cleanup
+    ReplayLog("Shutting down...\n");
+    
+    // Flush encoder
+    EncodedFrame flushed = {0};
+    while (H264Encoder_Flush(&g_encoder, &flushed)) {
+        SampleBuffer_Add(&g_sampleBuffer, &flushed);
+    }
+    
+    H264Encoder_Shutdown(&g_encoder);
+    SampleBuffer_Shutdown(&g_sampleBuffer);
+    
+    ReplayLog("BufferThread exit\n");
+    return 0;
+}

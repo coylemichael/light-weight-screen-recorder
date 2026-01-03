@@ -33,6 +33,12 @@ typedef enum {
     QUALITY_LOSSLESS
 } QualityPreset;
 
+// Replay buffer storage types
+typedef enum {
+    REPLAY_STORAGE_RAM = 0,    // Store frames in RAM (fast, high RAM usage)
+    REPLAY_STORAGE_DISK = 1    // Store as temp files (slower, lower RAM)
+} ReplayStorageType;
+
 typedef struct {
     // Recording settings
     OutputFormat outputFormat;
@@ -43,6 +49,17 @@ typedef struct {
     
     // UI settings
     int cancelKey;  // Virtual key code to close overlay (default: VK_ESCAPE)
+    
+    // Replay buffer settings (instant replay)
+    BOOL replayEnabled;              // Enable replay buffer
+    ReplayStorageType replayStorageType;  // RAM or disk storage
+    int replayDuration;              // Buffer duration in seconds (60-1200)
+    CaptureMode replayCaptureSource; // What to capture for replay
+    int replayMonitorIndex;          // Which monitor (if MODE_MONITOR)
+    int replaySaveKey;               // Hotkey to save replay (default: F9)
+    RECT replayAreaRect;             // Custom area for replay (if MODE_AREA)
+    int replayAspectRatio;           // 0=Native, 1=16:9, 2=16:10, 3=4:3, 4=21:9, 5=32:9
+    int replayFPS;                   // 30 or 60
     
     // Save location
     char savePath[MAX_PATH];

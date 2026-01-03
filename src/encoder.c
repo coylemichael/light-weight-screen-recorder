@@ -8,33 +8,37 @@
 #include <stdio.h>
 #include <time.h>
 
-// Quality to bitrate mapping for screen recording
-// Screen content (text, UI) needs higher bitrates than video for sharp edges
-// Bitrates scale with resolution for consistent quality across sizes
+// Quality to bitrate mapping - matches NVIDIA ShadowPlay
+// High=90, Medium=75, Low=60 Mbps base (scales with resolution)
 static UINT32 GetBitrate(int width, int height, int fps, QualityPreset quality) {
-    // Base bitrate per megapixel at 60fps
-    // These are tuned for screen content which is more demanding than video
-    float mbpPerMegapixel;
+    // ShadowPlay-style fixed bitrates (in Mbps)
+    // These are for 1440p - we scale for other resolutions
+    float baseMbps;
     
     switch (quality) {
-        case QUALITY_LOW:      mbpPerMegapixel = 8.0f;  break;  // ~30 Mbps at 1440p60
-        case QUALITY_MEDIUM:   mbpPerMegapixel = 15.0f; break;  // ~55 Mbps at 1440p60  
-        case QUALITY_HIGH:     mbpPerMegapixel = 25.0f; break;  // ~90 Mbps at 1440p60
-        case QUALITY_LOSSLESS: mbpPerMegapixel = 40.0f; break;  // ~150 Mbps at 1440p60 (visually lossless)
-        default:               mbpPerMegapixel = 40.0f; break;
+        case QUALITY_LOW:      baseMbps = 60.0f;  break;
+        case QUALITY_MEDIUM:   baseMbps = 75.0f;  break;
+        case QUALITY_HIGH:     baseMbps = 90.0f;  break;
+        case QUALITY_LOSSLESS: baseMbps = 130.0f; break;
+        default:               baseMbps = 75.0f;  break;
     }
     
-    // Calculate megapixels and scale bitrate
+    // Scale for resolution (base is 2560x1440 = 3.7MP)
     float megapixels = (float)(width * height) / 1000000.0f;
-    float fpsScale = (float)fps / 60.0f; // Scale for framerate
+    float resScale = megapixels / 3.7f;
+    if (resScale < 0.5f) resScale = 0.5f;
+    if (resScale > 2.5f) resScale = 2.5f;
+    
+    // Scale for FPS (base is 60fps)
+    float fpsScale = (float)fps / 60.0f;
     if (fpsScale < 0.5f) fpsScale = 0.5f;
-    if (fpsScale > 1.0f) fpsScale = 1.0f; // Don't exceed 60fps scaling
+    if (fpsScale > 2.0f) fpsScale = 2.0f;
     
-    UINT32 bitrate = (UINT32)(megapixels * mbpPerMegapixel * fpsScale * 1000000.0f);
+    UINT32 bitrate = (UINT32)(baseMbps * resScale * fpsScale * 1000000.0f);
     
-    // Reasonable bounds: 5 Mbps minimum, 200 Mbps maximum
-    if (bitrate < 5000000) bitrate = 5000000;
-    if (bitrate > 200000000) bitrate = 200000000;
+    // Bounds: 10 Mbps minimum, 150 Mbps maximum
+    if (bitrate < 10000000) bitrate = 10000000;
+    if (bitrate > 150000000) bitrate = 150000000;
     
     return bitrate;
 }
@@ -89,16 +93,24 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     
     // Create sink writer attributes
     IMFAttributes* attributes = NULL;
-    HRESULT hr = MFCreateAttributes(&attributes, 1);
+    HRESULT hr = MFCreateAttributes(&attributes, 3);
     if (FAILED(hr)) return FALSE;
     
-    // Enable hardware encoding if available
-    hr = attributes->lpVtbl->SetUINT32(attributes, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+    // Enable hardware encoding (NVENC, Intel QSV, AMD VCE)
+    attributes->lpVtbl->SetUINT32(attributes, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+    
+    // Low latency mode - faster encoding, essential for real-time replay buffer
+    attributes->lpVtbl->SetUINT32(attributes, &MF_LOW_LATENCY, TRUE);
     
     // Create sink writer
     hr = MFCreateSinkWriterFromURL(wPath, NULL, attributes, &state->sinkWriter);
     attributes->lpVtbl->Release(attributes);
-    if (FAILED(hr)) return FALSE;
+    if (FAILED(hr)) {
+        // Debug: try to log error
+        FILE* dbg = fopen("replay_debug.txt", "a");
+        if (dbg) { fprintf(dbg, "SinkWriter creation failed: 0x%08lx\n", hr); fclose(dbg); }
+        return FALSE;
+    }
     
     // Configure output media type (encoded)
     IMFMediaType* outputType = NULL;
@@ -116,12 +128,11 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     outputType->lpVtbl->SetUINT32(outputType, &MF_MT_AVG_BITRATE, bitrate);
     outputType->lpVtbl->SetUINT32(outputType, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
     
-    // Use H.264 High Profile for better compression efficiency at high bitrates
+    // Set H.264 profile (let encoder pick level automatically)
     if (format == FORMAT_MP4 || format == FORMAT_AVI) {
         // eAVEncH264VProfile_High = 100
         outputType->lpVtbl->SetUINT32(outputType, &MF_MT_MPEG2_PROFILE, 100);
-        // Level 5.1 supports up to 4K60
-        outputType->lpVtbl->SetUINT32(outputType, &MF_MT_MPEG2_LEVEL, 51);
+        // Don't set level - let encoder determine based on resolution/fps
     }
     
     // Set frame size
@@ -139,6 +150,8 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     hr = state->sinkWriter->lpVtbl->AddStream(state->sinkWriter, outputType, &state->videoStreamIndex);
     outputType->lpVtbl->Release(outputType);
     if (FAILED(hr)) {
+        FILE* dbg = fopen("replay_debug.txt", "a");
+        if (dbg) { fprintf(dbg, "AddStream failed: 0x%08lx\n", hr); fclose(dbg); }
         state->sinkWriter->lpVtbl->Release(state->sinkWriter);
         return FALSE;
     }
@@ -166,6 +179,8 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
                                                        inputType, NULL);
     inputType->lpVtbl->Release(inputType);
     if (FAILED(hr)) {
+        FILE* dbg = fopen("replay_debug.txt", "a");
+        if (dbg) { fprintf(dbg, "SetInputMediaType failed: 0x%08lx\n", hr); fclose(dbg); }
         state->sinkWriter->lpVtbl->Release(state->sinkWriter);
         return FALSE;
     }
@@ -173,6 +188,8 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     // Start writing
     hr = state->sinkWriter->lpVtbl->BeginWriting(state->sinkWriter);
     if (FAILED(hr)) {
+        FILE* dbg = fopen("replay_debug.txt", "a");
+        if (dbg) { fprintf(dbg, "BeginWriting failed: 0x%08lx\n", hr); fclose(dbg); }
         state->sinkWriter->lpVtbl->Release(state->sinkWriter);
         return FALSE;
     }

@@ -38,14 +38,19 @@
 #include "encoder.h"
 #include "overlay.h"
 #include "settings.h"
+#include "replay_buffer.h"
 
 // Global state
 AppConfig g_config;
 CaptureState g_capture;
+ReplayBufferState g_replayBuffer;
 BOOL g_isRecording = FALSE;
 BOOL g_isSelecting = FALSE;
 HWND g_overlayWnd = NULL;
 HWND g_controlWnd = NULL;
+
+// Hotkey ID for replay save
+#define HOTKEY_REPLAY_SAVE 1
 
 // Mutex for single instance detection
 HANDLE g_mutex = NULL;
@@ -108,6 +113,16 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         return 1;
     }
     
+    // Initialize replay buffer
+    ReplayBuffer_Init(&g_replayBuffer);
+    
+    // Start replay buffer if enabled in config
+    if (g_config.replayEnabled) {
+        ReplayBuffer_Start(&g_replayBuffer, &g_config);
+        // Register global hotkey for saving replay
+        RegisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE, 0, g_config.replaySaveKey);
+    }
+    
     // Message loop
     MSG msg;
     while (GetMessage(&msg, NULL, 0, 0)) {
@@ -116,6 +131,8 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     }
     
     // Cleanup
+    UnregisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE);
+    ReplayBuffer_Shutdown(&g_replayBuffer);
     Config_Save(&g_config);
     Capture_Shutdown(&g_capture);
     MFShutdown();
