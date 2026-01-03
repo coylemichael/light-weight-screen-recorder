@@ -4,44 +4,10 @@
  */
 
 #include "encoder.h"
+#include "util.h"
 #include <mferror.h>
 #include <stdio.h>
 #include <time.h>
-
-// Quality to bitrate mapping - matches NVIDIA ShadowPlay
-// High=90, Medium=75, Low=60 Mbps base (scales with resolution)
-static UINT32 GetBitrate(int width, int height, int fps, QualityPreset quality) {
-    // ShadowPlay-style fixed bitrates (in Mbps)
-    // These are for 1440p - we scale for other resolutions
-    float baseMbps;
-    
-    switch (quality) {
-        case QUALITY_LOW:      baseMbps = 60.0f;  break;
-        case QUALITY_MEDIUM:   baseMbps = 75.0f;  break;
-        case QUALITY_HIGH:     baseMbps = 90.0f;  break;
-        case QUALITY_LOSSLESS: baseMbps = 130.0f; break;
-        default:               baseMbps = 75.0f;  break;
-    }
-    
-    // Scale for resolution (base is 2560x1440 = 3.7MP)
-    float megapixels = (float)(width * height) / 1000000.0f;
-    float resScale = megapixels / 3.7f;
-    if (resScale < 0.5f) resScale = 0.5f;
-    if (resScale > 2.5f) resScale = 2.5f;
-    
-    // Scale for FPS (base is 60fps)
-    float fpsScale = (float)fps / 60.0f;
-    if (fpsScale < 0.5f) fpsScale = 0.5f;
-    if (fpsScale > 2.0f) fpsScale = 2.0f;
-    
-    UINT32 bitrate = (UINT32)(baseMbps * resScale * fpsScale * 1000000.0f);
-    
-    // Bounds: 10 Mbps minimum, 150 Mbps maximum
-    if (bitrate < 10000000) bitrate = 10000000;
-    if (bitrate > 150000000) bitrate = 150000000;
-    
-    return bitrate;
-}
 
 static GUID GetVideoFormat(OutputFormat format) {
     switch (format) {
@@ -121,7 +87,7 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     }
     
     GUID videoFormat = GetVideoFormat(format);
-    UINT32 bitrate = GetBitrate(width, height, fps, quality);
+    UINT32 bitrate = Util_CalculateBitrate(width, height, fps, quality);
     
     outputType->lpVtbl->SetGUID(outputType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
     outputType->lpVtbl->SetGUID(outputType, &MF_MT_SUBTYPE, &videoFormat);

@@ -4,6 +4,9 @@
  */
 
 #include "h264_encoder.h"
+#include "util.h"
+#include "logger.h"
+#include "color_convert.h"
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mftransform.h>
@@ -21,50 +24,8 @@ DEFINE_GUID(IID_ICodecAPI, 0x901db4c7, 0x31ce, 0x41a2, 0x85, 0xdc, 0x8f, 0xa0, 0
 static const GUID MFT_CATEGORY_VIDEO_ENCODER_GUID = 
     {0xf79eac7d, 0xe545, 0x4387, {0xbd, 0xee, 0xd6, 0x47, 0xd7, 0xbd, 0xe4, 0x2a}};
 
-// Debug logging - use shared log file
-extern FILE* g_replayLog;
-
-static void H264Log(const char* fmt, ...) {
-    if (!g_replayLog) {
-        g_replayLog = fopen("replay_debug.txt", "a");
-    }
-    if (g_replayLog) {
-        va_list args;
-        va_start(args, fmt);
-        vfprintf(g_replayLog, fmt, args);
-        va_end(args);
-        fflush(g_replayLog);
-    }
-}
-
-// Get bitrate based on quality preset (matches ShadowPlay)
-static UINT32 GetBitrate(int width, int height, int fps, QualityPreset quality) {
-    float baseMbps;
-    switch (quality) {
-        case QUALITY_LOW:      baseMbps = 60.0f;  break;
-        case QUALITY_MEDIUM:   baseMbps = 75.0f;  break;
-        case QUALITY_HIGH:     baseMbps = 90.0f;  break;
-        case QUALITY_LOSSLESS: baseMbps = 130.0f; break;
-        default:               baseMbps = 75.0f;  break;
-    }
-    
-    // Scale for resolution (base is 2560x1440 = 3.7MP)
-    float megapixels = (float)(width * height) / 1000000.0f;
-    float resScale = megapixels / 3.7f;
-    if (resScale < 0.5f) resScale = 0.5f;
-    if (resScale > 2.5f) resScale = 2.5f;
-    
-    // Scale for FPS (base is 60fps)
-    float fpsScale = (float)fps / 60.0f;
-    if (fpsScale < 0.5f) fpsScale = 0.5f;
-    if (fpsScale > 2.0f) fpsScale = 2.0f;
-    
-    UINT32 bitrate = (UINT32)(baseMbps * resScale * fpsScale * 1000000.0f);
-    if (bitrate < 10000000) bitrate = 10000000;
-    if (bitrate > 150000000) bitrate = 150000000;
-    
-    return bitrate;
-}
+// Alias for logging
+#define H264Log Logger_Log
 
 // Find H.264 encoder - prefer software for simplicity (no D3D11 required)
 static IMFTransform* FindH264Encoder(BOOL* isHardware) {
@@ -143,37 +104,6 @@ static IMFTransform* FindH264Encoder(BOOL* isHardware) {
     return encoder;
 }
 
-// Convert BGRA to NV12 format
-// NV12: Y plane (width * height), then interleaved UV plane (width * height / 2)
-static void ConvertBGRAtoNV12(const BYTE* bgra, BYTE* nv12, int width, int height) {
-    int ySize = width * height;
-    BYTE* yPlane = nv12;
-    BYTE* uvPlane = nv12 + ySize;
-    
-    // Process 2x2 blocks for UV subsampling
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            int srcIdx = (y * width + x) * 4;
-            int b = bgra[srcIdx + 0];
-            int g = bgra[srcIdx + 1];
-            int r = bgra[srcIdx + 2];
-            
-            // BT.601 conversion
-            int yVal = ((66 * r + 129 * g + 25 * b + 128) >> 8) + 16;
-            yPlane[y * width + x] = (BYTE)(yVal < 0 ? 0 : (yVal > 255 ? 255 : yVal));
-            
-            // UV for every 2x2 block (top-left pixel)
-            if ((x % 2 == 0) && (y % 2 == 0)) {
-                int uVal = ((-38 * r - 74 * g + 112 * b + 128) >> 8) + 128;
-                int vVal = ((112 * r - 94 * g - 18 * b + 128) >> 8) + 128;
-                int uvIdx = (y / 2) * width + x;
-                uvPlane[uvIdx] = (BYTE)(uVal < 0 ? 0 : (uVal > 255 ? 255 : uVal));
-                uvPlane[uvIdx + 1] = (BYTE)(vVal < 0 ? 0 : (vVal > 255 ? 255 : vVal));
-            }
-        }
-    }
-}
-
 // Create input sample from BGRA data (converts to NV12)
 static IMFSample* CreateInputSample(H264MemoryEncoder* enc, const BYTE* bgraData, LONGLONG timestamp) {
     HRESULT hr;
@@ -194,7 +124,7 @@ static IMFSample* CreateInputSample(H264MemoryEncoder* enc, const BYTE* bgraData
     }
     
     // Convert BGRA to NV12
-    ConvertBGRAtoNV12(bgraData, bufferData, enc->width, enc->height);
+    ColorConvert_BGRAtoNV12(bgraData, bufferData, enc->width, enc->height);
     
     buffer->lpVtbl->Unlock(buffer);
     buffer->lpVtbl->SetCurrentLength(buffer, nv12Size);
@@ -332,7 +262,7 @@ BOOL H264Encoder_Init(H264MemoryEncoder* enc, int width, int height, int fps, Qu
     enc->height = height;
     enc->fps = fps;
     enc->quality = quality;
-    enc->bitrate = GetBitrate(width, height, fps, quality);
+    enc->bitrate = Util_CalculateBitrate(width, height, fps, quality);
     enc->frameDuration = 10000000ULL / fps;
     
     H264Log("H264Encoder_Init: %dx%d @ %d fps, bitrate=%u\n", width, height, fps, enc->bitrate);

@@ -39,6 +39,7 @@
 #include "overlay.h"
 #include "settings.h"
 #include "replay_buffer.h"
+#include "logger.h"
 
 // Global state
 AppConfig g_config;
@@ -116,6 +117,9 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     // Initialize replay buffer
     ReplayBuffer_Init(&g_replayBuffer);
     
+    // Initialize logger for replay debugging
+    Logger_Init("replay_debug.txt", "w");
+    
     // Start replay buffer if enabled in config
     if (g_config.replayEnabled) {
         ReplayBuffer_Start(&g_replayBuffer, &g_config);
@@ -133,6 +137,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     // Cleanup
     UnregisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE);
     ReplayBuffer_Shutdown(&g_replayBuffer);
+    Logger_Shutdown();
     Config_Save(&g_config);
     Capture_Shutdown(&g_capture);
     MFShutdown();

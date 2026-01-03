@@ -10,6 +10,8 @@
 #include "sample_buffer.h"
 #include "capture.h"
 #include "config.h"
+#include "util.h"
+#include "logger.h"
 #include <stdio.h>
 
 // Global state
@@ -22,21 +24,8 @@ extern AppConfig g_config;
 
 static DWORD WINAPI BufferThreadProc(LPVOID param);
 
-// Debug log - shared with h264_encoder.c
-FILE* g_replayLog = NULL;
-
-static void ReplayLog(const char* fmt, ...) {
-    if (!g_replayLog) {
-        g_replayLog = fopen("replay_debug.txt", "w");
-    }
-    if (g_replayLog) {
-        va_list args;
-        va_start(args, fmt);
-        vfprintf(g_replayLog, fmt, args);
-        va_end(args);
-        fflush(g_replayLog);
-    }
-}
+// Alias for logging
+#define ReplayLog Logger_Log
 
 // ============================================================================
 // PUBLIC API
@@ -54,10 +43,7 @@ void ReplayBuffer_Shutdown(ReplayBufferState* state) {
     ReplayBuffer_Stop(state);
     DeleteCriticalSection(&state->lock);
     
-    if (g_replayLog) {
-        fclose(g_replayLog);
-        g_replayLog = NULL;
-    }
+    // Logger cleanup is handled by Logger_Shutdown in main.c
 }
 
 BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
@@ -177,41 +163,18 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     // Apply aspect ratio adjustment if set
     if (g_config.replayAspectRatio > 0) {
         int ratioW = 0, ratioH = 0;
-        switch (g_config.replayAspectRatio) {
-            case 1: ratioW = 16; ratioH = 9; break;   // 16:9
-            case 2: ratioW = 9; ratioH = 16; break;   // 9:16
-            case 3: ratioW = 1; ratioH = 1; break;    // 1:1
-            case 4: ratioW = 4; ratioH = 5; break;    // 4:5
-            case 5: ratioW = 16; ratioH = 10; break;  // 16:10
-            case 6: ratioW = 4; ratioH = 3; break;    // 4:3
-            case 7: ratioW = 21; ratioH = 9; break;   // 21:9
-            case 8: ratioW = 32; ratioH = 9; break;   // 32:9
-        }
+        Util_GetAspectRatioDimensions(g_config.replayAspectRatio, &ratioW, &ratioH);
         
         if (ratioW > 0 && ratioH > 0) {
             int oldW = width, oldH = height;
-            // Calculate new dimensions maintaining aspect ratio, fitting within original bounds
-            if (width * ratioH > height * ratioW) {
-                // Monitor is wider than target - fit to height, crop width
-                width = (height * ratioW) / ratioH;
-            } else {
-                // Monitor is taller than target - fit to width, crop height
-                height = (width * ratioH) / ratioW;
-            }
-            // Ensure dimensions are even (required for H.264)
-            width = (width / 2) * 2;
-            height = (height / 2) * 2;
             
-            // Center the crop region
-            int cropX = (oldW - width) / 2;
-            int cropY = (oldH - height) / 2;
-            rect.left += cropX;
-            rect.top += cropY;
-            rect.right = rect.left + width;
-            rect.bottom = rect.top + height;
+            // Use utility to calculate aspect-corrected rect
+            rect = Util_CalculateAspectRect(rect, ratioW, ratioH);
+            width = rect.right - rect.left;
+            height = rect.bottom - rect.top;
             
-            ReplayLog("Aspect ratio %d:%d applied: %dx%d -> %dx%d (crop offset: %d,%d)\n",
-                      ratioW, ratioH, oldW, oldH, width, height, cropX, cropY);
+            ReplayLog("Aspect ratio %d:%d applied: %dx%d -> %dx%d\n",
+                      ratioW, ratioH, oldW, oldH, width, height);
         }
     }
     

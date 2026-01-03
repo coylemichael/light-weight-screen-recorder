@@ -4,27 +4,16 @@
  */
 
 #include "sample_buffer.h"
+#include "util.h"
+#include "logger.h"
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
 #include <mferror.h>
 #include <stdio.h>
 
-// Debug logging - use shared log file from replay_buffer.c
-extern FILE* g_replayLog;
-
-static void BufLog(const char* fmt, ...) {
-    if (!g_replayLog) {
-        g_replayLog = fopen("replay_debug.txt", "a");
-    }
-    if (g_replayLog) {
-        va_list args;
-        va_start(args, fmt);
-        vfprintf(g_replayLog, fmt, args);
-        va_end(args);
-        fflush(g_replayLog);
-    }
-}
+// Alias for logging
+#define BufLog Logger_Log
 
 // Free a single sample
 static void FreeSample(BufferedSample* sample) {
@@ -261,17 +250,8 @@ BOOL SampleBuffer_WriteToFile(SampleBuffer* buf, const char* outputPath) {
         return FALSE;
     }
     
-    // Calculate bitrate
-    float baseMbps = (buf->quality == QUALITY_HIGH) ? 90.0f : 
-                     (buf->quality == QUALITY_MEDIUM) ? 75.0f : 60.0f;
-    float megapixels = (float)(buf->width * buf->height) / 1000000.0f;
-    float resScale = megapixels / 3.7f;
-    if (resScale < 0.5f) resScale = 0.5f;
-    if (resScale > 2.5f) resScale = 2.5f;
-    float fpsScale = (float)buf->fps / 60.0f;
-    if (fpsScale < 0.5f) fpsScale = 0.5f;
-    if (fpsScale > 2.0f) fpsScale = 2.0f;
-    UINT32 bitrate = (UINT32)(baseMbps * resScale * fpsScale * 1000000.0f);
+    // Calculate bitrate using shared utility
+    UINT32 bitrate = Util_CalculateBitrate(buf->width, buf->height, buf->fps, buf->quality);
     
     outputType->lpVtbl->SetGUID(outputType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
     outputType->lpVtbl->SetGUID(outputType, &MF_MT_SUBTYPE, &MFVideoFormat_H264);
@@ -357,10 +337,9 @@ BOOL SampleBuffer_WriteToFile(SampleBuffer* buf, const char* outputPath) {
                     IMFSample* mfSample = NULL;
                     hr = MFCreateSample(&mfSample);
                     if (SUCCEEDED(hr)) {
-                        // Precise timestamp: avoids cumulative rounding errors
-                        LONGLONG sampleTime = (LONGLONG)frameNumber * 10000000LL / buf->fps;
-                        LONGLONG nextTime = (LONGLONG)(frameNumber + 1) * 10000000LL / buf->fps;
-                        LONGLONG sampleDuration = nextTime - sampleTime;
+                        // Precise timestamp using utility function
+                        LONGLONG sampleTime = Util_CalculateTimestamp(frameNumber, buf->fps);
+                        LONGLONG sampleDuration = Util_CalculateFrameDuration(frameNumber, buf->fps);
                         
                         mfSample->lpVtbl->AddBuffer(mfSample, mfBuffer);
                         mfSample->lpVtbl->SetSampleTime(mfSample, sampleTime);
