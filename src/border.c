@@ -345,7 +345,9 @@ static LRESULT CALLBACK AreaSelectorWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             // Draw resize handles at corners (only if not locked)
             if (!g_areaLocked) {
                 HBRUSH handleBrush = CreateSolidBrush(RGB(255, 255, 255));
+                HPEN handlePen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));  // White pen to match fill
                 SelectObject(hdc, handleBrush);
+                SelectObject(hdc, handlePen);
                 
                 // Corner handles
                 Rectangle(hdc, 0, 0, RESIZE_HANDLE_SIZE, RESIZE_HANDLE_SIZE);
@@ -353,6 +355,8 @@ static LRESULT CALLBACK AreaSelectorWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                 Rectangle(hdc, 0, rc.bottom - RESIZE_HANDLE_SIZE, RESIZE_HANDLE_SIZE, rc.bottom);
                 Rectangle(hdc, rc.right - RESIZE_HANDLE_SIZE, rc.bottom - RESIZE_HANDLE_SIZE, rc.right, rc.bottom);
                 DeleteObject(handleBrush);
+                DeleteObject(handlePen);
+                SelectObject(hdc, borderPen);  // Restore border pen
             }
             
             // Draw text in center

@@ -17,8 +17,12 @@ void ActionToolbar_Show(int centerX, int topY);
 void ActionToolbar_Hide(void);
 
 // Set button click callbacks
-void ActionToolbar_SetCallbacks(void (*onRecord)(void), void (*onCopy)(void), 
-                                 void (*onSave)(void), void (*onMarkup)(void));
+// onMinimize: called when "-" button clicked (minimize to tray)
+// onRecord: called when record button clicked
+// onClose: called when "X" button clicked
+// onSettings: called when "..." button clicked
+void ActionToolbar_SetCallbacks(void (*onMinimize)(void), void (*onRecord)(void), 
+                                 void (*onClose)(void), void (*onSettings)(void));
 
 // Get the toolbar window handle (for z-order management, etc.)
 HWND ActionToolbar_GetWindow(void);

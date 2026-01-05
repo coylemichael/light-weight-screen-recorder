@@ -85,11 +85,12 @@ static HINSTANCE g_hInstance = NULL;
 static BOOL g_initialized = FALSE;
 
 // Button definitions
-#define BTN_COUNT 4
-#define BTN_RECORD 0
-#define BTN_COPY   1
-#define BTN_SAVE   2
-#define BTN_MARKUP 3
+#define BTN_COUNT 5
+#define BTN_MINIMIZE 0
+#define BTN_RECORD   1
+#define BTN_CLOSE    2
+#define BTN_SETTINGS 3
+#define BTN_UNUSED   4  // Reserved
 
 typedef struct {
     RECT rect;
@@ -102,13 +103,13 @@ static int g_hoveredButton = -1;
 static int g_pressedButton = -1;
 
 // Callbacks
+static void (*g_onMinimize)(void) = NULL;
 static void (*g_onRecord)(void) = NULL;
-static void (*g_onCopy)(void) = NULL;
-static void (*g_onSave)(void) = NULL;
-static void (*g_onMarkup)(void) = NULL;
+static void (*g_onClose)(void) = NULL;
+static void (*g_onSettings)(void) = NULL;
 
 // Toolbar dimensions
-#define TOOLBAR_WIDTH 244
+#define TOOLBAR_WIDTH 180
 #define TOOLBAR_HEIGHT 36
 #define CORNER_RADIUS 10
 #define BTN_HEIGHT 24
@@ -346,21 +347,33 @@ static LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
     switch (msg) {
         case WM_CREATE: {
             // Setup button rectangles
+            // Buttons: [-] [●] [✕] [Settings]
             int x = BTN_MARGIN;
-            int btnWidths[] = {60, 50, 50, 60};
+            int smallBtnWidth = 32;    // For symbol buttons
+            int settingsBtnWidth = 60; // For "Settings" text
+            int btnGap = BTN_GAP;
             
-            g_buttons[BTN_RECORD].text = L"Record";
-            g_buttons[BTN_COPY].text = L"Copy";
-            g_buttons[BTN_SAVE].text = L"Save";
-            g_buttons[BTN_MARKUP].text = L"Markup";
+            g_buttons[BTN_MINIMIZE].text = L"\u2014";  // Em dash (horizontal line)
+            g_buttons[BTN_RECORD].text = L"\u25CF";   // Filled circle
+            g_buttons[BTN_CLOSE].text = L"\u2715";    // Multiplication X
+            g_buttons[BTN_SETTINGS].text = L"Settings";
             
-            for (int i = 0; i < BTN_COUNT; i++) {
+            // Layout symbol buttons
+            for (int i = 0; i <= BTN_CLOSE; i++) {
                 g_buttons[i].rect.left = x;
                 g_buttons[i].rect.top = (TOOLBAR_HEIGHT - BTN_HEIGHT) / 2;
-                g_buttons[i].rect.right = x + btnWidths[i];
+                g_buttons[i].rect.right = x + smallBtnWidth;
                 g_buttons[i].rect.bottom = g_buttons[i].rect.top + BTN_HEIGHT;
-                x += btnWidths[i] + BTN_GAP;
+                x += smallBtnWidth + btnGap;
             }
+            // Settings button is wider
+            g_buttons[BTN_SETTINGS].rect.left = x;
+            g_buttons[BTN_SETTINGS].rect.top = (TOOLBAR_HEIGHT - BTN_HEIGHT) / 2;
+            g_buttons[BTN_SETTINGS].rect.right = x + settingsBtnWidth;
+            g_buttons[BTN_SETTINGS].rect.bottom = g_buttons[BTN_SETTINGS].rect.top + BTN_HEIGHT;
+            
+            // BTN_UNUSED has zero rect (not displayed)
+            g_buttons[BTN_UNUSED].rect = (RECT){0, 0, 0, 0};
             return 0;
         }
         
@@ -408,10 +421,10 @@ static LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             if (btn >= 0 && btn == g_pressedButton) {
                 // Button clicked!
                 switch (btn) {
-                    case BTN_RECORD: if (g_onRecord) g_onRecord(); break;
-                    case BTN_COPY:   if (g_onCopy) g_onCopy(); break;
-                    case BTN_SAVE:   if (g_onSave) g_onSave(); break;
-                    case BTN_MARKUP: if (g_onMarkup) g_onMarkup(); break;
+                    case BTN_MINIMIZE: if (g_onMinimize) g_onMinimize(); break;
+                    case BTN_RECORD:   if (g_onRecord) g_onRecord(); break;
+                    case BTN_CLOSE:    if (g_onClose) g_onClose(); break;
+                    case BTN_SETTINGS: if (g_onSettings) g_onSettings(); break;
                 }
             }
             
@@ -489,12 +502,12 @@ void ActionToolbar_Hide(void) {
     }
 }
 
-void ActionToolbar_SetCallbacks(void (*onRecord)(void), void (*onCopy)(void), 
-                                 void (*onSave)(void), void (*onMarkup)(void)) {
+void ActionToolbar_SetCallbacks(void (*onMinimize)(void), void (*onRecord)(void), 
+                                 void (*onClose)(void), void (*onSettings)(void)) {
+    g_onMinimize = onMinimize;
     g_onRecord = onRecord;
-    g_onCopy = onCopy;
-    g_onSave = onSave;
-    g_onMarkup = onMarkup;
+    g_onClose = onClose;
+    g_onSettings = onSettings;
 }
 
 HWND ActionToolbar_GetWindow(void) {

@@ -10,6 +10,7 @@
 #include <commctrl.h>
 #include <commdlg.h>
 #include <shlobj.h>
+#include <shellapi.h>   // For system tray (Shell_NotifyIcon)
 #include <dwmapi.h>
 #include <mmsystem.h>  // For timeBeginPeriod/timeEndPeriod
 #include <stdio.h>
@@ -129,6 +130,7 @@ extern HWND g_controlWnd;
 #define ID_MODE_ALL        1004
 #define ID_BTN_CLOSE       1005
 #define ID_BTN_STOP        1006
+#define ID_BTN_MINIMIZE    1020
 #define ID_CHK_MOUSE       1007
 #define ID_CHK_BORDER      1008
 #define ID_CMB_FORMAT      1009
@@ -145,6 +147,7 @@ extern HWND g_controlWnd;
 #define ID_TIMER_RECORD    2001
 #define ID_TIMER_LIMIT     2002
 #define ID_TIMER_DISPLAY   2003
+#define ID_TIMER_HOVER     2004  // Timer to update hover state on icon buttons
 
 // Replay buffer settings control IDs
 #define ID_CHK_REPLAY_ENABLED   4001
@@ -171,6 +174,11 @@ extern HWND g_controlWnd;
 #define ID_ACTION_COPY     3002
 #define ID_ACTION_SAVE     3003
 #define ID_ACTION_MARKUP   3004
+
+// System tray
+#define WM_TRAYICON        (WM_USER + 100)
+#define ID_TRAY_SHOW       6001
+#define ID_TRAY_EXIT       6002
 
 // Selection states
 typedef enum {
@@ -210,6 +218,9 @@ static volatile BOOL g_stopRecording = FALSE;
 static DWORD g_recordStartTime = 0;
 static BOOL g_recordingPanelHovered = FALSE;  // Hover state for recording panel
 static BOOL g_waitingForHotkey = FALSE;       // Waiting for user to press hotkey
+static HWND g_lastHoveredIconBtn = NULL;      // Track which icon button was last hovered
+static BOOL g_minimizedToTray = FALSE;        // Currently minimized to system tray
+static NOTIFYICONDATAA g_trayIcon = {0};      // System tray icon data
 
 // Handle size
 #define HANDLE_SIZE 10
@@ -230,6 +241,18 @@ static void UpdateTimerDisplay(void);
 static void ShowActionToolbar(BOOL show);
 static void CaptureToClipboard(void);
 static void CaptureToFile(void);
+
+// System tray functions
+static void AddTrayIcon(void);
+static void RemoveTrayIcon(void);
+static void MinimizeToTray(void);
+static void RestoreFromTray(void);
+
+// Action toolbar callbacks
+static void ActionToolbar_OnMinimize(void);
+static void ActionToolbar_OnRecord(void);
+static void ActionToolbar_OnClose(void);
+static void ActionToolbar_OnSettings(void);
 
 // Initialize GDI+ for anti-aliased drawing
 static BOOL InitGdiPlus(void) {
@@ -725,6 +748,299 @@ static void CaptureToFile(void) {
     ShowWindow(g_controlWnd, SW_SHOW);
 }
 
+// ============================================================================
+// System Tray Functions
+// ============================================================================
+
+// Load icon from PNG file using GDI+ and scale to proper tray icon size
+static HICON LoadIconFromPNG(const char* filename) {
+    if (!GdipCreateFromHDC) return NULL;  // GDI+ not loaded
+    
+    // Convert filename to wide string
+    WCHAR wFilename[MAX_PATH];
+    MultiByteToWideChar(CP_ACP, 0, filename, -1, wFilename, MAX_PATH);
+    
+    // Load GDI+ image functions
+    typedef int (WINAPI *GdipLoadImageFromFileFunc)(const WCHAR*, void**);
+    typedef int (WINAPI *GdipCreateHBITMAPFromBitmapFunc)(void*, HBITMAP*, DWORD);
+    typedef int (WINAPI *GdipGetImageWidthFunc)(void*, UINT*);
+    typedef int (WINAPI *GdipGetImageHeightFunc)(void*, UINT*);
+    typedef int (WINAPI *GdipDisposeImageFunc)(void*);
+    typedef int (WINAPI *GdipGetImageThumbnailFunc)(void*, UINT, UINT, void**, void*, void*);
+    
+    GdipLoadImageFromFileFunc pGdipLoadImageFromFile = 
+        (GdipLoadImageFromFileFunc)GetProcAddress(g_gdiplus, "GdipLoadImageFromFile");
+    GdipCreateHBITMAPFromBitmapFunc pGdipCreateHBITMAPFromBitmap = 
+        (GdipCreateHBITMAPFromBitmapFunc)GetProcAddress(g_gdiplus, "GdipCreateHBITMAPFromBitmap");
+    GdipGetImageWidthFunc pGdipGetImageWidth = 
+        (GdipGetImageWidthFunc)GetProcAddress(g_gdiplus, "GdipGetImageWidth");
+    GdipGetImageHeightFunc pGdipGetImageHeight = 
+        (GdipGetImageHeightFunc)GetProcAddress(g_gdiplus, "GdipGetImageHeight");
+    GdipDisposeImageFunc pGdipDisposeImage = 
+        (GdipDisposeImageFunc)GetProcAddress(g_gdiplus, "GdipDisposeImage");
+    GdipGetImageThumbnailFunc pGdipGetImageThumbnail =
+        (GdipGetImageThumbnailFunc)GetProcAddress(g_gdiplus, "GdipGetImageThumbnail");
+    
+    if (!pGdipLoadImageFromFile || !pGdipCreateHBITMAPFromBitmap || !pGdipDisposeImage) {
+        return NULL;
+    }
+    
+    void* image = NULL;
+    if (pGdipLoadImageFromFile(wFilename, &image) != 0 || !image) {
+        return NULL;
+    }
+    
+    // Get system tray icon size (typically 16x16 or scaled for DPI)
+    int iconWidth = GetSystemMetrics(SM_CXSMICON);
+    int iconHeight = GetSystemMetrics(SM_CYSMICON);
+    
+    // Scale image to proper tray icon size using thumbnail
+    void* scaledImage = NULL;
+    if (pGdipGetImageThumbnail) {
+        if (pGdipGetImageThumbnail(image, iconWidth, iconHeight, &scaledImage, NULL, NULL) == 0 && scaledImage) {
+            pGdipDisposeImage(image);
+            image = scaledImage;
+        }
+    }
+    
+    // Create HBITMAP from image
+    HBITMAP hBitmap = NULL;
+    pGdipCreateHBITMAPFromBitmap(image, &hBitmap, 0);
+    pGdipDisposeImage(image);
+    
+    if (!hBitmap) return NULL;
+    
+    // Create icon from bitmap at proper size
+    ICONINFO ii = {0};
+    ii.fIcon = TRUE;
+    ii.hbmMask = CreateBitmap(iconWidth, iconHeight, 1, 1, NULL);
+    ii.hbmColor = hBitmap;
+    
+    HICON hIcon = CreateIconIndirect(&ii);
+    
+    DeleteObject(ii.hbmMask);
+    DeleteObject(hBitmap);
+    
+    return hIcon;
+}
+
+static HICON g_trayHIcon = NULL;  // Keep track of custom icon for cleanup
+static void* g_settingsImage = NULL;  // GDI+ image for settings icon
+
+// Load PNG file as GDI+ image (returns void* that is a GpImage*)
+static void* LoadPNGImage(const char* filename) {
+    if (!g_gdiplus) return NULL;
+    
+    WCHAR wFilename[MAX_PATH];
+    MultiByteToWideChar(CP_ACP, 0, filename, -1, wFilename, MAX_PATH);
+    
+    typedef int (WINAPI *GdipLoadImageFromFileFunc)(const WCHAR*, void**);
+    GdipLoadImageFromFileFunc pGdipLoadImageFromFile = 
+        (GdipLoadImageFromFileFunc)GetProcAddress(g_gdiplus, "GdipLoadImageFromFile");
+    
+    if (!pGdipLoadImageFromFile) return NULL;
+    
+    void* image = NULL;
+    if (pGdipLoadImageFromFile(wFilename, &image) != 0) {
+        return NULL;
+    }
+    return image;
+}
+
+// Draw GDI+ image to HDC at specified rectangle with proper alpha blending
+static void DrawPNGImage(HDC hdc, void* image, int x, int y, int width, int height) {
+    if (!image || !GdipCreateFromHDC) return;
+    
+    typedef int (WINAPI *GdipDrawImageRectIFunc)(void*, void*, int, int, int, int);
+    typedef int (WINAPI *GdipSetCompositingModeFunc)(void*, int);
+    typedef int (WINAPI *GdipSetCompositingQualityFunc)(void*, int);
+    typedef int (WINAPI *GdipSetInterpolationModeFunc)(void*, int);
+    typedef int (WINAPI *GdipSetPixelOffsetModeFunc)(void*, int);
+    
+    GdipDrawImageRectIFunc pGdipDrawImageRectI = 
+        (GdipDrawImageRectIFunc)GetProcAddress(g_gdiplus, "GdipDrawImageRectI");
+    GdipSetCompositingModeFunc pGdipSetCompositingMode =
+        (GdipSetCompositingModeFunc)GetProcAddress(g_gdiplus, "GdipSetCompositingMode");
+    GdipSetCompositingQualityFunc pGdipSetCompositingQuality =
+        (GdipSetCompositingQualityFunc)GetProcAddress(g_gdiplus, "GdipSetCompositingQuality");
+    GdipSetInterpolationModeFunc pGdipSetInterpolationMode = 
+        (GdipSetInterpolationModeFunc)GetProcAddress(g_gdiplus, "GdipSetInterpolationMode");
+    GdipSetPixelOffsetModeFunc pGdipSetPixelOffsetMode =
+        (GdipSetPixelOffsetModeFunc)GetProcAddress(g_gdiplus, "GdipSetPixelOffsetMode");
+    
+    if (!pGdipDrawImageRectI) return;
+    
+    GpGraphics* graphics = NULL;
+    if (GdipCreateFromHDC(hdc, &graphics) != 0 || !graphics) return;
+    
+    // Set compositing mode to SourceOver for proper alpha blending
+    if (pGdipSetCompositingMode) {
+        pGdipSetCompositingMode(graphics, 0);  // CompositingModeSourceOver
+    }
+    
+    // Set high quality compositing
+    if (pGdipSetCompositingQuality) {
+        pGdipSetCompositingQuality(graphics, 4);  // CompositingQualityHighQuality
+    }
+    
+    // Set interpolation mode for smooth scaling
+    if (pGdipSetInterpolationMode) {
+        pGdipSetInterpolationMode(graphics, 7);  // InterpolationModeHighQualityBicubic
+    }
+    
+    // Set pixel offset mode for better rendering
+    if (pGdipSetPixelOffsetMode) {
+        pGdipSetPixelOffsetMode(graphics, 4);  // PixelOffsetModeHighQuality
+    }
+    
+    pGdipDrawImageRectI(graphics, image, x, y, width, height);
+    GdipDeleteGraphics(graphics);
+}
+
+// Free GDI+ image
+static void FreePNGImage(void* image) {
+    if (!image) return;
+    typedef int (WINAPI *GdipDisposeImageFunc)(void*);
+    GdipDisposeImageFunc pGdipDisposeImage = 
+        (GdipDisposeImageFunc)GetProcAddress(g_gdiplus, "GdipDisposeImage");
+    if (pGdipDisposeImage) pGdipDisposeImage(image);
+}
+
+// Load settings icon on startup
+static void LoadSettingsIcon(void) {
+    g_settingsImage = LoadPNGImage("static\\settings.png");
+    if (!g_settingsImage) {
+        // Try relative to executable
+        char exePath[MAX_PATH];
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        char* lastSlash = strrchr(exePath, '\\');
+        if (lastSlash) {
+            strcpy(lastSlash + 1, "..\\static\\settings.png");
+            g_settingsImage = LoadPNGImage(exePath);
+        }
+    }
+}
+
+static void AddTrayIcon(void) {
+    g_trayIcon.cbSize = sizeof(NOTIFYICONDATAA);
+    g_trayIcon.hWnd = g_controlWnd;
+    g_trayIcon.uID = 1;
+    g_trayIcon.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_trayIcon.uCallbackMessage = WM_TRAYICON;
+    
+    // Try to load custom icon from static folder
+    g_trayHIcon = LoadIconFromPNG("static\\lwsr_icon.png");
+    if (!g_trayHIcon) {
+        // Try relative to executable
+        char exePath[MAX_PATH];
+        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        char* lastSlash = strrchr(exePath, '\\');
+        if (lastSlash) {
+            strcpy(lastSlash + 1, "..\\static\\lwsr_icon.png");
+            g_trayHIcon = LoadIconFromPNG(exePath);
+        }
+    }
+    
+    g_trayIcon.hIcon = g_trayHIcon ? g_trayHIcon : LoadIcon(NULL, IDI_APPLICATION);
+    strcpy(g_trayIcon.szTip, "LWSR - Screen Recorder");
+    Shell_NotifyIconA(NIM_ADD, &g_trayIcon);
+}
+
+static void RemoveTrayIcon(void) {
+    Shell_NotifyIconA(NIM_DELETE, &g_trayIcon);
+    if (g_trayHIcon) {
+        DestroyIcon(g_trayHIcon);
+        g_trayHIcon = NULL;
+    }
+}
+
+static void MinimizeToTray(void) {
+    if (g_minimizedToTray) return;
+    
+    // Hide all windows
+    ShowWindow(g_controlWnd, SW_HIDE);
+    ShowWindow(g_overlayWnd, SW_HIDE);
+    ActionToolbar_Hide();
+    if (g_settingsWnd) ShowWindow(g_settingsWnd, SW_HIDE);
+    
+    // Add tray icon
+    AddTrayIcon();
+    g_minimizedToTray = TRUE;
+}
+
+static void RestoreFromTray(void) {
+    if (!g_minimizedToTray) return;
+    
+    // Remove tray icon
+    RemoveTrayIcon();
+    
+    // Show control panel
+    ShowWindow(g_controlWnd, SW_SHOW);
+    SetForegroundWindow(g_controlWnd);
+    
+    g_minimizedToTray = FALSE;
+}
+
+// ============================================================================
+// Action Toolbar Callbacks
+// ============================================================================
+
+static void ActionToolbar_OnMinimize(void) {
+    // Hide toolbar and selection, minimize to tray
+    ActionToolbar_Hide();
+    ShowWindow(g_overlayWnd, SW_HIDE);
+    g_selState = SEL_NONE;
+    SetRectEmpty(&g_selectedRect);
+    g_isSelecting = FALSE;
+    MinimizeToTray();
+}
+
+static void ActionToolbar_OnRecord(void) {
+    Recording_Start();
+}
+
+static void ActionToolbar_OnClose(void) {
+    // Cancel selection and return to control panel
+    ActionToolbar_Hide();
+    ShowWindow(g_overlayWnd, SW_HIDE);
+    g_selState = SEL_NONE;
+    SetRectEmpty(&g_selectedRect);
+    g_isSelecting = FALSE;
+    ShowWindow(g_controlWnd, SW_SHOW);
+}
+
+static void ActionToolbar_OnSettings(void) {
+    // Hide toolbar and selection, show settings
+    ActionToolbar_Hide();
+    ShowWindow(g_overlayWnd, SW_HIDE);
+    g_selState = SEL_NONE;
+    SetRectEmpty(&g_selectedRect);
+    g_isSelecting = FALSE;
+    
+    // Open settings window centered on control panel
+    if (g_settingsWnd) {
+        SendMessage(g_settingsWnd, WM_CLOSE, 0, 0);
+    }
+    
+    ShowWindow(g_controlWnd, SW_SHOW);
+    
+    RECT ctrlRect;
+    GetWindowRect(g_controlWnd, &ctrlRect);
+    int settingsW = 620;
+    int settingsH = 725;
+    int ctrlCenterX = (ctrlRect.left + ctrlRect.right) / 2;
+    
+    g_settingsWnd = CreateWindowExA(
+        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
+        "LWSRSettings",
+        NULL,
+        WS_POPUP | WS_VISIBLE | WS_BORDER,
+        ctrlCenterX - settingsW / 2, ctrlRect.bottom + 5,
+        settingsW, settingsH,
+        g_controlWnd, NULL, g_hInstance, NULL
+    );
+}
+
 // Timer text for display
 static char g_timerText[32] = "00:00";
 
@@ -753,6 +1069,9 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     
     // Initialize GDI+ for anti-aliased drawing
     InitGdiPlus();
+    
+    // Load settings icon
+    LoadSettingsIcon();
     
     // Initialize common controls (including trackbar)
     INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES };
@@ -804,7 +1123,8 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     
     // Initialize new action toolbar module
     ActionToolbar_Init(hInstance);
-    ActionToolbar_SetCallbacks(Recording_Start, CaptureToClipboard, CaptureToFile, NULL);
+    ActionToolbar_SetCallbacks(ActionToolbar_OnMinimize, ActionToolbar_OnRecord, 
+                               ActionToolbar_OnClose, ActionToolbar_OnSettings);
     
     // Initialize border module
     Border_Init(hInstance);
@@ -833,7 +1153,7 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     POINT center;
     GetPrimaryMonitorCenter(&center);
     
-    int ctrlWidth = 680;
+    int ctrlWidth = 730;  // Capture buttons + icon buttons on right
     int ctrlHeight = 44;
     
     g_controlWnd = CreateWindowExA(
@@ -884,6 +1204,12 @@ void Overlay_Destroy(void) {
     }
     
     // Shutdown GDI+
+    // Free settings icon before shutting down GDI+
+    if (g_settingsImage) {
+        FreePNGImage(g_settingsImage);
+        g_settingsImage = NULL;
+    }
+    
     ShutdownGdiPlus();
     
     if (g_crosshairWnd) {
@@ -1501,44 +1827,64 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Symbol");
             
             // Create mode buttons (owner-drawn for Snipping Tool style)
-            // All buttons are 130px wide for consistency
+            // Layout: [Capture Area][Capture Window][Capture Monitor][Capture All Monitors] ... [Settings - O X]
+            int btnX = 8;
+            int btnWidth = 130;  // Standard width for capture buttons
+            int btnHeight = 30;
+            int btnGap = 4;
+            
             CreateWindowW(L"BUTTON", L"Capture Area",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                8, 7, 130, 30, hwnd, (HMENU)ID_MODE_AREA, g_hInstance, NULL);
+                btnX, 7, btnWidth, btnHeight, hwnd, (HMENU)ID_MODE_AREA, g_hInstance, NULL);
+            btnX += btnWidth + btnGap;
             
             CreateWindowW(L"BUTTON", L"Capture Window",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                142, 7, 130, 30, hwnd, (HMENU)ID_MODE_WINDOW, g_hInstance, NULL);
+                btnX, 7, btnWidth, btnHeight, hwnd, (HMENU)ID_MODE_WINDOW, g_hInstance, NULL);
+            btnX += btnWidth + btnGap;
             
             CreateWindowW(L"BUTTON", L"Capture Monitor",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                276, 7, 130, 30, hwnd, (HMENU)ID_MODE_MONITOR, g_hInstance, NULL);
+                btnX, 7, btnWidth, btnHeight, hwnd, (HMENU)ID_MODE_MONITOR, g_hInstance, NULL);
+            btnX += btnWidth + btnGap;
             
             CreateWindowW(L"BUTTON", L"Capture All Monitors",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                410, 7, 130, 30, hwnd, (HMENU)ID_MODE_ALL, g_hInstance, NULL);
+                btnX, 7, btnWidth + 20, btnHeight, hwnd, (HMENU)ID_MODE_ALL, g_hInstance, NULL);
             
-            // Small buttons on right side (square 28x28, vertically centered)
-            int btnSize = 28;
-            int btnY = (44 - btnSize) / 2;  // Center in 44px tall window
+            // Small icon buttons on right side (square 28x28, vertically centered)
+            int iconBtnSize = 28;
+            int iconBtnY = (44 - iconBtnSize) / 2;
+            int rightX = 730 - 8 - iconBtnSize;  // Start from right edge
             
-            // Close button (right side)
-            CreateWindowW(L"BUTTON", L"\\u2715",
+            // Close button (X) - rightmost
+            CreateWindowW(L"BUTTON", L"\u2715",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                644, btnY, btnSize, btnSize, hwnd, (HMENU)ID_BTN_CLOSE, g_hInstance, NULL);
+                rightX, iconBtnY, iconBtnSize, iconBtnSize, hwnd, (HMENU)ID_BTN_CLOSE, g_hInstance, NULL);
+            rightX -= iconBtnSize + 4;
             
-            // Settings button (gear icon area)
-            CreateWindowW(L"BUTTON", L"...",
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                574, btnY, btnSize, btnSize, hwnd, (HMENU)ID_BTN_SETTINGS, g_hInstance, NULL);
-            
-            // Record button
+            // Record button (filled circle)
             CreateWindowW(L"BUTTON", L"",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                609, btnY, btnSize, btnSize, hwnd, (HMENU)ID_BTN_RECORD, g_hInstance, NULL);
+                rightX, iconBtnY, iconBtnSize, iconBtnSize, hwnd, (HMENU)ID_BTN_RECORD, g_hInstance, NULL);
+            rightX -= iconBtnSize + 4;
+            
+            // Minimize button (-)
+            CreateWindowW(L"BUTTON", L"-",
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                rightX, iconBtnY, iconBtnSize, iconBtnSize, hwnd, (HMENU)ID_BTN_MINIMIZE, g_hInstance, NULL);
+            rightX -= iconBtnSize + 4;
+            
+            // Settings button (gear icon) - left of minimize
+            CreateWindowW(L"BUTTON", L"",
+                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
+                rightX, iconBtnY, iconBtnSize, iconBtnSize, hwnd, (HMENU)ID_BTN_SETTINGS, g_hInstance, NULL);
             
             // No mode selected by default
             g_currentMode = MODE_NONE;
+            
+            // Start hover timer for icon button updates
+            SetTimer(hwnd, ID_TIMER_HOVER, 50, NULL);
             
             return 0;
         }
@@ -1596,6 +1942,10 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                             settingsW, settingsH,
                             hwnd, NULL, g_hInstance, NULL
                         );
+                        
+                        // Refresh settings button to show highlight
+                        HWND settingsBtn = GetDlgItem(hwnd, ID_BTN_SETTINGS);
+                        if (settingsBtn) InvalidateRect(settingsBtn, NULL, TRUE);
                     }
                     break;
                 case ID_BTN_RECORD:
@@ -1622,6 +1972,10 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     }
                     PostQuitMessage(0);
                     break;
+                case ID_BTN_MINIMIZE:
+                    // Minimize to system tray
+                    MinimizeToTray();
+                    break;
                 case ID_BTN_STOP:
                     Recording_Stop();
                     break;
@@ -1641,6 +1995,42 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             } else if (wParam == ID_TIMER_DISPLAY) {
                 // Update timer display
                 UpdateTimerDisplay();
+            } else if (wParam == ID_TIMER_HOVER) {
+                // Check which icon button is currently hovered (if any)
+                POINT pt;
+                GetCursorPos(&pt);
+                
+                HWND iconBtns[] = {
+                    GetDlgItem(hwnd, ID_BTN_SETTINGS),
+                    GetDlgItem(hwnd, ID_BTN_MINIMIZE),
+                    GetDlgItem(hwnd, ID_BTN_RECORD),
+                    GetDlgItem(hwnd, ID_BTN_CLOSE)
+                };
+                
+                HWND currentHovered = NULL;
+                for (int i = 0; i < 4; i++) {
+                    if (iconBtns[i]) {
+                        RECT rc;
+                        GetWindowRect(iconBtns[i], &rc);
+                        if (PtInRect(&rc, pt)) {
+                            currentHovered = iconBtns[i];
+                            break;
+                        }
+                    }
+                }
+                
+                // Only invalidate if hover state changed
+                if (currentHovered != g_lastHoveredIconBtn) {
+                    // Invalidate old hovered button (to remove highlight)
+                    if (g_lastHoveredIconBtn) {
+                        InvalidateRect(g_lastHoveredIconBtn, NULL, FALSE);
+                    }
+                    // Invalidate new hovered button (to add highlight)
+                    if (currentHovered) {
+                        InvalidateRect(currentHovered, NULL, FALSE);
+                    }
+                    g_lastHoveredIconBtn = currentHovered;
+                }
             }
             return 0;
             
@@ -1672,10 +2062,27 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             LPDRAWITEMSTRUCT dis = (LPDRAWITEMSTRUCT)lParam;
             UINT ctlId = dis->CtlID;
             BOOL isSelected = FALSE;
-            BOOL isHovered = (dis->itemState & ODS_HOTLIGHT) || (dis->itemState & ODS_FOCUS);
             
-            // Check if this is a mode button
+            // Check if this is a mode button (capture buttons only)
             BOOL isModeButton = (ctlId >= ID_MODE_AREA && ctlId <= ID_MODE_ALL);
+            
+            // Check if this is an icon button (no visible border, transparent bg)
+            BOOL isIconButton = (ctlId == ID_BTN_SETTINGS || ctlId == ID_BTN_MINIMIZE || 
+                                 ctlId == ID_BTN_RECORD || ctlId == ID_BTN_CLOSE);
+            
+            // For icon buttons, check actual mouse position for hover
+            BOOL isHovered = FALSE;
+            if (isIconButton) {
+                POINT pt;
+                GetCursorPos(&pt);
+                ScreenToClient(dis->hwndItem, &pt);
+                isHovered = PtInRect(&dis->rcItem, pt);
+            } else {
+                isHovered = (dis->itemState & ODS_HOTLIGHT) || (dis->itemState & ODS_FOCUS);
+            }
+            
+            // For settings button, check if settings window is open
+            BOOL isSettingsActive = (ctlId == ID_BTN_SETTINGS && g_settingsWnd != NULL && IsWindowVisible(g_settingsWnd));
             
             if (isModeButton) {
                 // Check if this mode is selected
@@ -1688,9 +2095,20 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // Background color
             COLORREF bgColor;
             COLORREF borderColor;
+            BOOL showHoverBg = FALSE;
             if (isSelected) {
                 bgColor = RGB(0, 95, 184); // Windows blue for selected
                 borderColor = RGB(0, 120, 215);
+            } else if (isIconButton) {
+                // Icon buttons: show hover effect or settings active state
+                if (isSettingsActive || isHovered) {
+                    bgColor = RGB(55, 55, 55);  // Hover/active color
+                    borderColor = RGB(55, 55, 55);
+                    showHoverBg = TRUE;
+                } else {
+                    bgColor = RGB(32, 32, 32);  // Normal background
+                    borderColor = RGB(32, 32, 32);
+                }
             } else if (isHovered || (dis->itemState & ODS_SELECTED)) {
                 bgColor = RGB(55, 55, 55); // Hover color
                 borderColor = RGB(80, 80, 80);
@@ -1699,8 +2117,21 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 borderColor = RGB(80, 80, 80);
             }
             
-            // Draw anti-aliased rounded button background
-            DrawRoundedRectAA(dis->hDC, &dis->rcItem, 6, bgColor, borderColor);
+            // For icon buttons with hover, draw rounded rect; otherwise flat fill
+            if (isIconButton) {
+                if (showHoverBg) {
+                    // Draw rounded hover background
+                    DrawRoundedRectAA(dis->hDC, &dis->rcItem, 4, bgColor, borderColor);
+                } else {
+                    // Flat fill to match bar background
+                    HBRUSH bgBrush = CreateSolidBrush(bgColor);
+                    FillRect(dis->hDC, &dis->rcItem, bgBrush);
+                    DeleteObject(bgBrush);
+                }
+            } else {
+                // Draw anti-aliased rounded button background
+                DrawRoundedRectAA(dis->hDC, &dis->rcItem, 6, bgColor, borderColor);
+            }
             
             // Draw text for mode buttons (no icon, just centered text)
             if (isModeButton) {
@@ -1737,16 +2168,35 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 return TRUE;
             }
             
-            // Settings button (three horizontal dots)
-            if (ctlId == ID_BTN_SETTINGS) {
-                SelectObject(dis->hDC, g_uiFont);
+            // Minimize button - use Segoe MDL2 Assets icon font (Windows 10/11 style)
+            if (ctlId == ID_BTN_MINIMIZE) {
+                // Create MDL2 font for Windows icons
+                HFONT mdl2Font = CreateFontW(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe MDL2 Assets");
+                HFONT oldFont = (HFONT)SelectObject(dis->hDC, mdl2Font);
                 SetBkMode(dis->hDC, TRANSPARENT);
-                SetTextColor(dis->hDC, RGB(200, 200, 200));
-                RECT textRect = dis->rcItem;
-                textRect.left += 1;  // Shift 1 pixel right
-                textRect.right += 1;
-                // Use horizontal ellipsis or three dots
-                DrawTextW(dis->hDC, L"\u22EF", -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SetTextColor(dis->hDC, RGB(150, 150, 150));
+                // U+E921 = ChromeMinimize icon in Segoe MDL2 Assets
+                DrawTextW(dis->hDC, L"\uE921", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(dis->hDC, oldFont);
+                DeleteObject(mdl2Font);
+                return TRUE;
+            }
+            
+            // Settings button - use Segoe MDL2 Assets gear icon (Windows 10/11 style)
+            if (ctlId == ID_BTN_SETTINGS) {
+                // Create MDL2 font for Windows icons
+                HFONT mdl2Font = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe MDL2 Assets");
+                HFONT oldFont = (HFONT)SelectObject(dis->hDC, mdl2Font);
+                SetBkMode(dis->hDC, TRANSPARENT);
+                SetTextColor(dis->hDC, RGB(150, 150, 150));
+                // U+E713 = Settings gear icon in Segoe MDL2 Assets
+                DrawTextW(dis->hDC, L"\uE713", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(dis->hDC, oldFont);
+                DeleteObject(mdl2Font);
                 return TRUE;
             }
             
@@ -1846,15 +2296,19 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 return TRUE;
             }
             
-            // Close button
+            // Close button - use Segoe MDL2 Assets icon font (Windows 10/11 style)
             if (ctlId == ID_BTN_CLOSE) {
-                SelectObject(dis->hDC, g_iconFont);
+                // Create MDL2 font for Windows icons
+                HFONT mdl2Font = CreateFontW(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                    CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe MDL2 Assets");
+                HFONT oldFont = (HFONT)SelectObject(dis->hDC, mdl2Font);
                 SetBkMode(dis->hDC, TRANSPARENT);
-                SetTextColor(dis->hDC, RGB(200, 200, 200));
-                RECT textRect = dis->rcItem;
-                textRect.left += 1;  // Shift 1 pixel right
-                textRect.right += 1;
-                DrawTextW(dis->hDC, L"\u2715", -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SetTextColor(dis->hDC, RGB(150, 150, 150));
+                // U+E8BB = ChromeClose icon in Segoe MDL2 Assets
+                DrawTextW(dis->hDC, L"\uE8BB", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+                SelectObject(dis->hDC, oldFont);
+                DeleteObject(mdl2Font);
                 return TRUE;
             }
             
@@ -1915,7 +2369,39 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             return 0;
         }
         
+        case WM_TRAYICON:
+            if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
+                // Left click or double-click on tray icon - restore window
+                RestoreFromTray();
+            } else if (lParam == WM_RBUTTONUP) {
+                // Right click - show context menu
+                POINT pt;
+                GetCursorPos(&pt);
+                
+                HMENU hMenu = CreatePopupMenu();
+                AppendMenuA(hMenu, MF_STRING, ID_TRAY_SHOW, "Show");
+                AppendMenuA(hMenu, MF_SEPARATOR, 0, NULL);
+                AppendMenuA(hMenu, MF_STRING, ID_TRAY_EXIT, "Exit");
+                
+                SetForegroundWindow(hwnd);
+                int cmd = TrackPopupMenu(hMenu, TPM_RETURNCMD | TPM_NONOTIFY, 
+                                         pt.x, pt.y, 0, hwnd, NULL);
+                DestroyMenu(hMenu);
+                
+                if (cmd == ID_TRAY_SHOW) {
+                    RestoreFromTray();
+                } else if (cmd == ID_TRAY_EXIT) {
+                    RemoveTrayIcon();
+                    PostQuitMessage(0);
+                }
+            }
+            return 0;
+        
         case WM_DESTROY:
+            // Clean up tray icon if minimized
+            if (g_minimizedToTray) {
+                RemoveTrayIcon();
+            }
             if (g_uiFont) DeleteObject(g_uiFont);
             if (g_iconFont) DeleteObject(g_iconFont);
             return 0;
@@ -3056,6 +3542,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             
             DestroyWindow(hwnd);
             g_settingsWnd = NULL;
+            
+            // Refresh settings button to remove highlight
+            if (g_controlWnd) {
+                HWND settingsBtn = GetDlgItem(g_controlWnd, ID_BTN_SETTINGS);
+                if (settingsBtn) InvalidateRect(settingsBtn, NULL, TRUE);
+            }
             return 0;
         }
         
