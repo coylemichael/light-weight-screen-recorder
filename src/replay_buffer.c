@@ -115,7 +115,24 @@ static void AudioEncoderCallback(const AACSample* sample, void* userData) {
 BOOL ReplayBuffer_Init(ReplayBufferState* state) {
     if (!state) return FALSE;
     ZeroMemory(state, sizeof(ReplayBufferState));
-    InitializeCriticalSection(&state->lock);
+    
+    // Create synchronization events
+    state->hReadyEvent = CreateEvent(NULL, TRUE, FALSE, NULL);  // Manual reset
+    state->hSaveRequestEvent = CreateEvent(NULL, FALSE, FALSE, NULL);  // Auto reset
+    state->hSaveCompleteEvent = CreateEvent(NULL, FALSE, FALSE, NULL);  // Auto reset
+    state->hStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);  // Manual reset
+    
+    if (!state->hReadyEvent || !state->hSaveRequestEvent || 
+        !state->hSaveCompleteEvent || !state->hStopEvent) {
+        ReplayLog("Failed to create synchronization events\n");
+        if (state->hReadyEvent) CloseHandle(state->hReadyEvent);
+        if (state->hSaveRequestEvent) CloseHandle(state->hSaveRequestEvent);
+        if (state->hSaveCompleteEvent) CloseHandle(state->hSaveCompleteEvent);
+        if (state->hStopEvent) CloseHandle(state->hStopEvent);
+        return FALSE;
+    }
+    
+    state->state = REPLAY_STATE_UNINITIALIZED;
     InitializeCriticalSection(&g_audioLock);
     return TRUE;
 }
@@ -123,7 +140,17 @@ BOOL ReplayBuffer_Init(ReplayBufferState* state) {
 void ReplayBuffer_Shutdown(ReplayBufferState* state) {
     if (!state) return;
     ReplayBuffer_Stop(state);
-    DeleteCriticalSection(&state->lock);
+    
+    // Close event handles
+    if (state->hReadyEvent) CloseHandle(state->hReadyEvent);
+    if (state->hSaveRequestEvent) CloseHandle(state->hSaveRequestEvent);
+    if (state->hSaveCompleteEvent) CloseHandle(state->hSaveCompleteEvent);
+    if (state->hStopEvent) CloseHandle(state->hStopEvent);
+    state->hReadyEvent = NULL;
+    state->hSaveRequestEvent = NULL;
+    state->hSaveCompleteEvent = NULL;
+    state->hStopEvent = NULL;
+    
     DeleteCriticalSection(&g_audioLock);
     
     // Clean up audio samples
@@ -157,10 +184,19 @@ BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
     
     if (!state->enabled) return FALSE;
     
-    state->saveRequested = FALSE;
-    state->saveComplete = FALSE;
+    // Reset state machine
+    InterlockedExchange(&state->state, REPLAY_STATE_STARTING);
+    InterlockedExchange(&state->framesCaptured, 0);
+    state->saveSuccess = FALSE;
     state->savePath[0] = '\0';
-    state->bufferReady = FALSE;  // Will be set TRUE when thread is ready
+    
+    // Reset events
+    ResetEvent(state->hReadyEvent);
+    ResetEvent(state->hSaveCompleteEvent);
+    ResetEvent(state->hStopEvent);
+    
+    // Legacy flags
+    state->bufferReady = FALSE;
     
     // Reset audio buffer
     EnterCriticalSection(&g_audioLock);
@@ -176,11 +212,27 @@ BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
     state->bufferThread = CreateThread(NULL, 0, BufferThreadProc, state, 0, NULL);
     state->isBuffering = (state->bufferThread != NULL);
     
+    if (!state->isBuffering) {
+        InterlockedExchange(&state->state, REPLAY_STATE_ERROR);
+        return FALSE;
+    }
+    
+    // Wait up to 5 seconds for the buffer thread to become ready
+    DWORD waitResult = WaitForSingleObject(state->hReadyEvent, 5000);
+    if (waitResult != WAIT_OBJECT_0) {
+        ReplayLog("Timeout waiting for buffer thread to become ready\n");
+        // Don't fail - thread is running, just not ready yet
+    }
+    
     return state->isBuffering;
 }
 
 void ReplayBuffer_Stop(ReplayBufferState* state) {
     if (!state || !state->isBuffering) return;
+    
+    // Signal stop via event (proper cross-thread communication)
+    InterlockedExchange(&state->state, REPLAY_STATE_STOPPING);
+    SetEvent(state->hStopEvent);
     
     g_stopBuffering = TRUE;
     if (state->bufferThread) {
@@ -192,23 +244,44 @@ void ReplayBuffer_Stop(ReplayBufferState* state) {
 }
 
 BOOL ReplayBuffer_Save(ReplayBufferState* state, const char* outputPath) {
-    if (!state || !outputPath || !state->isBuffering) return FALSE;
-    
-    // Don't allow saves until buffer thread is ready and has captured some frames
-    if (!state->bufferReady) {
-        return FALSE;  // Buffer thread still initializing
+    if (!state || !outputPath || !state->isBuffering) {
+        ReplayLog("Save rejected: state=%p, path=%s, buffering=%d\n", 
+                  state, outputPath ? outputPath : "NULL", state ? state->isBuffering : 0);
+        return FALSE;
     }
     
+    // Check state machine - must be in CAPTURING state
+    LONG currentState = InterlockedCompareExchange(&state->state, REPLAY_STATE_CAPTURING, REPLAY_STATE_CAPTURING);
+    if (currentState != REPLAY_STATE_CAPTURING) {
+        ReplayLog("Save rejected: state=%d (expected CAPTURING=%d)\n", 
+                  currentState, REPLAY_STATE_CAPTURING);
+        return FALSE;
+    }
+    
+    // Check minimum frames requirement
+    LONG frames = InterlockedCompareExchange(&state->framesCaptured, 0, 0);
+    if (frames < MIN_FRAMES_FOR_SAVE) {
+        ReplayLog("Save rejected: only %d frames captured (need %d)\n", frames, MIN_FRAMES_FOR_SAVE);
+        return FALSE;
+    }
+    
+    // Set up save parameters
     strncpy(state->savePath, outputPath, MAX_PATH - 1);
-    state->saveComplete = FALSE;
-    state->saveRequested = TRUE;
+    state->saveSuccess = FALSE;
+    
+    // Signal save request via event (proper synchronization)
+    ResetEvent(state->hSaveCompleteEvent);
+    SetEvent(state->hSaveRequestEvent);
     
     // Wait for completion (max 30 sec for muxing large buffers)
-    for (int i = 0; i < 3000 && !state->saveComplete; i++) {
-        Sleep(10);
+    DWORD waitResult = WaitForSingleObject(state->hSaveCompleteEvent, 30000);
+    
+    if (waitResult != WAIT_OBJECT_0) {
+        ReplayLog("Save timeout after 30 seconds\n");
+        return FALSE;
     }
     
-    return state->saveComplete;
+    return state->saveSuccess;
 }
 
 void ReplayBuffer_GetStatus(ReplayBufferState* state, char* buffer, int bufferSize) {
@@ -300,7 +373,11 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     }
     
     // Update capture to use cropped region
-    Capture_SetRegion(capture, rect);
+    if (!Capture_SetRegion(capture, rect)) {
+        ReplayLog("Capture_SetRegion failed - cannot capture region %d,%d,%d,%d\n",
+                  rect.left, rect.top, rect.right, rect.bottom);
+        return 1;
+    }
     
     state->frameWidth = width;
     state->frameHeight = height;
@@ -411,11 +488,60 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     int frameCount = 0;
     int lastLogFrame = 0;
     
-    // Signal that buffer thread is ready to accept save requests
-    state->bufferReady = TRUE;
+    // Diagnostic counters (reset each run)
+    int attemptCount = 0;
+    int captureNullCount = 0;
+    int convertNullCount = 0;
+    int encodeFailCount = 0;
+    double totalCaptureMs = 0, totalConvertMs = 0, totalSubmitMs = 0;
+    int timingCount = 0;
+    
+    // Transition to CAPTURING state and signal ready
+    // (but don't signal hReadyEvent until we have frames)
+    InterlockedExchange(&state->state, REPLAY_STATE_CAPTURING);
+    state->bufferReady = TRUE;  // Legacy flag
     ReplayLog("Buffer thread ready, entering capture loop\n");
     
-    while (!g_stopBuffering) {
+    // Build wait handle array for event-driven loop
+    HANDLE waitHandles[2] = { state->hStopEvent, state->hSaveRequestEvent };
+    
+    while (InterlockedCompareExchange(&state->state, 0, 0) == REPLAY_STATE_CAPTURING) {
+        // Check for stop/save events with 1ms timeout (allows frame timing)
+        DWORD waitResult = WaitForMultipleObjects(2, waitHandles, FALSE, 1);
+        
+        if (waitResult == WAIT_OBJECT_0) {
+            // Stop event signaled
+            ReplayLog("Stop event received\n");
+            break;
+        }
+        
+        if (waitResult == WAIT_OBJECT_0 + 1) {
+            // Save request event signaled
+            double duration = SampleBuffer_GetDuration(&g_sampleBuffer);
+            int count = SampleBuffer_GetCount(&g_sampleBuffer);
+            
+            // Calculate actual capture stats for diagnostics
+            LARGE_INTEGER nowTime;
+            QueryPerformanceCounter(&nowTime);
+            double realElapsedSec = (double)(nowTime.QuadPart - captureStartTime.QuadPart) / perfFreq.QuadPart;
+            double actualFPS = (realElapsedSec > 0) ? frameCount / realElapsedSec : 0;
+            
+            ReplayLog("SAVE REQUEST: %d video samples (%.2fs), %d audio samples, after %.2fs real time\n", 
+                      count, duration, g_audioSampleCount, realElapsedSec);
+            ReplayLog("  Actual capture rate: %.2f fps (target: %d fps)\n", actualFPS, fps);
+            ReplayLog("  Output path: %s\n", state->savePath);
+            
+            // Write buffer to file
+            BOOL ok = FALSE;
+            ReplayLog("  Starting save (video-only path)...\n");
+            ok = SampleBuffer_WriteToFile(&g_sampleBuffer, state->savePath);
+            ReplayLog("SAVE %s\n", ok ? "OK" : "FAILED");
+            
+            state->saveSuccess = ok;
+            SetEvent(state->hSaveCompleteEvent);
+            continue;  // Skip frame capture this iteration
+        }
+        
         // === AUDIO CAPTURE ===
         if (audioActive && g_audioCapture && g_aacEncoder) {
             BYTE audioPcmBuf[8192];
@@ -426,46 +552,10 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
             }
         }
         
-        // === SAVE REQUEST ===
-        if (state->saveRequested) {
-            double duration = SampleBuffer_GetDuration(&g_sampleBuffer);
-            int count = SampleBuffer_GetCount(&g_sampleBuffer);
-            
-            // Calculate actual capture stats for diagnostics
-            LARGE_INTEGER nowTime;
-            QueryPerformanceCounter(&nowTime);
-            double realElapsedSec = (double)(nowTime.QuadPart - captureStartTime.QuadPart) / perfFreq.QuadPart;
-            double actualFPS = frameCount / realElapsedSec;
-            
-            ReplayLog("SAVE REQUEST: %d video samples (%.2fs), %d audio samples, after %.2fs real time\n", 
-                      count, duration, g_audioSampleCount, realElapsedSec);
-            ReplayLog("  Actual capture rate: %.2f fps (target: %d fps)\n", actualFPS, fps);
-            ReplayLog("  Output path: %s\n", state->savePath);
-            
-            // Write buffer to file (with or without audio)
-            BOOL ok = FALSE;
-            
-            ReplayLog("  Starting save (video-only path)...\n");
-            
-            // Always use video-only for now to isolate the issue
-            ok = SampleBuffer_WriteToFile(&g_sampleBuffer, state->savePath);
-            
-            ReplayLog("SAVE %s\n", ok ? "OK" : "FAILED");
-            
-            state->saveComplete = TRUE;  // Even if failed, we're done
-            state->saveRequested = FALSE;
-        }
-        
         // === FRAME CAPTURE (GPU PATH) ===
         LARGE_INTEGER currentTime;
         QueryPerformanceCounter(&currentTime);
         double frameElapsedMs = (double)(currentTime.QuadPart - lastFrameTime.QuadPart) * 1000.0 / perfFreq.QuadPart;
-        
-        // Static counters for diagnostics
-        static int attemptCount = 0;
-        static int captureNullCount = 0;
-        static int convertNullCount = 0;
-        static int encodeFailCount = 0;
         
         if (frameElapsedMs >= frameIntervalMs) {
             // Use ideal next frame time (prevents drift accumulation)
@@ -485,8 +575,6 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
             // GPU path: capture → color convert → NVENC (all on GPU)
             
             // Pipeline timing for diagnostics
-            static double totalCaptureMs = 0, totalConvertMs = 0, totalSubmitMs = 0;
-            static int timingCount = 0;
             LARGE_INTEGER t1, t2, t3, t4;
             
             if (gpuConverter.initialized && g_encoder) {
@@ -507,6 +595,15 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                         if (submitted) {
                             frameCount++;  // Count submissions (frames delivered via callback)
                             
+                            // Update state machine frame count
+                            LONG newCount = InterlockedIncrement(&state->framesCaptured);
+                            
+                            // Signal ready event once we have enough frames
+                            if (newCount == MIN_FRAMES_FOR_SAVE) {
+                                SetEvent(state->hReadyEvent);
+                                ReplayLog("Minimum frames captured (%d), ready for saves\n", MIN_FRAMES_FOR_SAVE);
+                            }
+                            
                             // Accumulate timing stats (submit should be <1ms in async mode)
                             totalCaptureMs += (double)(t2.QuadPart - t1.QuadPart) * 1000.0 / perfFreq.QuadPart;
                             totalConvertMs += (double)(t3.QuadPart - t2.QuadPart) * 1000.0 / perfFreq.QuadPart;
@@ -521,6 +618,13 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                 } else {
                     captureNullCount++;
                 }
+            }
+            
+            // Early failure detection - if first 60 attempts all fail, log warning
+            if (attemptCount == 60 && frameCount == 0) {
+                ReplayLog("WARNING: First 60 capture attempts all failed! Check capture source.\n");
+                ReplayLog("  capture=%d, convert=%d, encode=%d\n",
+                          captureNullCount, convertNullCount, encodeFailCount);
             }
             
             // Log failures and timing periodically (every 10 seconds worth of attempts)
@@ -566,13 +670,12 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                 
                 lastLogFrame = frameCount;
             }
-        } else {
-            Sleep(1);
         }
+        // No Sleep() needed - WaitForMultipleObjects provides timing
     }
     
     // Cleanup
-    ReplayLog("Shutting down...\n");
+    ReplayLog("Shutting down (state=%d)...\n", InterlockedCompareExchange(&state->state, 0, 0));
     
     // Restore timer resolution
     timeEndPeriod(1);

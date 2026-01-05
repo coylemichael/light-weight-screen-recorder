@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.2.0] - 2026-01-05
+
+### Changed
+- **State machine architecture for replay buffer** - Replaced flag-based polling with proper Windows event synchronization
+  - Added `ReplayStateEnum` with clear lifecycle states (UNINITIALIZED → STARTING → CAPTURING → SAVING → STOPPING)
+  - Implemented Windows events (`hReadyEvent`, `hSaveRequestEvent`, `hSaveCompleteEvent`, `hStopEvent`) for cross-thread coordination
+  - Uses `WaitForMultipleObjects` in main loop instead of busy polling
+  - Added `InterlockedExchange`/`InterlockedIncrement` for thread-safe state transitions
+  - Minimum 30 frames required before saves allowed (prevents empty/corrupt saves)
+
+### Removed
+- **Dead code cleanup** - Removed ~700 lines of unused legacy code
+  - `h264_encoder.c/h` - Media Foundation MFT encoder, replaced by native NVENC API (`nvenc_encoder.c`)
+  - `color_convert.c/h` - CPU-based BGRA→NV12 conversion, replaced by GPU conversion (`gpu_converter.c`)
+  - `settings.h` - Declared `Settings_Show()` but never implemented or called
+
+### Fixed
+- **Capture region validation** - Now checks `Capture_SetRegion` return value and fails early if capture cannot be set up
+- **Static counter pollution** - Moved diagnostic counters from static to function scope to prevent state pollution across buffer thread restarts
+
+---
+
 ## [1.1.1] - 2026-01-03
 
 ### Fixed

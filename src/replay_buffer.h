@@ -1,5 +1,10 @@
 /*
  * Replay Buffer - ShadowPlay-style instant replay
+ * 
+ * Architecture: State machine with event-based synchronization
+ * - Clear lifecycle states prevent race conditions
+ * - Windows events for cross-thread coordination (not just flags)
+ * - Minimum buffer requirement before saves allowed
  */
 
 #ifndef REPLAY_BUFFER_H
@@ -11,20 +16,46 @@
 // Maximum encoded audio samples to store
 #define MAX_AUDIO_SAMPLES 16384
 
+// Minimum frames required before save is allowed (1 second worth)
+#define MIN_FRAMES_FOR_SAVE 30
+
+// Replay buffer lifecycle states
+typedef enum {
+    REPLAY_STATE_UNINITIALIZED,
+    REPLAY_STATE_STARTING,      // Thread created, initializing components
+    REPLAY_STATE_CAPTURING,     // Actively capturing frames, ready for saves
+    REPLAY_STATE_SAVING,        // Save in progress
+    REPLAY_STATE_STOPPING,      // Shutdown requested
+    REPLAY_STATE_ERROR          // Fatal error occurred
+} ReplayStateEnum;
+
 typedef struct {
     BOOL enabled;
     int durationSeconds;
     CaptureMode captureSource;
     int monitorIndex;
     
-    BOOL isBuffering;
-    volatile BOOL bufferReady;  // Set when buffer thread has initialized and is capturing
-    HANDLE bufferThread;
-    CRITICAL_SECTION lock;
+    // State machine (use InterlockedExchange to modify)
+    volatile LONG state;        // ReplayStateEnum
+    volatile LONG framesCaptured; // Frames successfully encoded
     
-    volatile BOOL saveRequested;
-    volatile BOOL saveComplete;
+    // Thread management
+    HANDLE bufferThread;
+    
+    // Event-based synchronization (proper cross-thread coordination)
+    HANDLE hReadyEvent;         // Signaled when capture loop is running and has frames
+    HANDLE hSaveRequestEvent;   // Signaled by UI to request save
+    HANDLE hSaveCompleteEvent;  // Signaled by buffer thread when save done
+    HANDLE hStopEvent;          // Signaled to request shutdown
+    
+    // Save parameters (protected by hSaveRequestEvent sequencing)
     char savePath[MAX_PATH];
+    volatile BOOL saveSuccess;  // Result of last save
+    
+    // Legacy compatibility
+    BOOL isBuffering;
+    volatile BOOL bufferReady;
+    
     int frameWidth;
     int frameHeight;
     

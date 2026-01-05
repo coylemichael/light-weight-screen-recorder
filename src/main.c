@@ -37,7 +37,6 @@
 #include "capture.h"
 #include "encoder.h"
 #include "overlay.h"
-#include "settings.h"
 #include "replay_buffer.h"
 #include "logger.h"
 
