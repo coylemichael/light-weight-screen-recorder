@@ -52,16 +52,28 @@ HWND g_controlWnd = NULL;
 // Hotkey ID for replay save
 #define HOTKEY_REPLAY_SAVE 1
 
+// Debug mode flag (enabled via --debug CLI argument)
+static BOOL g_debugMode = FALSE;
+
 // Mutex for single instance detection
 HANDLE g_mutex = NULL;
 const char* MUTEX_NAME = "LightweightScreenRecorderMutex";
 const char* WINDOW_CLASS = "LWSROverlay";
 
+// Parse command line for --debug flag
+static void ParseCommandLine(LPSTR lpCmdLine) {
+    if (lpCmdLine && (strstr(lpCmdLine, "--debug") || strstr(lpCmdLine, "-d"))) {
+        g_debugMode = TRUE;
+    }
+}
+
 int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, 
                    LPSTR lpCmdLine, int nCmdShow) {
     (void)hPrevInstance;
-    (void)lpCmdLine;
     (void)nCmdShow;
+    
+    // Parse command line arguments
+    ParseCommandLine(lpCmdLine);
     
     // Check for existing instance - toggle recording if running
     g_mutex = OpenMutexA(MUTEX_ALL_ACCESS, FALSE, MUTEX_NAME);
@@ -116,8 +128,10 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     // Initialize replay buffer
     ReplayBuffer_Init(&g_replayBuffer);
     
-    // Initialize logger for replay debugging
-    Logger_Init("replay_debug.txt", "w");
+    // Initialize logger for replay debugging (only if --debug flag is set)
+    if (g_debugMode) {
+        Logger_Init("replay_debug.txt", "w");
+    }
     
     // Start replay buffer if enabled in config
     if (g_config.replayEnabled) {
