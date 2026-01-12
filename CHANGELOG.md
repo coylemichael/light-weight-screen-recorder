@@ -8,6 +8,8 @@
   - Real-time percentage label updates as slider moves
   - Volumes saved to config and persist across sessions
   - Applied during mixing: samples scaled by volume before summing
+- **Application icon** - Custom icon embedded in executable
+  - Multi-resolution ICO (16px to 256px) for crisp display at all sizes
 
 ### Fixed
 - **Audio mixing synchronization** - Multiple audio sources now mix properly without phase issues

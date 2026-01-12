@@ -4,7 +4,7 @@ REM Usage: build.bat [debug]
 REM   build.bat        - Release build (optimized)
 REM   build.bat debug  - Debug build (symbols, no optimization)
 
-setlocal
+setlocal enabledelayedexpansion
 
 REM Check for debug flag
 set BUILD_TYPE=release
@@ -20,8 +20,29 @@ if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\B
 ) else if exist "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat" (
     call "C:\Program Files (x86)\Microsoft Visual Studio\2019\BuildTools\VC\Auxiliary\Build\vcvars64.bat" >nul 2>&1
 ) else (
-    echo Error: Visual Studio not found. Please install Visual Studio Build Tools.
-    exit /b 1
+    echo.
+    echo Error: Visual Studio Build Tools not found.
+    echo.
+    set /p INSTALL_VS="Would you like to install VS Build Tools via winget? [Y/n]: "
+    if /i "!INSTALL_VS!"=="n" (
+        echo.
+        echo To install manually, run:
+        echo   winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --quiet"
+        echo.
+        exit /b 1
+    )
+    echo.
+    echo Installing Visual Studio 2022 Build Tools...
+    winget install Microsoft.VisualStudio.2022.BuildTools --override "--add Microsoft.VisualStudio.Workload.VCTools --includeRecommended --quiet"
+    if %ERRORLEVEL% neq 0 (
+        echo.
+        echo Installation failed. Please install manually from:
+        echo   https://visualstudio.microsoft.com/visual-cpp-build-tools/
+        exit /b 1
+    )
+    echo.
+    echo Build Tools installed. Please restart your terminal and run build.bat again.
+    exit /b 0
 )
 
 REM Create output directory
@@ -67,6 +88,7 @@ if %ERRORLEVEL% neq 0 (
 
 REM Clean up intermediate files
 del *.obj >nul 2>&1
+del bin\lwsr.res >nul 2>&1
 
 echo.
 echo Build successful! Output: bin\lwsr.exe [%BUILD_TYPE%]

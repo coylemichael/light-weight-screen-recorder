@@ -21,3 +21,5 @@ Video_Codec_Interface_13.0.19/
 # Backup files
 *.bak
 *~
+# Internal docs (not for public repo)
+docs/DEBUGGING_GUIDE.md

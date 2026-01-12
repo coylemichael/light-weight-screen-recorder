@@ -1,30 +1,47 @@
-# Quick Record
+# Light Weight Screen Recorder
 
-Ultra-lightweight screen recorder for Windows. ~30KB executable, no dependencies.
+Ultra-lightweight screen recorder for Windows with instant replay. ~30KB executable, no dependencies.
 
-## Features
+## What It Does
 
-- **Capture modes**: Area, Window, Monitor, All Monitors
-- **Output formats**: MP4 (H.264), AVI, WMV
-- **Quality presets**: Low, Medium, High, Lossless
-- **Hardware accelerated** via DXGI Desktop Duplication
-- **Macro key support**: Run again to stop recording (Stream Deck compatible)
-- **Instant Replay Buffer** (ShadowPlay-style):
-  - Continuously buffers last N seconds in RAM
-  - Press hotkey (F4) to save the replay as MP4
-  - Configurable duration: 1 second to 20 minutes
-  - Configurable FPS: 30, 60, or 120
-  - Aspect ratio options: Native, 16:9, 21:9, 4:3, 1:1, etc.
-  - RAM-based H.264 encoding (no disk I/O until save)
-  - Instant save (<500ms) via passthrough muxing
-- **Multi-source audio capture**:
-  - Up to 3 simultaneous audio sources (mic, desktop, game, etc.)
-  - Per-source volume sliders (0-100%)
-  - Synchronized mixing for clean output
+- Captures screen (area, window, monitor, or all monitors)
+- Records to MP4, AVI, or WMV with quality presets
+- Buffers the last 1 sec to 20 min in RAM (ShadowPlay-style instant replay)
+- Saves replays instantly with F4 (<500ms, no re-encoding)
+- Mixes up to 3 audio sources with per-source volume control
+- Hardware-accelerated via NVENC HEVC + DXGI Desktop Duplication
+
+> [!WARNING]
+> The replay buffer stores encoded video in RAM. Higher durations and resolutions use more memory:
+>
+> | Duration | Resolution | Approx. RAM |
+> |----------|------------|-------------|
+> | 15 sec   | 1080p 30fps | ~50 MB     |
+> | 1 min    | 1080p 30fps | ~200 MB    |
+> | 5 min    | 1080p 60fps | ~1.5 GB    |
+> | 20 min   | 1440p 60fps | ~8 GB      |
+>
+> If you're running low on memory, reduce the replay duration or resolution.
+
+## Quick Start
+
+<p align="center">
+  <img src="static/overlay.png" alt="LWSR Toolbar">
+</p>
+
+1. Download the [latest release](https://github.com/coylemichael/quick-record/releases/latest) and run `lwsr.exe`
+2. Click the gear icon to configure replay duration, quality, and audio sources
+3. Select a capture mode (Area, Window, Monitor, All Monitors)
+4. For Area mode, draw a selection rectangle on screen
+5. Click the red record button to start recording
+6. Press F4 anytime to save the last N seconds as a replay
 
 ## Build
 
-Requires Visual Studio Build Tools (MSVC).
+<details>
+<summary>Build from source</summary>
+
+Requires Visual Studio Build Tools (MSVC). The build script will prompt to install automatically if not found.
 
 ```batch
 build.bat
@@ -32,13 +49,4 @@ build.bat
 
 Output: `bin\lwsr.exe`
 
-## Usage
-
-1. Run `lwsr.exe`
-2. Select capture mode
-3. Click record or draw selection area
-4. Run `lwsr.exe` again or press ESC to stop
-
-## License
-
-MIT
+</details>
