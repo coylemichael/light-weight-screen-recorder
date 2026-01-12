@@ -39,6 +39,7 @@ static int g_audioSampleCapacity = 0;
 static CRITICAL_SECTION g_audioLock;
 static BYTE* g_aacConfigData = NULL;
 static int g_aacConfigSize = 0;
+static LONGLONG g_audioMaxDuration = 0;  // Max duration in 100-ns units for eviction
 
 extern CaptureState g_capture;
 extern AppConfig g_config;
@@ -63,13 +64,47 @@ static void AudioEncoderCallback(const AACSample* sample, void* userData) {
     
     EnterCriticalSection(&g_audioLock);
     
-    // Grow array if needed
+    // Time-based eviction: remove samples older than max duration
+    // This matches video buffer eviction behavior
+    if (g_audioSampleCount > 0 && g_audioMaxDuration > 0) {
+        int evicted = 0;
+        while (g_audioSampleCount > 0) {
+            LONGLONG oldest = g_audioSamples[0].timestamp;
+            LONGLONG span = sample->timestamp - oldest;
+            
+            if (span <= g_audioMaxDuration) {
+                break;  // Within duration limit
+            }
+            
+            // Evict oldest sample
+            if (g_audioSamples[0].data) {
+                free(g_audioSamples[0].data);
+            }
+            memmove(g_audioSamples, g_audioSamples + 1, 
+                    (g_audioSampleCount - 1) * sizeof(MuxerAudioSample));
+            g_audioSampleCount--;
+            evicted++;
+        }
+        
+        // Log eviction periodically
+        static int audioEvictLogCounter = 0;
+        if (evicted > 0 && (++audioEvictLogCounter % 500) == 0) {
+            double spanSec = 0;
+            if (g_audioSampleCount > 0) {
+                spanSec = (sample->timestamp - g_audioSamples[0].timestamp) / 10000000.0;
+            }
+            ReplayLog("Audio eviction: removed %d samples, count=%d, span=%.2fs\n",
+                      evicted, g_audioSampleCount, spanSec);
+        }
+    }
+    
+    // Grow array if needed (capacity-based)
     if (g_audioSampleCount >= g_audioSampleCapacity) {
         int newCapacity = g_audioSampleCapacity == 0 ? 1024 : g_audioSampleCapacity * 2;
         if (newCapacity > MAX_AUDIO_SAMPLES) newCapacity = MAX_AUDIO_SAMPLES;
         
         if (g_audioSampleCount >= newCapacity) {
-            // Buffer full - evict oldest samples (keep last ~75%)
+            // Still full after time eviction - emergency capacity eviction
             int toKeep = newCapacity * 3 / 4;
             int toRemove = g_audioSampleCount - toKeep;
             
@@ -180,6 +215,9 @@ BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
     strncpy(state->audioSource1, config->audioSource1, sizeof(state->audioSource1) - 1);
     strncpy(state->audioSource2, config->audioSource2, sizeof(state->audioSource2) - 1);
     strncpy(state->audioSource3, config->audioSource3, sizeof(state->audioSource3) - 1);
+    state->audioVolume1 = config->audioVolume1;
+    state->audioVolume2 = config->audioVolume2;
+    state->audioVolume3 = config->audioVolume3;
     
     if (!state->enabled) return FALSE;
     
@@ -455,15 +493,19 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                   state->audioSource3[0] ? state->audioSource3 : "none");
         
         g_audioCapture = AudioCapture_Create(
-            state->audioSource1,
-            state->audioSource2,
-            state->audioSource3
+            state->audioSource1, state->audioVolume1,
+            state->audioSource2, state->audioVolume2,
+            state->audioSource3, state->audioVolume3
         );
         
         if (g_audioCapture) {
             g_aacEncoder = AACEncoder_Create();
             if (g_aacEncoder) {
                 AACEncoder_SetCallback(g_aacEncoder, AudioEncoderCallback, NULL);
+                
+                // Set audio max duration to match video buffer (in 100-ns units)
+                g_audioMaxDuration = (LONGLONG)g_config.replayDuration * 10000000LL;
+                ReplayLog("Audio eviction enabled: max duration = %ds\n", g_config.replayDuration);
                 
                 // Get AAC config for muxer
                 AACEncoder_GetConfig(g_aacEncoder, &g_aacConfigData, &g_aacConfigSize);
@@ -540,10 +582,80 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
             ReplayLog("  Actual capture rate: %.2f fps (target: %d fps)\n", actualFPS, fps);
             ReplayLog("  Output path: %s\n", state->savePath);
             
-            // Write buffer to file
+            // Write buffer to file (with audio if available)
             BOOL ok = FALSE;
-            ReplayLog("  Starting save (video-only path)...\n");
-            ok = SampleBuffer_WriteToFile(&g_sampleBuffer, state->savePath);
+            
+            EnterCriticalSection(&g_audioLock);
+            int audioCount = g_audioSampleCount;
+            MuxerAudioSample* audioCopy = NULL;
+            
+            if (audioCount > 0 && g_audioSamples && g_aacConfigData && g_aacConfigSize > 0) {
+                // Deep copy audio samples
+                audioCopy = (MuxerAudioSample*)malloc(audioCount * sizeof(MuxerAudioSample));
+                if (audioCopy) {
+                    LONGLONG firstAudioTs = g_audioSamples[0].timestamp;
+                    for (int i = 0; i < audioCount; i++) {
+                        audioCopy[i].data = (BYTE*)malloc(g_audioSamples[i].size);
+                        if (audioCopy[i].data) {
+                            memcpy(audioCopy[i].data, g_audioSamples[i].data, g_audioSamples[i].size);
+                            audioCopy[i].size = g_audioSamples[i].size;
+                            audioCopy[i].timestamp = g_audioSamples[i].timestamp - firstAudioTs;
+                            audioCopy[i].duration = g_audioSamples[i].duration;
+                        } else {
+                            audioCopy[i].size = 0;
+                        }
+                    }
+                }
+            }
+            LeaveCriticalSection(&g_audioLock);
+            
+            // Get video samples
+            MuxerSample* videoSamples = NULL;
+            int videoCount = 0;
+            if (SampleBuffer_GetSamplesForMuxing(&g_sampleBuffer, &videoSamples, &videoCount)) {
+                // Build video config
+                MuxerConfig videoConfig;
+                videoConfig.width = g_sampleBuffer.width;
+                videoConfig.height = g_sampleBuffer.height;
+                videoConfig.fps = g_sampleBuffer.fps;
+                videoConfig.quality = g_sampleBuffer.quality;
+                videoConfig.seqHeader = g_sampleBuffer.seqHeaderSize > 0 ? g_sampleBuffer.seqHeader : NULL;
+                videoConfig.seqHeaderSize = g_sampleBuffer.seqHeaderSize;
+                
+                if (audioCopy && audioCount > 0) {
+                    // Mux with audio
+                    ReplayLog("  Starting save (audio+video path, %d audio samples)...\n", audioCount);
+                    MuxerAudioConfig audioConfig;
+                    audioConfig.sampleRate = 48000;
+                    audioConfig.channels = 2;
+                    audioConfig.bitrate = 192000;
+                    audioConfig.configData = g_aacConfigData;
+                    audioConfig.configSize = g_aacConfigSize;
+                    
+                    ok = MP4Muxer_WriteFileWithAudio(state->savePath, 
+                                                     videoSamples, videoCount, &videoConfig,
+                                                     audioCopy, audioCount, &audioConfig);
+                } else {
+                    // Video only
+                    ReplayLog("  Starting save (video-only path)...\n");
+                    ok = MP4Muxer_WriteFile(state->savePath, videoSamples, videoCount, &videoConfig);
+                }
+                
+                // Free video samples
+                for (int i = 0; i < videoCount; i++) {
+                    if (videoSamples[i].data) free(videoSamples[i].data);
+                }
+                free(videoSamples);
+            }
+            
+            // Free audio copy
+            if (audioCopy) {
+                for (int i = 0; i < audioCount; i++) {
+                    if (audioCopy[i].data) free(audioCopy[i].data);
+                }
+                free(audioCopy);
+            }
+            
             ReplayLog("SAVE %s\n", ok ? "OK" : "FAILED");
             
             state->saveSuccess = ok;

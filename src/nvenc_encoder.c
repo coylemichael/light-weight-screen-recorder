@@ -11,6 +11,11 @@
  * - Unmap AFTER LockBitstream returns (lines 4165-4167)
  * - Lock outputs in submission order (lines 3402-3404)
  * - Each output buffer has distinct completion event (line 2582)
+ * 
+ * CRITICAL FIX (per NVIDIA docs Section 6.3):
+ * - Desktop Duplication and NVENC use SEPARATE D3D11 devices
+ * - Shared textures with keyed mutex for cross-device synchronization
+ * - This eliminates thread contention that caused hangs
  */
 
 #include "nvenc_encoder.h"
@@ -19,6 +24,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <process.h>
+#include <dxgi.h>
+#include <dxgi1_2.h>
 
 // Include official NVIDIA header
 #include "../Video_Codec_Interface_13.0.19/Video_Codec_Interface_13.0.19/Interface/nvEncodeAPI.h"
@@ -47,7 +54,16 @@ struct NVENCEncoder {
     HMODULE nvencLib;
     NV_ENCODE_API_FUNCTION_LIST fn;
     void* encoder;
-    ID3D11Device* d3dDevice;
+    
+    // Own D3D11 device for NVENC (separate from capture device)
+    // This is CRITICAL per NVIDIA docs: Desktop Duplication and NVENC
+    // must use separate devices to avoid thread contention
+    ID3D11Device* encDevice;
+    ID3D11DeviceContext* encContext;
+    
+    // Reference to source device (for texture copies on source side)
+    ID3D11Device* srcDevice;
+    ID3D11DeviceContext* srcContext;
     
     // Dimensions and settings
     int width;
@@ -57,10 +73,18 @@ struct NVENCEncoder {
     uint64_t frameDuration;  // 100-ns units
     
     // Per API: Each in-flight frame needs its own input buffer
-    // We create NUM_BUFFERS NV12 textures for round-robin input
-    ID3D11Texture2D* inputTextures[NUM_BUFFERS];
+    // Staging textures on SOURCE device (shared with encoder device)
+    ID3D11Texture2D* stagingTextures[NUM_BUFFERS];  // On srcDevice, with SHARED flag
+    HANDLE sharedHandles[NUM_BUFFERS];               // For cross-device sharing
+    
+    // Input textures on ENCODER device (opened from shared handles)
+    ID3D11Texture2D* inputTextures[NUM_BUFFERS];    // On encDevice
     NV_ENC_REGISTERED_PTR registeredResources[NUM_BUFFERS];
     NV_ENC_INPUT_PTR mappedResources[NUM_BUFFERS];  // Track for unmap
+    
+    // Keyed mutexes for synchronization between devices
+    IDXGIKeyedMutex* srcMutex[NUM_BUFFERS];   // On source device textures
+    IDXGIKeyedMutex* encMutex[NUM_BUFFERS];   // On encoder device textures
     
     // Output bitstream buffers (one per in-flight frame)
     NV_ENC_OUTPUT_PTR outputBuffers[NUM_BUFFERS];
@@ -127,7 +151,8 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     NVENCEncoder* enc = (NVENCEncoder*)calloc(1, sizeof(NVENCEncoder));
     if (!enc) return NULL;
     
-    enc->d3dDevice = d3dDevice;
+    enc->srcDevice = d3dDevice;  // Keep reference to source device
+    d3dDevice->lpVtbl->GetImmediateContext(d3dDevice, &enc->srcContext);  // Get source context
     enc->width = width;
     enc->height = height;
     enc->fps = fps;
@@ -137,7 +162,49 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     InitializeCriticalSection(&enc->submitLock);
     
     // ========================================================================
-    // Step 1: Load nvEncodeAPI64.dll and get function list
+    // Step 1: Create SEPARATE D3D11 device for NVENC
+    // Per NVIDIA docs: Desktop Duplication + NVENC on same device causes
+    // thread contention. Using separate device eliminates this issue.
+    // ========================================================================
+    
+    {
+        // Get the adapter from source device to create encoder device on same GPU
+        IDXGIDevice* dxgiDevice = NULL;
+        IDXGIAdapter* adapter = NULL;
+        HRESULT hr = d3dDevice->lpVtbl->QueryInterface(d3dDevice, &IID_IDXGIDevice, (void**)&dxgiDevice);
+        if (SUCCEEDED(hr)) {
+            hr = dxgiDevice->lpVtbl->GetAdapter(dxgiDevice, &adapter);
+            dxgiDevice->lpVtbl->Release(dxgiDevice);
+        }
+        
+        D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_0 };
+        D3D_FEATURE_LEVEL featureLevel;
+        
+        // Create encoder's own D3D11 device on the same adapter
+        hr = D3D11CreateDevice(
+            adapter,  // Use same GPU as source
+            adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
+            NULL,
+            0,  // No special flags needed
+            featureLevels,
+            1,
+            D3D11_SDK_VERSION,
+            &enc->encDevice,
+            &featureLevel,
+            &enc->encContext
+        );
+        
+        if (adapter) adapter->lpVtbl->Release(adapter);
+        
+        if (FAILED(hr)) {
+            NvLog("NVENCEncoder: Failed to create encoder D3D11 device (0x%08X)\n", hr);
+            goto fail;
+        }
+        NvLog("NVENCEncoder: Created separate D3D11 device for encoding\n");
+    }
+    
+    // ========================================================================
+    // Step 2: Load nvEncodeAPI64.dll and get function list
     // ========================================================================
     
     enc->nvencLib = LoadLibraryA("nvEncodeAPI64.dll");
@@ -165,13 +232,13 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     }
     
     // ========================================================================
-    // Step 2: Open encode session with D3D11 device
+    // Step 3: Open encode session with ENCODER's D3D11 device (not source)
     // ========================================================================
     
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS sessionParams = {0};
     sessionParams.version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
     sessionParams.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
-    sessionParams.device = d3dDevice;
+    sessionParams.device = enc->encDevice;  // Use encoder's own device!
     sessionParams.apiVersion = NVENCAPI_VERSION;
     
     st = enc->fn.nvEncOpenEncodeSessionEx(&sessionParams, &enc->encoder);
@@ -378,31 +445,57 @@ BOOL NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, 
     
     int idx = enc->submitIndex;
     NVENCSTATUS st;
+    HRESULT hr;
     
     // ========================================================================
-    // Copy source texture to our input texture for this slot
-    // This allows the source to be reused immediately
+    // Step 1: Acquire keyed mutex on SOURCE device for writing
+    // Key 0 = available, Key 1 = encoder owns it
     // ========================================================================
-    
-    ID3D11DeviceContext* ctx = NULL;
-    enc->d3dDevice->lpVtbl->GetImmediateContext(enc->d3dDevice, &ctx);
-    if (ctx) {
-        ctx->lpVtbl->CopyResource(ctx, (ID3D11Resource*)enc->inputTextures[idx], 
-                                   (ID3D11Resource*)nv12Source);
-        ctx->lpVtbl->Release(ctx);
+    hr = enc->srcMutex[idx]->lpVtbl->AcquireSync(enc->srcMutex[idx], 0, 100);
+    if (hr == WAIT_TIMEOUT || FAILED(hr)) {
+        LeaveCriticalSection(&enc->submitLock);
+        static int mutexTimeoutCount = 0;
+        if ((++mutexTimeoutCount % 100) == 1) {
+            NvLog("NVENCEncoder: Mutex acquire timeout[%d] (0x%08X)\n", idx, hr);
+        }
+        return FALSE;
     }
     
     // ========================================================================
-    // Map the registered resource
-    // Per API (lines 4117-4153): nvEncMapInputResource provides GPU sync
+    // Step 2: Copy source texture to staging texture (on SOURCE device)
+    // Using SOURCE device context - this is safe, runs on capture thread
     // ========================================================================
+    enc->srcContext->lpVtbl->CopyResource(enc->srcContext, 
+                                           (ID3D11Resource*)enc->stagingTextures[idx], 
+                                           (ID3D11Resource*)nv12Source);
     
+    // ========================================================================
+    // Step 3: Release mutex with key 1 (signaling encoder can use it)
+    // ========================================================================
+    enc->srcMutex[idx]->lpVtbl->ReleaseSync(enc->srcMutex[idx], 1);
+    
+    // ========================================================================
+    // Step 4: Acquire mutex on ENCODER device for encoding
+    // ========================================================================
+    hr = enc->encMutex[idx]->lpVtbl->AcquireSync(enc->encMutex[idx], 1, 100);
+    if (hr == WAIT_TIMEOUT || FAILED(hr)) {
+        // Try to recover by releasing back to state 0
+        enc->srcMutex[idx]->lpVtbl->ReleaseSync(enc->srcMutex[idx], 0);
+        LeaveCriticalSection(&enc->submitLock);
+        NvLog("NVENCEncoder: Encoder mutex acquire failed[%d]\n", idx);
+        return FALSE;
+    }
+    
+    // ========================================================================
+    // Step 5: Map the registered resource (on ENCODER device)
+    // ========================================================================
     NV_ENC_MAP_INPUT_RESOURCE mapParams = {0};
     mapParams.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
     mapParams.registeredResource = enc->registeredResources[idx];
     
     st = enc->fn.nvEncMapInputResource(enc->encoder, &mapParams);
     if (st != NV_ENC_SUCCESS) {
+        enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
         LeaveCriticalSection(&enc->submitLock);
         NvLog("NVENCEncoder: MapInputResource[%d] failed (%d)\n", idx, st);
         return FALSE;
@@ -412,7 +505,7 @@ BOOL NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, 
     enc->mappedResources[idx] = mapParams.mappedResource;
     
     // ========================================================================
-    // Submit frame for encoding
+    // Step 6: Submit frame for encoding
     // Per API: In async mode, this returns immediately
     // ========================================================================
     
@@ -444,10 +537,15 @@ BOOL NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, 
     if (st != NV_ENC_SUCCESS && st != NV_ENC_ERR_NEED_MORE_INPUT) {
         enc->fn.nvEncUnmapInputResource(enc->encoder, mapParams.mappedResource);
         enc->mappedResources[idx] = NULL;
+        // Release mutex back to state 0 on error
+        enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
         LeaveCriticalSection(&enc->submitLock);
         NvLog("NVENCEncoder: EncodePicture[%d] failed (%d)\n", idx, st);
         return FALSE;
     }
+    
+    // NOTE: encMutex[idx] is still held! The output thread will release it
+    // after LockBitstream and UnmapInputResource complete.
     
     // Track pending frame
     enc->pendingTimestamps[idx] = timestamp;
@@ -567,11 +665,24 @@ void NVENCEncoder_Destroy(NVENCEncoder* enc) {
             }
         }
         
-        // Destroy input textures
+        // Destroy input textures (includes shared textures and mutexes)
         DestroyInputTextures(enc);
         
         // Destroy encoder
         enc->fn.nvEncDestroyEncoder(enc->encoder);
+    }
+    
+    // Release encoder's D3D11 device and context
+    if (enc->encContext) {
+        enc->encContext->lpVtbl->Release(enc->encContext);
+    }
+    if (enc->encDevice) {
+        enc->encDevice->lpVtbl->Release(enc->encDevice);
+    }
+    
+    // Release source context (we didn't AddRef the source device)
+    if (enc->srcContext) {
+        enc->srcContext->lpVtbl->Release(enc->srcContext);
     }
     
     if (enc->nvencLib) {
@@ -672,7 +783,16 @@ static unsigned __stdcall OutputThreadProc(void* param) {
         }
         
         // ====================================================================
-        // Step 5: Deliver frame and advance
+        // Step 5: Release keyed mutex - allows source device to reuse buffer
+        // Release with key 0 so source can acquire it again
+        // ====================================================================
+        
+        if (enc->encMutex[idx]) {
+            enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
+        }
+        
+        // ====================================================================
+        // Step 6: Deliver frame and advance
         // ====================================================================
         
         if (frame.data && enc->frameCallback) {
@@ -691,35 +811,86 @@ static unsigned __stdcall OutputThreadProc(void* param) {
 }
 
 // ============================================================================
-// Input Texture Management
+// Input Texture Management - Cross-Device Shared Textures
 // Per API: Each in-flight frame needs its own input buffer
+// 
+// We use shared textures with keyed mutex for synchronization:
+// 1. Create staging texture on SOURCE device with SHARED_KEYEDMUTEX flag
+// 2. Open that texture on ENCODER device via shared handle
+// 3. Use keyed mutex to synchronize copy (source) and encode (encoder)
 // ============================================================================
 
 static BOOL CreateInputTextures(NVENCEncoder* enc) {
     HRESULT hr;
     
-    // Create NV12 textures for each buffer slot
-    D3D11_TEXTURE2D_DESC texDesc = {0};
-    texDesc.Width = enc->width;
-    texDesc.Height = enc->height;
-    texDesc.MipLevels = 1;
-    texDesc.ArraySize = 1;
-    texDesc.Format = DXGI_FORMAT_NV12;
-    texDesc.SampleDesc.Count = 1;
-    texDesc.Usage = D3D11_USAGE_DEFAULT;
-    texDesc.BindFlags = D3D11_BIND_VIDEO_ENCODER;
-    texDesc.CPUAccessFlags = 0;
-    texDesc.MiscFlags = 0;
-    
     for (int i = 0; i < NUM_BUFFERS; i++) {
-        hr = enc->d3dDevice->lpVtbl->CreateTexture2D(enc->d3dDevice, &texDesc, NULL, 
-                                                      &enc->inputTextures[i]);
+        // ====================================================================
+        // Step 1: Create NV12 shared texture on SOURCE device
+        // ====================================================================
+        D3D11_TEXTURE2D_DESC stagingDesc = {0};
+        stagingDesc.Width = enc->width;
+        stagingDesc.Height = enc->height;
+        stagingDesc.MipLevels = 1;
+        stagingDesc.ArraySize = 1;
+        stagingDesc.Format = DXGI_FORMAT_NV12;
+        stagingDesc.SampleDesc.Count = 1;
+        stagingDesc.Usage = D3D11_USAGE_DEFAULT;
+        stagingDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;  // Needed for shared
+        stagingDesc.CPUAccessFlags = 0;
+        stagingDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
+        
+        hr = enc->srcDevice->lpVtbl->CreateTexture2D(enc->srcDevice, &stagingDesc, 
+                                                      NULL, &enc->stagingTextures[i]);
         if (FAILED(hr)) {
-            NvLog("NVENCEncoder: CreateTexture2D[%d] failed (0x%08X)\n", i, hr);
+            NvLog("NVENCEncoder: CreateTexture2D staging[%d] failed (0x%08X)\n", i, hr);
             return FALSE;
         }
         
-        // Register with NVENC
+        // Get keyed mutex for source-side texture
+        hr = enc->stagingTextures[i]->lpVtbl->QueryInterface(
+            enc->stagingTextures[i], &IID_IDXGIKeyedMutex, (void**)&enc->srcMutex[i]);
+        if (FAILED(hr)) {
+            NvLog("NVENCEncoder: QueryInterface IDXGIKeyedMutex src[%d] failed\n", i);
+            return FALSE;
+        }
+        
+        // Get shared handle
+        IDXGIResource* dxgiRes = NULL;
+        hr = enc->stagingTextures[i]->lpVtbl->QueryInterface(
+            enc->stagingTextures[i], &IID_IDXGIResource, (void**)&dxgiRes);
+        if (FAILED(hr)) {
+            NvLog("NVENCEncoder: QueryInterface IDXGIResource[%d] failed\n", i);
+            return FALSE;
+        }
+        hr = dxgiRes->lpVtbl->GetSharedHandle(dxgiRes, &enc->sharedHandles[i]);
+        dxgiRes->lpVtbl->Release(dxgiRes);
+        if (FAILED(hr)) {
+            NvLog("NVENCEncoder: GetSharedHandle[%d] failed\n", i);
+            return FALSE;
+        }
+        
+        // ====================================================================
+        // Step 2: Open shared texture on ENCODER device
+        // ====================================================================
+        hr = enc->encDevice->lpVtbl->OpenSharedResource(
+            enc->encDevice, enc->sharedHandles[i], &IID_ID3D11Texture2D, 
+            (void**)&enc->inputTextures[i]);
+        if (FAILED(hr)) {
+            NvLog("NVENCEncoder: OpenSharedResource[%d] failed (0x%08X)\n", i, hr);
+            return FALSE;
+        }
+        
+        // Get keyed mutex for encoder-side texture
+        hr = enc->inputTextures[i]->lpVtbl->QueryInterface(
+            enc->inputTextures[i], &IID_IDXGIKeyedMutex, (void**)&enc->encMutex[i]);
+        if (FAILED(hr)) {
+            NvLog("NVENCEncoder: QueryInterface IDXGIKeyedMutex enc[%d] failed\n", i);
+            return FALSE;
+        }
+        
+        // ====================================================================
+        // Step 3: Register encoder-side texture with NVENC
+        // ====================================================================
         NV_ENC_REGISTER_RESOURCE regParams = {0};
         regParams.version = NV_ENC_REGISTER_RESOURCE_VER;
         regParams.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
@@ -739,7 +910,7 @@ static BOOL CreateInputTextures(NVENCEncoder* enc) {
         enc->registeredResources[i] = regParams.registeredResource;
     }
     
-    NvLog("NVENCEncoder: Created %d input textures (%dx%d NV12)\n", 
+    NvLog("NVENCEncoder: Created %d shared textures (%dx%d NV12, cross-device)\n", 
           NUM_BUFFERS, enc->width, enc->height);
     return TRUE;
 }
@@ -756,9 +927,26 @@ static void DestroyInputTextures(NVENCEncoder* enc) {
             enc->registeredResources[i] = NULL;
         }
         
+        // Release encoder-side mutex and texture
+        if (enc->encMutex[i]) {
+            enc->encMutex[i]->lpVtbl->Release(enc->encMutex[i]);
+            enc->encMutex[i] = NULL;
+        }
         if (enc->inputTextures[i]) {
             enc->inputTextures[i]->lpVtbl->Release(enc->inputTextures[i]);
             enc->inputTextures[i] = NULL;
         }
+        
+        // Release source-side mutex and texture
+        if (enc->srcMutex[i]) {
+            enc->srcMutex[i]->lpVtbl->Release(enc->srcMutex[i]);
+            enc->srcMutex[i] = NULL;
+        }
+        if (enc->stagingTextures[i]) {
+            enc->stagingTextures[i]->lpVtbl->Release(enc->stagingTextures[i]);
+            enc->stagingTextures[i] = NULL;
+        }
+        
+        enc->sharedHandles[i] = NULL;
     }
 }

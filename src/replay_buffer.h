@@ -64,6 +64,9 @@ typedef struct {
     char audioSource1[256];
     char audioSource2[256];
     char audioSource3[256];
+    int audioVolume1;
+    int audioVolume2;
+    int audioVolume3;
 } ReplayBufferState;
 
 BOOL ReplayBuffer_Init(ReplayBufferState* state);

@@ -59,6 +59,9 @@ typedef struct {
     char audioSource1[128];          // Device ID for audio source 1 (empty = disabled)
     char audioSource2[128];          // Device ID for audio source 2 (empty = disabled)
     char audioSource3[128];          // Device ID for audio source 3 (empty = disabled)
+    int audioVolume1;                // Volume 0-100 for source 1
+    int audioVolume2;                // Volume 0-100 for source 2
+    int audioVolume3;                // Volume 0-100 for source 3
     
     // Save location
     char savePath[MAX_PATH];

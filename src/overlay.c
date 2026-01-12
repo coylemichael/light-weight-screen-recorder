@@ -168,6 +168,12 @@ extern HWND g_controlWnd;
 #define ID_CMB_AUDIO_SOURCE1    5002
 #define ID_CMB_AUDIO_SOURCE2    5003
 #define ID_CMB_AUDIO_SOURCE3    5004
+#define ID_SLD_AUDIO_VOLUME1    5005
+#define ID_SLD_AUDIO_VOLUME2    5006
+#define ID_SLD_AUDIO_VOLUME3    5007
+#define ID_LBL_AUDIO_VOL1       5008
+#define ID_LBL_AUDIO_VOL2       5009
+#define ID_LBL_AUDIO_VOL3       5010
 
 // Action toolbar button IDs
 #define ID_ACTION_RECORD   3001
@@ -2554,11 +2560,13 @@ static int PopulateAudioDropdown(HWND comboBox, const AudioDeviceList* devices, 
     int currentIdx = 0;
     
     // Add "None (Disabled)" option
-    SendMessageA(comboBox, CB_ADDSTRING, 0, (LPARAM)"None (Disabled)");
+    int itemIdx = (int)SendMessageA(comboBox, CB_ADDSTRING, 0, (LPARAM)"None (Disabled)");
+    SendMessageA(comboBox, CB_SETITEMDATA, itemIdx, (LPARAM)NULL);  // NULL = no device
     currentIdx++;
     
     // Add separator for outputs (system audio)
-    SendMessageA(comboBox, CB_ADDSTRING, 0, (LPARAM)"--- System Audio (Loopback) ---");
+    itemIdx = (int)SendMessageA(comboBox, CB_ADDSTRING, 0, (LPARAM)"--- System Audio (Loopback) ---");
+    SendMessageA(comboBox, CB_SETITEMDATA, itemIdx, (LPARAM)NULL);  // Separator - no data
     currentIdx++;
     
     // Add output devices
@@ -2571,7 +2579,9 @@ static int PopulateAudioDropdown(HWND comboBox, const AudioDeviceList* devices, 
                 strncpy(displayName, devices->devices[i].name, sizeof(displayName) - 1);
                 displayName[sizeof(displayName) - 1] = '\0';
             }
-            SendMessageA(comboBox, CB_ADDSTRING, 0, (LPARAM)displayName);
+            itemIdx = (int)SendMessageA(comboBox, CB_ADDSTRING, 0, (LPARAM)displayName);
+            // Store pointer to device ID (devices array must remain valid!)
+            SendMessageA(comboBox, CB_SETITEMDATA, itemIdx, (LPARAM)devices->devices[i].id);
             
             // Check if this is the selected device
             if (selectedDeviceId && selectedDeviceId[0] != '\0' &&
@@ -2583,7 +2593,8 @@ static int PopulateAudioDropdown(HWND comboBox, const AudioDeviceList* devices, 
     }
     
     // Add separator for inputs (microphones)
-    SendMessageA(comboBox, CB_ADDSTRING, 0, (LPARAM)"--- Microphones ---");
+    itemIdx = (int)SendMessageA(comboBox, CB_ADDSTRING, 0, (LPARAM)"--- Microphones ---");
+    SendMessageA(comboBox, CB_SETITEMDATA, itemIdx, (LPARAM)NULL);  // Separator - no data
     currentIdx++;
     
     // Add input devices
@@ -2596,7 +2607,9 @@ static int PopulateAudioDropdown(HWND comboBox, const AudioDeviceList* devices, 
                 strncpy(displayName, devices->devices[i].name, sizeof(displayName) - 1);
                 displayName[sizeof(displayName) - 1] = '\0';
             }
-            SendMessageA(comboBox, CB_ADDSTRING, 0, (LPARAM)displayName);
+            itemIdx = (int)SendMessageA(comboBox, CB_ADDSTRING, 0, (LPARAM)displayName);
+            // Store pointer to device ID
+            SendMessageA(comboBox, CB_SETITEMDATA, itemIdx, (LPARAM)devices->devices[i].id);
             
             // Check if this is the selected device
             if (selectedDeviceId && selectedDeviceId[0] != '\0' &&
@@ -3218,19 +3231,39 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SendMessage(chkAudio, BM_SETCHECK, g_config.audioEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
             y += 38;
             
-            // Enumerate audio devices
-            AudioDeviceList audioDevices;
+            // Enumerate audio devices - MUST be static so CB_SETITEMDATA pointers remain valid
+            // after WM_CREATE returns (they point to device IDs in this struct)
+            static AudioDeviceList audioDevices;
             AudioDevice_Enumerate(&audioDevices);
             
             // Audio Source 1
+            int audioDropW = 260;  // Reduced dropdown width
+            int sliderX = controlX + audioDropW + 10;
+            int sliderW = 100;
+            int volLblX = sliderX + sliderW + 5;
+            int volLblW = 40;
+            
             HWND lblAudio1 = CreateWindowExA(0, "STATIC", "Audio source 1",
                 WS_CHILD | WS_VISIBLE,
                 labelX, y + 5, labelW, 20, hwnd, NULL, g_hInstance, NULL);
             SendMessage(lblAudio1, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             HWND cmbAudio1 = CreateWindowExA(0, "COMBOBOX", "",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, controlW, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE1, g_hInstance, NULL);
+                controlX, y, audioDropW, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE1, g_hInstance, NULL);
             SendMessage(cmbAudio1, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            
+            // Volume slider 1
+            HWND sldVol1 = CreateWindowExA(0, TRACKBAR_CLASSA, "",
+                WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+                sliderX, y + 2, sliderW, 22, hwnd, (HMENU)ID_SLD_AUDIO_VOLUME1, g_hInstance, NULL);
+            SendMessage(sldVol1, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
+            SendMessage(sldVol1, TBM_SETPOS, TRUE, g_config.audioVolume1);
+            
+            char volBuf1[16]; sprintf(volBuf1, "%d%%", g_config.audioVolume1);
+            HWND lblVol1 = CreateWindowExA(0, "STATIC", volBuf1,
+                WS_CHILD | WS_VISIBLE,
+                volLblX, y + 5, volLblW, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL1, g_hInstance, NULL);
+            SendMessage(lblVol1, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             y += rowH;
             
             // Audio Source 2
@@ -3240,8 +3273,21 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SendMessage(lblAudio2, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             HWND cmbAudio2 = CreateWindowExA(0, "COMBOBOX", "",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, controlW, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE2, g_hInstance, NULL);
+                controlX, y, audioDropW, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE2, g_hInstance, NULL);
             SendMessage(cmbAudio2, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            
+            // Volume slider 2
+            HWND sldVol2 = CreateWindowExA(0, TRACKBAR_CLASSA, "",
+                WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+                sliderX, y + 2, sliderW, 22, hwnd, (HMENU)ID_SLD_AUDIO_VOLUME2, g_hInstance, NULL);
+            SendMessage(sldVol2, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
+            SendMessage(sldVol2, TBM_SETPOS, TRUE, g_config.audioVolume2);
+            
+            char volBuf2[16]; sprintf(volBuf2, "%d%%", g_config.audioVolume2);
+            HWND lblVol2 = CreateWindowExA(0, "STATIC", volBuf2,
+                WS_CHILD | WS_VISIBLE,
+                volLblX, y + 5, volLblW, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL2, g_hInstance, NULL);
+            SendMessage(lblVol2, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             y += rowH;
             
             // Audio Source 3
@@ -3251,8 +3297,21 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SendMessage(lblAudio3, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             HWND cmbAudio3 = CreateWindowExA(0, "COMBOBOX", "",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, controlW, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE3, g_hInstance, NULL);
+                controlX, y, audioDropW, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE3, g_hInstance, NULL);
             SendMessage(cmbAudio3, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            
+            // Volume slider 3
+            HWND sldVol3 = CreateWindowExA(0, TRACKBAR_CLASSA, "",
+                WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
+                sliderX, y + 2, sliderW, 22, hwnd, (HMENU)ID_SLD_AUDIO_VOLUME3, g_hInstance, NULL);
+            SendMessage(sldVol3, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
+            SendMessage(sldVol3, TBM_SETPOS, TRUE, g_config.audioVolume3);
+            
+            char volBuf3[16]; sprintf(volBuf3, "%d%%", g_config.audioVolume3);
+            HWND lblVol3 = CreateWindowExA(0, "STATIC", volBuf3,
+                WS_CHILD | WS_VISIBLE,
+                volLblX, y + 5, volLblW, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL3, g_hInstance, NULL);
+            SendMessage(lblVol3, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Populate audio dropdowns using helper function
             SendMessage(cmbAudio1, CB_SETCURSEL, PopulateAudioDropdown(cmbAudio1, &audioDevices, g_config.audioSource1), 0);
@@ -3467,6 +3526,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         } else {
                             g_config.audioSource1[0] = '\0';
                         }
+                        // Restart replay buffer to apply new audio source
+                        if (g_replayBuffer.isBuffering) {
+                            ReplayBuffer_Stop(&g_replayBuffer);
+                            ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                        }
                     }
                     break;
                     
@@ -3478,6 +3542,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                             strncpy(g_config.audioSource2, deviceId, sizeof(g_config.audioSource2) - 1);
                         } else {
                             g_config.audioSource2[0] = '\0';
+                        }
+                        // Restart replay buffer to apply new audio source
+                        if (g_replayBuffer.isBuffering) {
+                            ReplayBuffer_Stop(&g_replayBuffer);
+                            ReplayBuffer_Start(&g_replayBuffer, &g_config);
                         }
                     }
                     break;
@@ -3491,10 +3560,38 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         } else {
                             g_config.audioSource3[0] = '\0';
                         }
+                        // Restart replay buffer to apply new audio source
+                        if (g_replayBuffer.isBuffering) {
+                            ReplayBuffer_Stop(&g_replayBuffer);
+                            ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                        }
                     }
                     break;
             }
             return 0;
+        
+        case WM_HSCROLL: {
+            // Handle volume slider changes
+            HWND hSlider = (HWND)lParam;
+            int ctrlId = GetDlgCtrlID(hSlider);
+            int pos = (int)SendMessage(hSlider, TBM_GETPOS, 0, 0);
+            char buf[16];
+            
+            if (ctrlId == ID_SLD_AUDIO_VOLUME1) {
+                g_config.audioVolume1 = pos;
+                sprintf(buf, "%d%%", pos);
+                SetWindowTextA(GetDlgItem(hwnd, ID_LBL_AUDIO_VOL1), buf);
+            } else if (ctrlId == ID_SLD_AUDIO_VOLUME2) {
+                g_config.audioVolume2 = pos;
+                sprintf(buf, "%d%%", pos);
+                SetWindowTextA(GetDlgItem(hwnd, ID_LBL_AUDIO_VOL2), buf);
+            } else if (ctrlId == ID_SLD_AUDIO_VOLUME3) {
+                g_config.audioVolume3 = pos;
+                sprintf(buf, "%d%%", pos);
+                SetWindowTextA(GetDlgItem(hwnd, ID_LBL_AUDIO_VOL3), buf);
+            }
+            return 0;
+        }
         
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN:  // For Alt combinations

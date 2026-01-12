@@ -27,8 +27,14 @@ if exist "C:\Program Files\Microsoft Visual Studio\2022\Community\VC\Auxiliary\B
 REM Create output directory
 if not exist "bin" mkdir bin
 
+REM Compile resource file (icon)
+rc.exe /nologo /fo "bin\lwsr.res" "src\lwsr.rc"
+
 REM Source files (single source of truth)
 set SOURCES=src\main.c src\config.c src\capture.c src\encoder.c src\overlay.c src\action_toolbar.c src\border.c src\replay_buffer.c src\nvenc_encoder.c src\sample_buffer.c src\mp4_muxer.c src\util.c src\logger.c src\audio_device.c src\audio_capture.c src\aac_encoder.c src\gpu_converter.c
+
+REM Resource file
+set RESOURCES=bin\lwsr.res
 
 REM Libraries
 set LIBS=user32.lib gdi32.lib d3d11.lib dxgi.lib mfplat.lib mfreadwrite.lib mfuuid.lib ole32.lib shell32.lib comdlg32.lib comctl32.lib dwmapi.lib winmm.lib propsys.lib oleaut32.lib strmiids.lib
@@ -42,7 +48,7 @@ if "%BUILD_TYPE%"=="debug" (
         /Fd"bin\lwsr.pdb" ^
         %SOURCES% ^
         /link /DEBUG /SUBSYSTEM:WINDOWS ^
-        %LIBS%
+        %LIBS% %RESOURCES%
 ) else (
     echo Building Lightweight Screen Recorder [RELEASE]...
     cl.exe /nologo /O2 /GL /GS- /MD ^
@@ -51,7 +57,7 @@ if "%BUILD_TYPE%"=="debug" (
         /Fe"bin\lwsr.exe" ^
         %SOURCES% ^
         /link /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF ^
-        %LIBS%
+        %LIBS% %RESOURCES%
 )
 
 if %ERRORLEVEL% neq 0 (

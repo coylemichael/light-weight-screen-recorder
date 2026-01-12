@@ -27,6 +27,9 @@ typedef struct {
     AudioCaptureSource* sources[MAX_AUDIO_SOURCES];
     int sourceCount;
     
+    // Per-source volume (0-100)
+    int volumes[MAX_AUDIO_SOURCES];
+    
     // Mixed audio buffer (ring buffer)
     BYTE* mixBuffer;
     int mixBufferSize;
@@ -52,10 +55,11 @@ void AudioCapture_Shutdown(void);
 
 // Create capture context with specified sources
 // deviceIds can be NULL or empty string to skip that source
+// volumes are 0-100 (percentage)
 AudioCaptureContext* AudioCapture_Create(
-    const char* deviceId1,
-    const char* deviceId2,
-    const char* deviceId3
+    const char* deviceId1, int volume1,
+    const char* deviceId2, int volume2,
+    const char* deviceId3, int volume3
 );
 
 // Destroy capture context

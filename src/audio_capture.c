@@ -8,11 +8,13 @@
 #include <initguid.h>
 
 #include "audio_capture.h"
+#include "logger.h"
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <stdio.h>
 #include <math.h>
+#include <limits.h>
 
 // GUIDs
 DEFINE_GUID(IID_IAudioClient_Local, 0x1CB9AD4C, 0xDBFA, 0x4c32, 0xB1, 0x78, 0xC2, 0xF5, 0x68, 0xA7, 0x03, 0xB2);
@@ -138,6 +140,14 @@ static AudioCaptureSource* CreateSource(const char* deviceId) {
         return NULL;
     }
     
+    // Log device format for debugging
+    Logger_Log("Audio device format: %d Hz, %d ch, %d bit, tag=%d (target: %d Hz)\n",
+        src->deviceFormat->nSamplesPerSec,
+        src->deviceFormat->nChannels,
+        src->deviceFormat->wBitsPerSample,
+        src->deviceFormat->wFormatTag,
+        AUDIO_SAMPLE_RATE);
+    
     // Set up target format (what we want)
     src->targetFormat.wFormatTag = WAVE_FORMAT_PCM;
     src->targetFormat.nChannels = AUDIO_CHANNELS;
@@ -193,7 +203,9 @@ static BOOL InitSourceCapture(AudioCaptureSource* src) {
     // Buffer duration in 100ns units (100ms)
     REFERENCE_TIME bufferDuration = 1000000;  // 100ms
     
-    DWORD streamFlags = AUDCLNT_STREAMFLAGS_EVENTCALLBACK;
+    // NOTE: Don't use AUDCLNT_STREAMFLAGS_EVENTCALLBACK - we poll instead
+    // Using event callback requires SetEventHandle which adds complexity
+    DWORD streamFlags = 0;
     if (src->isLoopback) {
         streamFlags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
     }
@@ -228,65 +240,99 @@ static BOOL InitSourceCapture(AudioCaptureSource* src) {
     return TRUE;
 }
 
-// Convert audio samples to target format
+// KSDATAFORMAT_SUBTYPE_IEEE_FLOAT for WAVEFORMATEXTENSIBLE
+static const GUID KSDATAFORMAT_SUBTYPE_IEEE_FLOAT_Local = 
+    {0x00000003, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71}};
+
+// Convert audio samples to target format WITH RESAMPLING
+// Uses linear interpolation for sample rate conversion
 static int ConvertSamples(
     const BYTE* srcData, int srcSamples, const WAVEFORMATEX* srcFmt,
     BYTE* dstData, int dstMaxBytes, const WAVEFORMATEX* dstFmt
 ) {
     if (!srcData || !dstData || srcSamples == 0) return 0;
     
-    // Simple conversion: handles common cases
-    // For full resampling, we'd use a resampler library
-    
-    int dstSamples = 0;
-    int dstBytes = 0;
-    
     // Get source format details
     int srcChannels = srcFmt->nChannels;
     int srcBits = srcFmt->wBitsPerSample;
-    BOOL srcFloat = (srcFmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT) ||
-                    (srcFmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && srcBits == 32);
+    int srcRate = srcFmt->nSamplesPerSec;
+    
+    // Detect float format - check both plain tag and extensible SubFormat
+    BOOL srcFloat = (srcFmt->wFormatTag == WAVE_FORMAT_IEEE_FLOAT);
+    if (srcFmt->wFormatTag == WAVE_FORMAT_EXTENSIBLE && srcFmt->cbSize >= 22) {
+        // WAVEFORMATEXTENSIBLE - check SubFormat GUID
+        typedef struct {
+            WAVEFORMATEX Format;
+            union {
+                WORD wValidBitsPerSample;
+                WORD wSamplesPerBlock;
+                WORD wReserved;
+            } Samples;
+            DWORD dwChannelMask;
+            GUID SubFormat;
+        } WAVEFORMATEXTENSIBLE_LOCAL;
+        
+        const WAVEFORMATEXTENSIBLE_LOCAL* extFmt = (const WAVEFORMATEXTENSIBLE_LOCAL*)srcFmt;
+        if (memcmp(&extFmt->SubFormat, &KSDATAFORMAT_SUBTYPE_IEEE_FLOAT_Local, sizeof(GUID)) == 0) {
+            srcFloat = TRUE;
+        }
+    }
     
     // Get dest format details
     int dstChannels = dstFmt->nChannels;
-    int dstBits = dstFmt->wBitsPerSample;
+    int dstRate = dstFmt->nSamplesPerSec;
     
-    // Same sample rate assumed (for now - would need resampler otherwise)
-    dstSamples = srcSamples;
+    // Calculate output sample count based on sample rate ratio
+    int dstSamples = (int)((double)srcSamples * dstRate / srcRate);
     if (dstSamples * dstFmt->nBlockAlign > dstMaxBytes) {
         dstSamples = dstMaxBytes / dstFmt->nBlockAlign;
     }
+    if (dstSamples <= 0) return 0;
+    
+    // Helper function to read a source sample as float stereo
+    #define READ_SRC_SAMPLE(idx, pLeft, pRight) do { \
+        int _i = (idx); \
+        if (_i >= srcSamples) _i = srcSamples - 1; \
+        if (_i < 0) _i = 0; \
+        float _l = 0, _r = 0; \
+        if (srcFloat && srcBits == 32) { \
+            const float* sf = (const float*)(srcData + _i * srcFmt->nBlockAlign); \
+            _l = sf[0]; \
+            _r = (srcChannels >= 2) ? sf[1] : _l; \
+        } else if (srcBits == 16) { \
+            const short* ss = (const short*)(srcData + _i * srcFmt->nBlockAlign); \
+            _l = ss[0] / 32768.0f; \
+            _r = (srcChannels >= 2) ? ss[1] / 32768.0f : _l; \
+        } else if (srcBits == 24) { \
+            const BYTE* p = srcData + _i * srcFmt->nBlockAlign; \
+            int s1 = (p[0] | (p[1] << 8) | (p[2] << 16)); \
+            if (s1 & 0x800000) s1 |= 0xFF000000; \
+            _l = s1 / 8388608.0f; \
+            if (srcChannels >= 2) { \
+                int s2 = (p[3] | (p[4] << 8) | (p[5] << 16)); \
+                if (s2 & 0x800000) s2 |= 0xFF000000; \
+                _r = s2 / 8388608.0f; \
+            } else { _r = _l; } \
+        } \
+        *(pLeft) = _l; *(pRight) = _r; \
+    } while(0)
+    
+    // Resample using linear interpolation
+    double srcPos = 0.0;
+    double srcStep = (double)srcRate / dstRate;
     
     for (int i = 0; i < dstSamples; i++) {
-        // Read source sample(s) as float
-        float left = 0, right = 0;
+        int srcIdx = (int)srcPos;
+        double frac = srcPos - srcIdx;
         
-        if (srcFloat && srcBits == 32) {
-            const float* srcFloats = (const float*)(srcData + i * srcFmt->nBlockAlign);
-            left = srcFloats[0];
-            if (srcChannels >= 2) right = srcFloats[1];
-            else right = left;
-        } else if (srcBits == 16) {
-            const short* srcShorts = (const short*)(srcData + i * srcFmt->nBlockAlign);
-            left = srcShorts[0] / 32768.0f;
-            if (srcChannels >= 2) right = srcShorts[1] / 32768.0f;
-            else right = left;
-        } else if (srcBits == 24) {
-            const BYTE* p = srcData + i * srcFmt->nBlockAlign;
-            int s1 = (p[0] | (p[1] << 8) | (p[2] << 16));
-            if (s1 & 0x800000) s1 |= 0xFF000000;  // Sign extend
-            left = s1 / 8388608.0f;
-            if (srcChannels >= 2) {
-                int s2 = (p[3] | (p[4] << 8) | (p[5] << 16));
-                if (s2 & 0x800000) s2 |= 0xFF000000;
-                right = s2 / 8388608.0f;
-            } else {
-                right = left;
-            }
-        }
+        // Read two adjacent source samples
+        float left0, right0, left1, right1;
+        READ_SRC_SAMPLE(srcIdx, &left0, &right0);
+        READ_SRC_SAMPLE(srcIdx + 1, &left1, &right1);
         
-        // Write to destination as 16-bit
-        short* dstShorts = (short*)(dstData + i * dstFmt->nBlockAlign);
+        // Linear interpolation
+        float left = left0 + (float)(frac * (left1 - left0));
+        float right = right0 + (float)(frac * (right1 - right0));
         
         // Clamp
         if (left > 1.0f) left = 1.0f;
@@ -294,11 +340,17 @@ static int ConvertSamples(
         if (right > 1.0f) right = 1.0f;
         if (right < -1.0f) right = -1.0f;
         
+        // Write to destination as 16-bit
+        short* dstShorts = (short*)(dstData + i * dstFmt->nBlockAlign);
         dstShorts[0] = (short)(left * 32767.0f);
         if (dstChannels >= 2) {
             dstShorts[1] = (short)(right * 32767.0f);
         }
+        
+        srcPos += srcStep;
     }
+    
+    #undef READ_SRC_SAMPLE
     
     return dstSamples * dstFmt->nBlockAlign;
 }
@@ -402,9 +454,9 @@ static DWORD WINAPI SourceCaptureThread(LPVOID param) {
 }
 
 AudioCaptureContext* AudioCapture_Create(
-    const char* deviceId1,
-    const char* deviceId2,
-    const char* deviceId3
+    const char* deviceId1, int volume1,
+    const char* deviceId2, int volume2,
+    const char* deviceId3, int volume3
 ) {
     if (!AudioCapture_Init()) {
         return NULL;
@@ -415,6 +467,12 @@ AudioCaptureContext* AudioCapture_Create(
     
     InitializeCriticalSection(&ctx->mixLock);
     QueryPerformanceFrequency(&ctx->perfFreq);
+    
+    // Store volumes (clamp to 0-100)
+    int volumes[] = {volume1, volume2, volume3};
+    for (int i = 0; i < MAX_AUDIO_SOURCES; i++) {
+        ctx->volumes[i] = (volumes[i] < 0) ? 0 : (volumes[i] > 100) ? 100 : volumes[i];
+    }
     
     // Allocate mix buffer
     ctx->mixBufferSize = MIX_BUFFER_SIZE;
@@ -472,46 +530,68 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
     const int chunkSize = 4096;  // Process in chunks
     
     while (ctx->running) {
-        // Read from each source
-        int maxBytes = 0;
+        // Read from each source - use minBytes to keep sources synchronized
+        int minBytes = INT_MAX;
+        int activeSources = 0;
         
+        // First pass: check how much data is available from ALL sources
         for (int i = 0; i < ctx->sourceCount; i++) {
             AudioCaptureSource* src = ctx->sources[i];
             if (!src || !src->active) continue;
             
+            activeSources++;
+            EnterCriticalSection(&src->lock);
+            int available = src->bufferAvailable;
+            LeaveCriticalSection(&src->lock);
+            
+            if (available < minBytes) minBytes = available;
+        }
+        
+        // Only proceed if all sources have at least some data
+        if (activeSources == 0 || minBytes <= 0 || minBytes == INT_MAX) {
+            Sleep(2);  // Wait for data
+            continue;
+        }
+        
+        // Cap at chunk size
+        if (minBytes > chunkSize) minBytes = chunkSize;
+        
+        // Second pass: read minBytes from each source (keeps them synchronized)
+        for (int i = 0; i < ctx->sourceCount; i++) {
+            AudioCaptureSource* src = ctx->sources[i];
+            if (!src || !src->active) {
+                srcBytes[i] = 0;
+                continue;
+            }
+            
             EnterCriticalSection(&src->lock);
             
-            int available = src->bufferAvailable;
-            if (available > chunkSize) available = chunkSize;
+            // Read exactly minBytes from this source
+            int readPos = (src->bufferWritePos - src->bufferAvailable + src->bufferSize) % src->bufferSize;
+            int toEnd = src->bufferSize - readPos;
             
-            if (available > 0) {
-                // Read from ring buffer
-                int readPos = (src->bufferWritePos - src->bufferAvailable + src->bufferSize) % src->bufferSize;
-                int toEnd = src->bufferSize - readPos;
-                
-                if (available <= toEnd) {
-                    memcpy(srcBuffers[i], src->buffer + readPos, available);
-                } else {
-                    memcpy(srcBuffers[i], src->buffer + readPos, toEnd);
-                    memcpy(srcBuffers[i] + toEnd, src->buffer, available - toEnd);
-                }
-                
-                src->bufferAvailable -= available;
-                srcBytes[i] = available;
-                
-                if (available > maxBytes) maxBytes = available;
+            if (minBytes <= toEnd) {
+                memcpy(srcBuffers[i], src->buffer + readPos, minBytes);
             } else {
-                srcBytes[i] = 0;
+                memcpy(srcBuffers[i], src->buffer + readPos, toEnd);
+                memcpy(srcBuffers[i] + toEnd, src->buffer, minBytes - toEnd);
             }
+            
+            src->bufferAvailable -= minBytes;
+            srcBytes[i] = minBytes;
             
             LeaveCriticalSection(&src->lock);
         }
         
-        // Mix sources
-        if (maxBytes > 0) {
-            BYTE* mixChunk = (BYTE*)malloc(maxBytes);
+        // Mix sources - now all sources have exactly minBytes
+        if (minBytes > 0) {
+            BYTE* mixChunk = (BYTE*)malloc(minBytes);
             if (mixChunk) {
-                int numSamples = maxBytes / AUDIO_BLOCK_ALIGN;
+                int numSamples = minBytes / AUDIO_BLOCK_ALIGN;
+                
+                // Track peak for logging
+                static int peakLeft = 0, peakRight = 0;
+                static int logCounter = 0;
                 
                 for (int s = 0; s < numSamples; s++) {
                     int leftSum = 0, rightSum = 0;
@@ -520,17 +600,25 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
                     for (int i = 0; i < ctx->sourceCount; i++) {
                         if (srcBytes[i] > s * AUDIO_BLOCK_ALIGN) {
                             short* samples = (short*)(srcBuffers[i] + s * AUDIO_BLOCK_ALIGN);
-                            leftSum += samples[0];
-                            rightSum += samples[1];
+                            // Apply per-source volume (0-100)
+                            int vol = ctx->volumes[i];
+                            leftSum += (samples[0] * vol) / 100;
+                            rightSum += (samples[1] * vol) / 100;
                             srcCount++;
                         }
                     }
                     
-                    // Average and clamp
-                    if (srcCount > 0) {
+                    // Only average if multiple sources (don't attenuate single source)
+                    if (srcCount > 1) {
                         leftSum /= srcCount;
                         rightSum /= srcCount;
                     }
+                    
+                    // Track peaks
+                    int absL = leftSum < 0 ? -leftSum : leftSum;
+                    int absR = rightSum < 0 ? -rightSum : rightSum;
+                    if (absL > peakLeft) peakLeft = absL;
+                    if (absR > peakRight) peakRight = absR;
                     
                     // Clamp to prevent clipping
                     if (leftSum > 32767) leftSum = 32767;
@@ -543,13 +631,26 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
                     outSamples[1] = (short)rightSum;
                 }
                 
+                // Log peak levels periodically
+                logCounter++;
+                if (logCounter % 500 == 0) {
+                    // Convert to dB-ish scale (peak/32767 as percentage)
+                    float peakPctL = (float)peakLeft / 32767.0f * 100.0f;
+                    float peakPctR = (float)peakRight / 32767.0f * 100.0f;
+                    Logger_Log("Audio peak: L=%d (%.1f%%) R=%d (%.1f%%) sources=%d bytes=[%d,%d,%d]\n", 
+                               peakLeft, peakPctL, peakRight, peakPctR, ctx->sourceCount,
+                               srcBytes[0], srcBytes[1], srcBytes[2]);
+                    peakLeft = 0;
+                    peakRight = 0;
+                }
+                
                 // Write to mix buffer
                 EnterCriticalSection(&ctx->mixLock);
                 
                 int spaceAvailable = ctx->mixBufferSize - ctx->mixBufferAvailable;
-                if (maxBytes > spaceAvailable) {
+                if (minBytes > spaceAvailable) {
                     // Drop oldest
-                    int toDrop = maxBytes - spaceAvailable;
+                    int toDrop = minBytes - spaceAvailable;
                     ctx->mixBufferAvailable -= toDrop;
                     ctx->mixBufferReadPos = (ctx->mixBufferReadPos + toDrop) % ctx->mixBufferSize;
                 }
@@ -557,22 +658,20 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
                 int writePos = ctx->mixBufferWritePos;
                 int toEnd = ctx->mixBufferSize - writePos;
                 
-                if (maxBytes <= toEnd) {
-                    memcpy(ctx->mixBuffer + writePos, mixChunk, maxBytes);
+                if (minBytes <= toEnd) {
+                    memcpy(ctx->mixBuffer + writePos, mixChunk, minBytes);
                 } else {
                     memcpy(ctx->mixBuffer + writePos, mixChunk, toEnd);
-                    memcpy(ctx->mixBuffer, mixChunk + toEnd, maxBytes - toEnd);
+                    memcpy(ctx->mixBuffer, mixChunk + toEnd, minBytes - toEnd);
                 }
                 
-                ctx->mixBufferWritePos = (writePos + maxBytes) % ctx->mixBufferSize;
-                ctx->mixBufferAvailable += maxBytes;
+                ctx->mixBufferWritePos = (writePos + minBytes) % ctx->mixBufferSize;
+                ctx->mixBufferAvailable += minBytes;
                 
                 LeaveCriticalSection(&ctx->mixLock);
                 
                 free(mixChunk);
             }
-        } else {
-            Sleep(5);
         }
     }
     

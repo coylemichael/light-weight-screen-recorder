@@ -50,6 +50,9 @@ void Config_Load(AppConfig* config) {
     config->audioSource1[0] = '\0';
     config->audioSource2[0] = '\0';
     config->audioSource3[0] = '\0';
+    config->audioVolume1 = 100;
+    config->audioVolume2 = 100;
+    config->audioVolume3 = 100;
     
     // Default save path to Videos folder
     if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_MYVIDEO, NULL, 0, config->savePath))) {
@@ -109,6 +112,9 @@ void Config_Load(AppConfig* config) {
             config->audioSource2, sizeof(config->audioSource2), configPath);
         GetPrivateProfileStringA("Audio", "Source3", "",
             config->audioSource3, sizeof(config->audioSource3), configPath);
+        config->audioVolume1 = GetPrivateProfileIntA("Audio", "Volume1", 100, configPath);
+        config->audioVolume2 = GetPrivateProfileIntA("Audio", "Volume2", 100, configPath);
+        config->audioVolume3 = GetPrivateProfileIntA("Audio", "Volume3", 100, configPath);
         
         GetPrivateProfileStringA("Recording", "SavePath", config->savePath,
             config->savePath, MAX_PATH, configPath);
@@ -190,6 +196,12 @@ void Config_Save(const AppConfig* config) {
     WritePrivateProfileStringA("Audio", "Source1", config->audioSource1, configPath);
     WritePrivateProfileStringA("Audio", "Source2", config->audioSource2, configPath);
     WritePrivateProfileStringA("Audio", "Source3", config->audioSource3, configPath);
+    sprintf(buffer, "%d", config->audioVolume1);
+    WritePrivateProfileStringA("Audio", "Volume1", buffer, configPath);
+    sprintf(buffer, "%d", config->audioVolume2);
+    WritePrivateProfileStringA("Audio", "Volume2", buffer, configPath);
+    sprintf(buffer, "%d", config->audioVolume3);
+    WritePrivateProfileStringA("Audio", "Volume3", buffer, configPath);
     
     WritePrivateProfileStringA("Recording", "SavePath", config->savePath, configPath);
     

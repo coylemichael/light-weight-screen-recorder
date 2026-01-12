@@ -352,8 +352,20 @@ BOOL MP4Muxer_WriteFileWithAudio(
     int audioIdx = 0;
     int videoWritten = 0;
     int audioWritten = 0;
+    int totalSamples = videoSampleCount + audioSampleCount;
+    int samplesProcessed = 0;
+    int lastProgressPercent = -1;
     
     while (videoIdx < videoSampleCount || audioIdx < audioSampleCount) {
+        // Log progress every 10%
+        samplesProcessed++;
+        int progressPercent = (samplesProcessed * 100) / totalSamples;
+        if (progressPercent >= lastProgressPercent + 10) {
+            lastProgressPercent = progressPercent;
+            MuxLog("MP4Muxer: Progress %d%% (%d/%d samples)\n", 
+                   progressPercent, samplesProcessed, totalSamples);
+        }
+        
         BOOL writeVideo = FALSE;
         
         if (videoIdx >= videoSampleCount) {

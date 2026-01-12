@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.2.2] - 2026-01-12
+
+### Added
+- **Per-source volume sliders** - Each audio source now has an independent volume control (0-100%)
+  - Sliders appear inline next to each audio source dropdown in settings
+  - Real-time percentage label updates as slider moves
+  - Volumes saved to config and persist across sessions
+  - Applied during mixing: samples scaled by volume before summing
+
+### Fixed
+- **Audio mixing synchronization** - Multiple audio sources now mix properly without phase issues
+  - Wait for all sources to have data before mixing
+  - Use minimum available bytes across all sources for each mix cycle
+  - Prevents choppy/distorted audio when mixing 2+ sources
+
+---
+
 ## [1.2.1] - 2026-01-05
 
 ### Fixed

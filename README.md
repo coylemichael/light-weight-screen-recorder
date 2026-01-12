@@ -17,6 +17,10 @@ Ultra-lightweight screen recorder for Windows. ~30KB executable, no dependencies
   - Aspect ratio options: Native, 16:9, 21:9, 4:3, 1:1, etc.
   - RAM-based H.264 encoding (no disk I/O until save)
   - Instant save (<500ms) via passthrough muxing
+- **Multi-source audio capture**:
+  - Up to 3 simultaneous audio sources (mic, desktop, game, etc.)
+  - Per-source volume sliders (0-100%)
+  - Synchronized mixing for clean output
 
 ## Build
 
