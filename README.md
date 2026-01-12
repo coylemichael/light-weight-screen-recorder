@@ -1,15 +1,10 @@
 # Light Weight Screen Recorder
 
-Lightweight screen recorder for Windows with instant replay. ~300KB executable, no dependencies. Requires an NVIDIA GPU for hardware encoding.
+Lightweight screen recorder for Windows with instant replay. Requires an NVIDIA GPU.
 
-## What It Does
-
-- Captures screen (area, window, monitor, or all monitors)
-- Records to MP4, AVI, or WMV with quality presets
-- Buffers the last 1 sec to 20 min in RAM for instant replay
-- Saves replays instantly with F4 (<500ms, no re-encoding)
-- Mixes up to 3 audio sources with per-source volume control
-- Hardware-accelerated via NVENC HEVC + DXGI Desktop Duplication
+- Capture area, window, or monitor to MP4/AVI/WMV
+- Buffer as much time as your RAM allows, save instantly with F4
+- Mix up to 3 audio sources with volume control
 
 ## Quick Start
 
@@ -24,7 +19,7 @@ Lightweight screen recorder for Windows with instant replay. ~300KB executable, 
   <img src="static/overlay.png" alt="LWSR Toolbar">
 </p>
 
-> [!WARNING]
+> [!IMPORTANT]
 > The replay buffer stores encoded video in RAM. Higher durations and resolutions use more memory:
 >
 > | Duration | Resolution | Approx. RAM |
