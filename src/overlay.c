@@ -85,15 +85,16 @@ static GdipStartPathFigureFunc GdipStartPathFigure = NULL;
 #define FillModeAlternate 0
 
 // DWM window corner preference (Windows 11+)
+// Only define if not already in SDK (older SDKs don't have this)
 #ifndef DWMWA_WINDOW_CORNER_PREFERENCE
 #define DWMWA_WINDOW_CORNER_PREFERENCE 33
-#endif
 typedef enum {
     DWMWCP_DEFAULT = 0,
     DWMWCP_DONOTROUND = 1,
     DWMWCP_ROUND = 2,
     DWMWCP_ROUNDSMALL = 3
 } DWM_WINDOW_CORNER_PREFERENCE;
+#endif
 
 // OCR_NORMAL not defined in some Windows headers
 #ifndef OCR_NORMAL
