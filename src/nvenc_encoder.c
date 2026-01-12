@@ -28,7 +28,7 @@
 #include <dxgi1_2.h>
 
 // Include official NVIDIA header
-#include "../Video_Codec_Interface_13.0.19/Video_Codec_Interface_13.0.19/Interface/nvEncodeAPI.h"
+#include "nvEncodeAPI.h"
 
 #define NvLog Logger_Log
 
