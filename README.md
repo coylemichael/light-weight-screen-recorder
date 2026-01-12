@@ -6,7 +6,7 @@ Ultra-lightweight screen recorder for Windows with instant replay. ~30KB executa
 
 - Captures screen (area, window, monitor, or all monitors)
 - Records to MP4, AVI, or WMV with quality presets
-- Buffers the last 1 sec to 20 min in RAM (ShadowPlay-style instant replay)
+- Buffers the last 1 sec to 20 min in RAM for instant replay
 - Saves replays instantly with F4 (<500ms, no re-encoding)
 - Mixes up to 3 audio sources with per-source volume control
 - Hardware-accelerated via NVENC HEVC + DXGI Desktop Duplication
@@ -50,3 +50,9 @@ build.bat
 Output: `bin\lwsr.exe`
 
 </details>
+
+## Verification
+
+- ✅ **Attestation** - Releases are built on GitHub Actions with [build provenance](https://docs.github.com/en/actions/security-guides/using-artifact-attestations-to-establish-provenance-for-builds)
+- ✅ **SHA256 hash** - Each release includes a hash for integrity verification
+- ✅ **Open source** - Audit the code or build it yourself
