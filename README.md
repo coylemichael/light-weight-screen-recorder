@@ -1,10 +1,6 @@
 # Light Weight Screen Recorder
 
-Lightweight screen recorder for Windows with instant replay. Requires an NVIDIA GPU.
-
-- Capture area, window, or monitor to MP4/AVI/WMV
-- Buffer as much time as your RAM allows, save instantly with F4
-- Mix up to 3 audio sources with volume control
+Lightweight screen recorder for Windows with instant replay. Buffer as much as your RAM allows and save replays instantly. Requires an NVIDIA GPU.
 
 ## Quick Start
 
