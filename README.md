@@ -9,14 +9,12 @@ Lightweight screen recorder for Windows with instant replay. Requires an NVIDIA 
 ## Quick Start
 
 1. Download the [latest release](https://github.com/coylemichael/light-weight-screen-recorder/releases/latest) and run `lwsr.exe`
-2. Click the gear icon to configure replay duration, quality, and audio sources
-3. Select a capture mode (Area, Window, Monitor, All Monitors)
-4. For Area mode, draw a selection rectangle on screen
-5. Click the red record button to start recording
-6. Press F4 anytime to save the last N seconds as a replay
+2. Configure settings via the gear icon
 
-<p align="center">
-  <img src="static/overlay.png" alt="LWSR Toolbar">
+**To record:** Select capture mode → hit record → stop when done
+
+**To save a replay:** Press F4 anytime (buffer runs in background)
+
 </p>
 
 > [!IMPORTANT]
@@ -30,6 +28,10 @@ Lightweight screen recorder for Windows with instant replay. Requires an NVIDIA 
 > | 20 min   | 1440p 60fps | ~8 GB      |
 >
 > If you're running low on memory, reduce the replay duration or resolution.
+
+<p align="center">
+  <img src="static/overlay.png" alt="LWSR Toolbar">
+
 
 ## Build
 
