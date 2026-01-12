@@ -1,6 +1,6 @@
 # Light Weight Screen Recorder
 
-Ultra-lightweight screen recorder for Windows with instant replay. ~30KB executable, no dependencies.
+Lightweight screen recorder for Windows with instant replay. ~300KB executable, no dependencies. Requires an NVIDIA GPU for hardware encoding.
 
 ## What It Does
 
@@ -29,7 +29,7 @@ Ultra-lightweight screen recorder for Windows with instant replay. ~30KB executa
   <img src="static/overlay.png" alt="LWSR Toolbar">
 </p>
 
-1. Download the [latest release](https://github.com/coylemichael/quick-record/releases/latest) and run `lwsr.exe`
+1. Download the [latest release](https://github.com/coylemichael/light-weight-screen-recorder/releases/latest) and run `lwsr.exe`
 2. Click the gear icon to configure replay duration, quality, and audio sources
 3. Select a capture mode (Area, Window, Monitor, All Monitors)
 4. For Area mode, draw a selection rectangle on screen
