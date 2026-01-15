@@ -119,7 +119,6 @@ struct NVENCEncoder {
     int mutexTimeoutCount;
     
     BOOL initialized;
-    BOOL asyncMode;
 };
 
 // ============================================================================
@@ -161,7 +160,6 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     enc->height = height;
     enc->fps = fps;
     enc->frameDuration = 10000000ULL / fps;
-    enc->asyncMode = TRUE;
     
     InitializeCriticalSection(&enc->submitLock);
     
@@ -255,15 +253,15 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     NvLog("NVENCEncoder: SDK API version %d.%d\n",
           NVENCAPI_MAJOR_VERSION, NVENCAPI_MINOR_VERSION);
     
-    // Check async support
+    // Check async support - required for this implementation
     NV_ENC_CAPS_PARAM capsParam = {0};
     capsParam.version = NV_ENC_CAPS_PARAM_VER;
     capsParam.capsToQuery = NV_ENC_CAPS_ASYNC_ENCODE_SUPPORT;
     int capsVal = 0;
     enc->fn.nvEncGetEncodeCaps(enc->encoder, NV_ENC_CODEC_HEVC_GUID, &capsParam, &capsVal);
     if (!capsVal) {
-        NvLog("NVENCEncoder: Async mode not supported, falling back to sync\n");
-        enc->asyncMode = FALSE;
+        NvLog("NVENCEncoder: Async mode not supported - this GPU/driver does not support async encoding\n");
+        goto fail;
     }
     
     // ========================================================================
@@ -330,27 +328,18 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     initParams.darHeight = height;
     initParams.frameRateNum = fps;
     initParams.frameRateDen = 1;
-    initParams.enableEncodeAsync = enc->asyncMode ? 1 : 0;
+    initParams.enableEncodeAsync = 1;  // Async mode required
     initParams.enablePTD = 1;  // Let NVENC decide picture types
     initParams.encodeConfig = &config;
     initParams.tuningInfo = NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
     
     st = enc->fn.nvEncInitializeEncoder(enc->encoder, &initParams);
     if (st != NV_ENC_SUCCESS) {
-        if (enc->asyncMode) {
-            NvLog("NVENCEncoder: Async init failed (%d), trying sync\n", st);
-            enc->asyncMode = FALSE;
-            initParams.enableEncodeAsync = 0;
-            st = enc->fn.nvEncInitializeEncoder(enc->encoder, &initParams);
-        }
-        if (st != NV_ENC_SUCCESS) {
-            NvLog("NVENCEncoder: Initialize failed (%d)\n", st);
-            goto fail;
-        }
+        NvLog("NVENCEncoder: Initialize failed (%d)\n", st);
+        goto fail;
     }
     
-    NvLog("NVENCEncoder: HEVC CQP (QP=%d), mode=%s\n", 
-          enc->qp, enc->asyncMode ? "ASYNC" : "SYNC");
+    NvLog("NVENCEncoder: HEVC CQP (QP=%d), async mode\n", enc->qp);
     
     // ========================================================================
     // Step 5: Create input textures (one per buffer slot)
@@ -379,45 +368,41 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
         }
         enc->outputBuffers[i] = createBitstreamParams.bitstreamBuffer;
         
-        // Create and register completion event (async mode only)
-        if (enc->asyncMode) {
-            enc->completionEvents[i] = CreateEvent(NULL, FALSE, FALSE, NULL);
-            if (!enc->completionEvents[i]) {
-                NvLog("NVENCEncoder: CreateEvent[%d] failed\n", i);
-                goto fail;
-            }
-            
-            NV_ENC_EVENT_PARAMS eventParams = {0};
-            eventParams.version = NV_ENC_EVENT_PARAMS_VER;
-            eventParams.completionEvent = enc->completionEvents[i];
-            
-            st = enc->fn.nvEncRegisterAsyncEvent(enc->encoder, &eventParams);
-            if (st != NV_ENC_SUCCESS) {
-                NvLog("NVENCEncoder: RegisterAsyncEvent[%d] failed (%d)\n", i, st);
-                CloseHandle(enc->completionEvents[i]);
-                enc->completionEvents[i] = NULL;
-                goto fail;
-            }
+        // Create and register completion event
+        enc->completionEvents[i] = CreateEvent(NULL, FALSE, FALSE, NULL);
+        if (!enc->completionEvents[i]) {
+            NvLog("NVENCEncoder: CreateEvent[%d] failed\n", i);
+            goto fail;
         }
-    }
-    
-    // ========================================================================
-    // Step 7: Start output thread (async mode only)
-    // Per API (lines 3384-3388): "The client can create another thread and 
-    // wait on the event object to be signaled"
-    // ========================================================================
-    
-    if (enc->asyncMode) {
-        enc->stopThread = FALSE;
-        enc->outputThread = (HANDLE)_beginthreadex(NULL, 0, OutputThreadProc, enc, 0, NULL);
-        if (!enc->outputThread) {
-            NvLog("NVENCEncoder: Failed to create output thread\n");
+        
+        NV_ENC_EVENT_PARAMS eventParams = {0};
+        eventParams.version = NV_ENC_EVENT_PARAMS_VER;
+        eventParams.completionEvent = enc->completionEvents[i];
+        
+        st = enc->fn.nvEncRegisterAsyncEvent(enc->encoder, &eventParams);
+        if (st != NV_ENC_SUCCESS) {
+            NvLog("NVENCEncoder: RegisterAsyncEvent[%d] failed (%d)\n", i, st);
+            CloseHandle(enc->completionEvents[i]);
+            enc->completionEvents[i] = NULL;
             goto fail;
         }
     }
     
+    // ========================================================================
+    // Step 7: Start output thread
+    // Per API (lines 3384-3388): "The client can create another thread and 
+    // wait on the event object to be signaled"
+    // ========================================================================
+    
+    enc->stopThread = FALSE;
+    enc->outputThread = (HANDLE)_beginthreadex(NULL, 0, OutputThreadProc, enc, 0, NULL);
+    if (!enc->outputThread) {
+        NvLog("NVENCEncoder: Failed to create output thread\n");
+        goto fail;
+    }
+    
     enc->initialized = TRUE;
-    NvLog("NVENCEncoder: Ready (%d buffers, async=%d)\n", NUM_BUFFERS, enc->asyncMode);
+    NvLog("NVENCEncoder: Ready (%d buffers, async)\n", NUM_BUFFERS);
     return enc;
     
 fail:
@@ -524,10 +509,7 @@ BOOL NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, 
     picParams.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
     picParams.inputTimeStamp = timestamp;
     picParams.inputDuration = enc->frameDuration;
-    
-    if (enc->asyncMode) {
-        picParams.completionEvent = enc->completionEvents[idx];
-    }
+    picParams.completionEvent = enc->completionEvents[idx];
     
     // Force IDR every 2 seconds for seeking
     if (enc->frameNumber % (enc->fps * 2) == 0) {
@@ -559,20 +541,15 @@ BOOL NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, 
     
     LeaveCriticalSection(&enc->submitLock);
     
-    // In sync mode, retrieve immediately
-    if (!enc->asyncMode) {
-        // TODO: Handle sync mode retrieval
-    }
-    
     return TRUE;
 }
 
 int NVENCEncoder_DrainCompleted(NVENCEncoder* enc, EncodedFrameCallback callback, void* userData) {
-    // This is only for sync mode or manual draining
-    // In async mode, the output thread handles this
-    if (!enc || !enc->initialized || enc->asyncMode) return 0;
-    
-    // TODO: Implement sync mode draining
+    // In async mode, the output thread handles frame retrieval
+    // This function is a no-op as draining happens automatically via callback
+    (void)enc;
+    (void)callback;
+    (void)userData;
     return 0;
 }
 
@@ -656,7 +633,7 @@ void NVENCEncoder_Destroy(NVENCEncoder* enc) {
         
         // Unregister events and destroy buffers
         for (int i = 0; i < NUM_BUFFERS; i++) {
-            if (enc->asyncMode && enc->completionEvents[i]) {
+            if (enc->completionEvents[i]) {
                 NV_ENC_EVENT_PARAMS eventParams = {0};
                 eventParams.version = NV_ENC_EVENT_PARAMS_VER;
                 eventParams.completionEvent = enc->completionEvents[i];

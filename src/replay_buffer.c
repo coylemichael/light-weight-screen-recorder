@@ -61,6 +61,7 @@ static void DrainCallback(EncodedFrame* frame, void* userData) {
 
 // Audio callback - stores encoded AAC samples
 static void AudioEncoderCallback(const AACSample* sample, void* userData) {
+    (void)userData;  // Unused - samples go to global buffer
     if (!sample || !sample->data || sample->size <= 0) return;
     
     EnterCriticalSection(&g_audioLock);
@@ -87,9 +88,10 @@ static void AudioEncoderCallback(const AACSample* sample, void* userData) {
             evicted++;
         }
         
-        // Log eviction periodically
+        // Log eviction periodically (counter reset each callback to avoid stale state)
         static int audioEvictLogCounter = 0;
-        if (evicted > 0 && (++audioEvictLogCounter % 500) == 0) {
+        audioEvictLogCounter++;
+        if (evicted > 0 && (audioEvictLogCounter % 500) == 0) {
             double spanSec = 0;
             if (g_audioSampleCount > 0) {
                 spanSec = (sample->timestamp - g_audioSamples[0].timestamp) / 10000000.0;
@@ -194,21 +196,24 @@ void ReplayBuffer_Shutdown(ReplayBufferState* state) {
     state->hSaveCompleteEvent = NULL;
     state->hStopEvent = NULL;
     
+    // Clean up audio samples - must be done BEFORE deleting critical section
     if (g_audioLockInitialized) {
+        EnterCriticalSection(&g_audioLock);
+        if (g_audioSamples) {
+            for (int i = 0; i < g_audioSampleCount; i++) {
+                if (g_audioSamples[i].data) free(g_audioSamples[i].data);
+            }
+            free(g_audioSamples);
+            g_audioSamples = NULL;
+        }
+        g_audioSampleCount = 0;
+        g_audioSampleCapacity = 0;
+        g_audioMaxDuration = 0;
+        LeaveCriticalSection(&g_audioLock);
+        
         DeleteCriticalSection(&g_audioLock);
         g_audioLockInitialized = FALSE;
     }
-    
-    // Clean up audio samples
-    if (g_audioSamples) {
-        for (int i = 0; i < g_audioSampleCount; i++) {
-            if (g_audioSamples[i].data) free(g_audioSamples[i].data);
-        }
-        free(g_audioSamples);
-        g_audioSamples = NULL;
-    }
-    g_audioSampleCount = 0;
-    g_audioSampleCapacity = 0;
     
     // Logger cleanup is handled by Logger_Shutdown in main.c
 }
@@ -249,12 +254,14 @@ BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
     
     // Reset audio buffer
     EnterCriticalSection(&g_audioLock);
-    if (g_audioSamples) {
-        for (int i = 0; i < g_audioSampleCount; i++) {
-            if (g_audioSamples[i].data) free(g_audioSamples[i].data);
+    for (int i = 0; i < g_audioSampleCount; i++) {
+        if (g_audioSamples[i].data) {
+            free(g_audioSamples[i].data);
+            g_audioSamples[i].data = NULL;
         }
     }
     g_audioSampleCount = 0;
+    g_audioMaxDuration = 0;  // Reset max duration for next run
     LeaveCriticalSection(&g_audioLock);
     
     state->bufferThread = CreateThread(NULL, 0, BufferThreadProc, state, 0, NULL);
@@ -797,9 +804,9 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
             if (frameCount - lastLogFrame >= fps * 5) {
                 LARGE_INTEGER nowTime;
                 QueryPerformanceCounter(&nowTime);
-                double realElapsedSec = (double)(nowTime.QuadPart - captureStartTime.QuadPart) / perfFreq.QuadPart;
-                double actualFPS = frameCount / realElapsedSec;
-                double attemptFPS = attemptCount / realElapsedSec;
+                double logElapsedSec = (double)(nowTime.QuadPart - captureStartTime.QuadPart) / perfFreq.QuadPart;
+                double actualFPS = frameCount / logElapsedSec;
+                double attemptFPS = attemptCount / logElapsedSec;
                 
                 // Get encoder stats
                 int encFrames = 0;

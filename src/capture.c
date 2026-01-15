@@ -120,10 +120,11 @@ BOOL Capture_GetWindowRect(HWND hwnd, RECT* rect) {
     // Use DwmGetWindowAttribute for accurate bounds if available
     typedef HRESULT (WINAPI *DwmGetWindowAttributeFunc)(HWND, DWORD, PVOID, DWORD);
     static DwmGetWindowAttributeFunc pDwmGetWindowAttribute = NULL;
+    static HMODULE hDwm = NULL;  // Keep handle to avoid leak
     static BOOL tried = FALSE;
     
     if (!tried) {
-        HMODULE hDwm = LoadLibraryA("dwmapi.dll");
+        hDwm = LoadLibraryA("dwmapi.dll");
         if (hDwm) {
             pDwmGetWindowAttribute = (DwmGetWindowAttributeFunc)
                 GetProcAddress(hDwm, "DwmGetWindowAttribute");

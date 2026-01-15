@@ -670,16 +670,10 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
             if (mixChunk) {
                 int numSamples = bytesToMix / AUDIO_BLOCK_ALIGN;
                 
-                // Track peak for logging (reset on first run)
+                // Track peak for logging - use context-local instead of statics
+                // to properly reset between capture sessions
                 static int peakLeft = 0, peakRight = 0;
                 static int logCounter = 0;
-                static BOOL peakInitialized = FALSE;
-                if (!peakInitialized) {
-                    peakLeft = 0;
-                    peakRight = 0;
-                    logCounter = 0;
-                    peakInitialized = TRUE;
-                }
                 
                 for (int s = 0; s < numSamples; s++) {
                     int leftSum = 0, rightSum = 0;

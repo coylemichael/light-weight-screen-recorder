@@ -39,7 +39,7 @@ struct AACEncoder {
     
     // Encoder config (AudioSpecificConfig)
     BYTE* configData;
-    int configSize;
+    UINT32 configSize;  // UINT32 to match Media Foundation API
     
     BOOL initialized;
 };
@@ -383,7 +383,7 @@ BOOL AACEncoder_GetConfig(AACEncoder* encoder, BYTE** configData, int* configSiz
     
     if (encoder->configData && encoder->configSize > 0) {
         *configData = encoder->configData;
-        *configSize = encoder->configSize;
+        *configSize = (int)encoder->configSize;  // Safe cast - config is small
         return TRUE;
     }
     

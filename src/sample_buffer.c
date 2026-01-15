@@ -61,7 +61,8 @@ static void EvictOldSamples(SampleBuffer* buf, LONGLONG newTimestamp) {
     
     // Log eviction occasionally to show buffer is working
     static int evictLogCounter = 0;
-    if (evicted > 0 && (++evictLogCounter % 300) == 0 && buf->count > 0) {
+    evictLogCounter++;
+    if (evicted > 0 && (evictLogCounter % 300) == 0 && buf->count > 0) {
         double span = (double)(newTimestamp - buf->samples[buf->tail].timestamp) / 10000000.0;
         BufLog("Eviction: removed %d samples, count now %d, span=%.2fs\n", 
                evicted, buf->count, span);

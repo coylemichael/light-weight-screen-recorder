@@ -72,9 +72,6 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     hr = MFCreateSinkWriterFromURL(wPath, NULL, attributes, &state->sinkWriter);
     attributes->lpVtbl->Release(attributes);
     if (FAILED(hr)) {
-        // Debug: try to log error
-        FILE* dbg = fopen("replay_debug.txt", "a");
-        if (dbg) { fprintf(dbg, "SinkWriter creation failed: 0x%08lx\n", hr); fclose(dbg); }
         return FALSE;
     }
     
@@ -116,8 +113,6 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     hr = state->sinkWriter->lpVtbl->AddStream(state->sinkWriter, outputType, &state->videoStreamIndex);
     outputType->lpVtbl->Release(outputType);
     if (FAILED(hr)) {
-        FILE* dbg = fopen("replay_debug.txt", "a");
-        if (dbg) { fprintf(dbg, "AddStream failed: 0x%08lx\n", hr); fclose(dbg); }
         state->sinkWriter->lpVtbl->Release(state->sinkWriter);
         return FALSE;
     }
@@ -145,8 +140,6 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
                                                        inputType, NULL);
     inputType->lpVtbl->Release(inputType);
     if (FAILED(hr)) {
-        FILE* dbg = fopen("replay_debug.txt", "a");
-        if (dbg) { fprintf(dbg, "SetInputMediaType failed: 0x%08lx\n", hr); fclose(dbg); }
         state->sinkWriter->lpVtbl->Release(state->sinkWriter);
         return FALSE;
     }
@@ -154,8 +147,6 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     // Start writing
     hr = state->sinkWriter->lpVtbl->BeginWriting(state->sinkWriter);
     if (FAILED(hr)) {
-        FILE* dbg = fopen("replay_debug.txt", "a");
-        if (dbg) { fprintf(dbg, "BeginWriting failed: 0x%08lx\n", hr); fclose(dbg); }
         state->sinkWriter->lpVtbl->Release(state->sinkWriter);
         return FALSE;
     }

@@ -433,7 +433,7 @@ static void UpdateOverlayBitmap(void) {
             pixel[0] = 0;   // B
             pixel[1] = 0;   // G  
             pixel[2] = 0;   // R
-            pixel[3] = overlayAlpha; // A
+            pixel[3] = (BYTE)overlayAlpha; // A - explicit cast
         }
     }
     
@@ -773,14 +773,13 @@ static HICON LoadIconFromPNG(const char* filename) {
         (GdipLoadImageFromFileFunc)GetProcAddress(g_gdiplus, "GdipLoadImageFromFile");
     GdipCreateHBITMAPFromBitmapFunc pGdipCreateHBITMAPFromBitmap = 
         (GdipCreateHBITMAPFromBitmapFunc)GetProcAddress(g_gdiplus, "GdipCreateHBITMAPFromBitmap");
-    GdipGetImageWidthFunc pGdipGetImageWidth = 
-        (GdipGetImageWidthFunc)GetProcAddress(g_gdiplus, "GdipGetImageWidth");
-    GdipGetImageHeightFunc pGdipGetImageHeight = 
-        (GdipGetImageHeightFunc)GetProcAddress(g_gdiplus, "GdipGetImageHeight");
     GdipDisposeImageFunc pGdipDisposeImage = 
         (GdipDisposeImageFunc)GetProcAddress(g_gdiplus, "GdipDisposeImage");
     GdipGetImageThumbnailFunc pGdipGetImageThumbnail =
         (GdipGetImageThumbnailFunc)GetProcAddress(g_gdiplus, "GdipGetImageThumbnail");
+    
+    // Suppress unused warnings for functions we may use later
+    (void)pGdipGetImageThumbnail;
     
     if (!pGdipLoadImageFromFile || !pGdipCreateHBITMAPFromBitmap || !pGdipDisposeImage) {
         return NULL;
@@ -2248,8 +2247,8 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 BOOL isHover = PtInRect(&rect, pt);
                 
                 // Background - slightly lighter on hover
-                COLORREF bgColor = isHover ? RGB(48, 48, 48) : RGB(32, 32, 32);
-                HBRUSH bgBrush = CreateSolidBrush(bgColor);
+                COLORREF btnBgColor = isHover ? RGB(48, 48, 48) : RGB(32, 32, 32);
+                HBRUSH bgBrush = CreateSolidBrush(btnBgColor);
                 FillRect(dis->hDC, &rect, bgBrush);
                 DeleteObject(bgBrush);
                 
@@ -3194,12 +3193,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 // Calculation breakdown
                 char calcText[128];
                 if (durationSecs >= 60) {
-                    int mins = durationSecs / 60;
-                    int secs = durationSecs % 60;
-                    if (secs > 0) {
-                        sprintf(calcText, "%dm %ds @ %d FPS, %dx%d = ~%d MB", mins, secs, fps, estWidth, estHeight, ramMB);
+                    int calcMins = durationSecs / 60;
+                    int calcSecs = durationSecs % 60;
+                    if (calcSecs > 0) {
+                        sprintf(calcText, "%dm %ds @ %d FPS, %dx%d = ~%d MB", calcMins, calcSecs, fps, estWidth, estHeight, ramMB);
                     } else {
-                        sprintf(calcText, "%dm @ %d FPS, %dx%d = ~%d MB", mins, fps, estWidth, estHeight, ramMB);
+                        sprintf(calcText, "%dm @ %d FPS, %dx%d = ~%d MB", calcMins, fps, estWidth, estHeight, ramMB);
                     }
                 } else {
                     sprintf(calcText, "%ds @ %d FPS, %dx%d = ~%d MB", durationSecs, fps, estWidth, estHeight, ramMB);
@@ -3217,7 +3216,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             y += 35;
             
             // Divider line
-            HWND audioDivider = CreateWindowExA(0, "STATIC", "",
+            CreateWindowExA(0, "STATIC", "",
                 WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
                 labelX, y, contentW, 2, hwnd, NULL, g_hInstance, NULL);
             y += 14;
