@@ -39,7 +39,7 @@ struct AudioCaptureSource {
     CRITICAL_SECTION lock;
     
     HANDLE captureThread;  // Thread handle for proper cleanup
-    BOOL active;
+    volatile LONG active;  // Thread-safe: use InterlockedExchange
     
     // Timing for event-driven sources (virtual devices that don't send continuous packets)
     LARGE_INTEGER lastPacketTime;   // Last time we received a packet from this source
@@ -47,7 +47,7 @@ struct AudioCaptureSource {
     BOOL hasReceivedPacket;         // TRUE once we've received at least one packet
     
     // Device invalidation tracking
-    volatile BOOL deviceInvalidated; // TRUE if device was yanked (AUDCLNT_E_DEVICE_INVALIDATED)
+    volatile LONG deviceInvalidated; // Thread-safe: TRUE if device was yanked
     DWORD consecutiveErrors;         // Count of consecutive errors
 };
 
@@ -357,7 +357,7 @@ static DWORD WINAPI SourceCaptureThread(LPVOID param) {
     BYTE* convBuffer = (BYTE*)malloc(SOURCE_BUFFER_SIZE);
     if (!convBuffer) return 0;
     
-    while (src->active) {
+    while (InterlockedCompareExchange(&src->active, 0, 0)) {
         // Heartbeat (use AUDIO_SRC1 - we could differentiate but keep it simple)
         Logger_Heartbeat(THREAD_AUDIO_SRC1);
         
@@ -369,7 +369,7 @@ static DWORD WINAPI SourceCaptureThread(LPVOID param) {
         if (FAILED(hr)) {
             // Check for device invalidation (device yanked, audio service restarted, etc.)
             if (hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_SERVICE_NOT_RUNNING) {
-                src->deviceInvalidated = TRUE;
+                InterlockedExchange(&src->deviceInvalidated, TRUE);
                 Logger_Log("Audio source '%s' device invalidated (hr=0x%08X) - stopping capture",
                       src->deviceId, hr);
                 break;  // Exit the loop - device is gone
@@ -384,7 +384,7 @@ static DWORD WINAPI SourceCaptureThread(LPVOID param) {
         }
         src->consecutiveErrors = 0;  // Reset on success
         
-        while (packetLength > 0 && src->active) {
+        while (packetLength > 0 && InterlockedCompareExchange(&src->active, 0, 0)) {
             BYTE* data = NULL;
             UINT32 numFrames = 0;
             DWORD flags = 0;
@@ -400,7 +400,7 @@ static DWORD WINAPI SourceCaptureThread(LPVOID param) {
             
             if (FAILED(hr)) {
                 if (hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_SERVICE_NOT_RUNNING) {
-                    src->deviceInvalidated = TRUE;
+                    InterlockedExchange(&src->deviceInvalidated, TRUE);
                 }
                 break;
             }
@@ -572,7 +572,7 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
     QueryPerformanceCounter(&rateStartTime);
     LONGLONG totalBytesOutput = 0;  // Total bytes we've written to mix buffer
     
-    while (ctx->running) {
+    while (InterlockedCompareExchange(&ctx->running, 0, 0)) {
         // Heartbeat for monitoring
         Logger_Heartbeat(THREAD_AUDIO_MIX);
         
@@ -587,7 +587,7 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
         
         for (int i = 0; i < ctx->sourceCount; i++) {
             AudioCaptureSource* src = ctx->sources[i];
-            if (!src || !src->active) continue;
+            if (!src || !InterlockedCompareExchange(&src->active, 0, 0)) continue;
             
             activeSources++;
             EnterCriticalSection(&src->lock);
@@ -649,7 +649,8 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
         // Read from each source - dormant sources contribute silence
         for (int i = 0; i < ctx->sourceCount; i++) {
             AudioCaptureSource* src = ctx->sources[i];
-            if (!src || !src->active || srcDormant[i]) {
+            // Thread-safe check
+            if (!src || !InterlockedCompareExchange(&src->active, 0, 0) || srcDormant[i]) {
                 // Dormant sources contribute silence (srcBytes[i] = 0 means silence in the mixer)
                 srcBytes[i] = 0;
                 continue;
@@ -790,7 +791,8 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
 }
 
 BOOL AudioCapture_Start(AudioCaptureContext* ctx) {
-    if (!ctx || ctx->running) return FALSE;
+    // Thread-safe check
+    if (!ctx || InterlockedCompareExchange(&ctx->running, 0, 0)) return FALSE;
     
     // Initialize and start each source
     for (int i = 0; i < ctx->sourceCount; i++) {
@@ -801,7 +803,7 @@ BOOL AudioCapture_Start(AudioCaptureContext* ctx) {
             continue;
         }
         
-        src->active = TRUE;
+        InterlockedExchange(&src->active, TRUE);
         
         // Initialize timing for event-driven source detection
         QueryPerformanceFrequency(&src->perfFreq);
@@ -811,7 +813,7 @@ BOOL AudioCapture_Start(AudioCaptureContext* ctx) {
         // Start audio client
         HRESULT hr = src->audioClient->lpVtbl->Start(src->audioClient);
         if (FAILED(hr)) {
-            src->active = FALSE;
+            InterlockedExchange(&src->active, FALSE);
             continue;
         }
         
@@ -822,8 +824,8 @@ BOOL AudioCapture_Start(AudioCaptureContext* ctx) {
     // Record start time
     QueryPerformanceCounter(&ctx->startTime);
     
-    // Start mix thread
-    ctx->running = TRUE;
+    // Start mix thread - use atomic write
+    InterlockedExchange(&ctx->running, TRUE);
     ctx->captureThread = CreateThread(NULL, 0, MixCaptureThread, ctx, 0, NULL);
     
     return TRUE;
@@ -832,14 +834,16 @@ BOOL AudioCapture_Start(AudioCaptureContext* ctx) {
 void AudioCapture_Stop(AudioCaptureContext* ctx) {
     if (!ctx) return;
     
-    ctx->running = FALSE;
+    // Thread-safe: use atomic write
+    InterlockedExchange(&ctx->running, FALSE);
     
     // Stop sources and wait for their threads
     for (int i = 0; i < ctx->sourceCount; i++) {
         AudioCaptureSource* src = ctx->sources[i];
         if (!src) continue;
         
-        src->active = FALSE;
+        // Thread-safe: use atomic write
+        InterlockedExchange(&src->active, FALSE);
         
         if (src->audioClient) {
             src->audioClient->lpVtbl->Stop(src->audioClient);

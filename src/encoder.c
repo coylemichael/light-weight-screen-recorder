@@ -137,8 +137,9 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     hr = state->sinkWriter->lpVtbl->BeginWriting(state->sinkWriter);
     if (FAILED(hr)) goto cleanup;
     
-    state->initialized = TRUE;
-    state->recording = TRUE;
+    // Thread-safe state flags
+    InterlockedExchange(&state->initialized, TRUE);
+    InterlockedExchange(&state->recording, TRUE);
     state->frameCount = 0;
     state->startTime = 0;
     result = TRUE;
@@ -162,7 +163,9 @@ BOOL Encoder_WriteFrame(EncoderState* state, const BYTE* frameData, UINT64 times
     IMFSample* sample = NULL;
     BYTE* bufferData = NULL;
     
-    if (!state->initialized || !state->recording) return FALSE;
+    // Thread-safe state check
+    if (!InterlockedCompareExchange(&state->initialized, 0, 0) || 
+        !InterlockedCompareExchange(&state->recording, 0, 0)) return FALSE;
     
     // Create media buffer
     DWORD bufferSize = state->width * state->height * BYTES_PER_PIXEL_BGRA;
@@ -216,18 +219,20 @@ cleanup:
 }
 
 void Encoder_Finalize(EncoderState* state) {
-    if (!state->initialized) return;
+    // Thread-safe state check
+    if (!InterlockedCompareExchange(&state->initialized, 0, 0)) return;
     
     if (state->sinkWriter) {
-        if (state->recording) {
+        if (InterlockedCompareExchange(&state->recording, 0, 0)) {
             state->sinkWriter->lpVtbl->Finalize(state->sinkWriter);
         }
         state->sinkWriter->lpVtbl->Release(state->sinkWriter);
         state->sinkWriter = NULL;
     }
     
-    state->initialized = FALSE;
-    state->recording = FALSE;
+    // Thread-safe state update
+    InterlockedExchange(&state->initialized, FALSE);
+    InterlockedExchange(&state->recording, FALSE);
 }
 
 const char* Encoder_GetOutputPath(EncoderState* state) {

@@ -113,8 +113,8 @@ static GdipStartPathFigureFunc GdipStartPathFigure = NULL;
 extern AppConfig g_config;
 extern CaptureState g_capture;
 extern ReplayBufferState g_replayBuffer;
-extern BOOL g_isRecording;
-extern BOOL g_isSelecting;
+extern volatile LONG g_isRecording;  // Thread-safe: use InterlockedExchange
+extern volatile LONG g_isSelecting;  // Thread-safe: use InterlockedExchange
 extern HWND g_overlayWnd;
 extern HWND g_controlWnd;
 
@@ -223,7 +223,7 @@ static HWND g_crosshairWnd = NULL;
 static HWND g_recordingPanel = NULL;  // Inline timer + stop in control bar
 static EncoderState g_encoder;
 static HANDLE g_recordThread = NULL;
-static volatile BOOL g_stopRecording = FALSE;
+static volatile LONG g_stopRecording = FALSE;  // Thread-safe: use InterlockedExchange
 static DWORD g_recordStartTime = 0;
 static BOOL g_recordingPanelHovered = FALSE;  // Hover state for recording panel
 static BOOL g_waitingForHotkey = FALSE;       // Waiting for user to press hotkey
@@ -697,7 +697,7 @@ static void CaptureToClipboard(void) {
     // Clear selection state - overlay stays hidden, show control panel
     g_selState = SEL_NONE;
     SetRectEmpty(&g_selectedRect);
-    g_isSelecting = FALSE;
+    InterlockedExchange(&g_isSelecting, FALSE);
     ShowWindow(g_controlWnd, SW_SHOW);
 }
 
@@ -760,7 +760,7 @@ static void CaptureToFile(void) {
     // Clear selection state - overlay stays hidden, show control panel
     g_selState = SEL_NONE;
     SetRectEmpty(&g_selectedRect);
-    g_isSelecting = FALSE;
+    InterlockedExchange(&g_isSelecting, FALSE);
     ShowWindow(g_controlWnd, SW_SHOW);
 }
 
@@ -1006,7 +1006,7 @@ static void ActionToolbar_OnMinimize(void) {
     ShowWindow(g_overlayWnd, SW_HIDE);
     g_selState = SEL_NONE;
     SetRectEmpty(&g_selectedRect);
-    g_isSelecting = FALSE;
+    InterlockedExchange(&g_isSelecting, FALSE);
     MinimizeToTray();
 }
 
@@ -1020,7 +1020,7 @@ static void ActionToolbar_OnClose(void) {
     ShowWindow(g_overlayWnd, SW_HIDE);
     g_selState = SEL_NONE;
     SetRectEmpty(&g_selectedRect);
-    g_isSelecting = FALSE;
+    InterlockedExchange(&g_isSelecting, FALSE);
     ShowWindow(g_controlWnd, SW_SHOW);
 }
 
@@ -1030,7 +1030,7 @@ static void ActionToolbar_OnSettings(void) {
     ShowWindow(g_overlayWnd, SW_HIDE);
     g_selState = SEL_NONE;
     SetRectEmpty(&g_selectedRect);
-    g_isSelecting = FALSE;
+    InterlockedExchange(&g_isSelecting, FALSE);
     
     // Open settings window centered on control panel
     if (g_settingsWnd) {
@@ -1059,7 +1059,8 @@ static char g_timerText[32] = "00:00";
 
 // Update timer display text
 static void UpdateTimerDisplay(void) {
-    if (!g_recordingPanel || !g_isRecording) return;
+    // Thread-safe check
+    if (!g_recordingPanel || !InterlockedCompareExchange(&g_isRecording, 0, 0)) return;
     
     // Update timer text
     DWORD elapsed = GetTickCount() - g_recordStartTime;
@@ -1207,7 +1208,7 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     // Action toolbar is now managed by action_toolbar module
     
     // Don't show overlay or crosshair initially - only when mode is selected
-    g_isSelecting = FALSE;
+    InterlockedExchange(&g_isSelecting, FALSE);
     g_selState = SEL_NONE;
     
     // Only show the control panel at startup
@@ -1217,7 +1218,8 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
 }
 
 void Overlay_Destroy(void) {
-    if (g_isRecording) {
+    // Thread-safe check
+    if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
         Recording_Stop();
     }
     
@@ -1264,7 +1266,7 @@ void Overlay_Destroy(void) {
 
 void Overlay_SetMode(CaptureMode mode) {
     g_currentMode = mode;
-    g_isSelecting = TRUE;
+    InterlockedExchange(&g_isSelecting, TRUE);
     g_selState = SEL_NONE;
     SetRectEmpty(&g_selectedRect);
     ShowActionToolbar(FALSE);
@@ -1298,7 +1300,8 @@ HWND Overlay_GetWindow(void) {
 }
 
 void Recording_Start(void) {
-    if (g_isRecording) return;
+    // Thread-safe check: read g_isRecording atomically
+    if (InterlockedCompareExchange(&g_isRecording, 0, 0)) return;
     if (IsRectEmpty(&g_selectedRect)) return;
     
     // Set capture region
@@ -1337,10 +1340,10 @@ void Recording_Start(void) {
     ShowWindow(g_crosshairWnd, SW_HIDE);
     ActionToolbar_Hide();
     
-    // Start recording
-    g_isRecording = TRUE;
-    g_isSelecting = FALSE;
-    g_stopRecording = FALSE;
+    // Start recording - use atomic operations for thread safety
+    InterlockedExchange(&g_isRecording, TRUE);
+    InterlockedExchange(&g_isSelecting, FALSE);
+    InterlockedExchange(&g_stopRecording, FALSE);
     g_recordStartTime = GetTickCount();
     g_recordingMode = g_currentMode;  // Remember which mode started recording
     strcpy(g_timerText, "00:00");
@@ -1364,9 +1367,11 @@ void Recording_Start(void) {
 }
 
 void Recording_Stop(void) {
-    if (!g_isRecording) return;
+    // Thread-safe check: read g_isRecording atomically
+    if (!InterlockedCompareExchange(&g_isRecording, 0, 0)) return;
     
-    g_stopRecording = TRUE;
+    // Signal recording thread to stop (atomic write with memory barrier)
+    InterlockedExchange(&g_stopRecording, TRUE);
     
     // Wait for recording thread
     if (g_recordThread) {
@@ -1378,7 +1383,8 @@ void Recording_Stop(void) {
     // Finalize encoder
     Encoder_Finalize(&g_encoder);
     
-    g_isRecording = FALSE;
+    // Thread-safe: signal recording stopped
+    InterlockedExchange(&g_isRecording, FALSE);
     
     // Hide recording border
     Border_Hide();
@@ -1417,7 +1423,8 @@ static DWORD WINAPI RecordingThread(LPVOID param) {
     UINT64 frameDuration100ns = 10000000ULL / fps; // 100-nanosecond units for MF
     double frameIntervalSec = 1.0 / fps;
     
-    while (!g_stopRecording) {
+    // Thread-safe loop: read stop flag atomically
+    while (!InterlockedCompareExchange(&g_stopRecording, 0, 0)) {
         QueryPerformanceCounter(&now);
         double elapsed = (double)(now.QuadPart - start.QuadPart) / freq.QuadPart;
         double targetTime = frameCount * frameIntervalSec;
@@ -1562,7 +1569,7 @@ void Overlay_SetRecordingState(BOOL isRecording) {
 static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_USER + 1: // Stop recording signal from second instance
-            if (g_isRecording) {
+            if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
                 Recording_Stop();
             } else {
                 PostQuitMessage(0);
@@ -1720,7 +1727,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 }
                 
                 UpdateOverlayBitmap();
-            } else if (g_isSelecting && g_selState == SEL_NONE) {
+            } else if (InterlockedCompareExchange(&g_isSelecting, 0, 0) && g_selState == SEL_NONE) {
                 // Just moving mouse over overlay, cursor handles itself
             }
             return 0;
@@ -1754,7 +1761,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 g_activeHandle = HANDLE_NONE;
                 UpdateOverlayBitmap();
                 ShowActionToolbar(TRUE);
-            } else if (g_isSelecting && g_currentMode != MODE_AREA) {
+            } else if (InterlockedCompareExchange(&g_isSelecting, 0, 0) && g_currentMode != MODE_AREA) {
                 // Window/Monitor click mode
                 if (g_currentMode == MODE_WINDOW) {
                     HWND targetWnd = WindowFromPoint(pt);
@@ -1796,7 +1803,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         case WM_KEYDOWN:
             // Check for configurable cancel key
             if (wParam == (WPARAM)g_config.cancelKey) {
-                if (g_isRecording) {
+                if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
                     Recording_Stop();
                 } else if (g_selState == SEL_DRAWING || g_selState == SEL_MOVING || g_selState == SEL_RESIZING) {
                     ReleaseCapture();
@@ -1968,8 +1975,8 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     }
                     break;
                 case ID_BTN_RECORD:
-                    // Toggle recording
-                    if (g_isRecording) {
+                    // Toggle recording - thread-safe check
+                    if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
                         Recording_Stop();
                     } else {
                         // If no selection, use full primary monitor
@@ -1988,8 +1995,8 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     // Hide window immediately to avoid visual artifacts
                     ShowWindow(hwnd, SW_HIDE);
                     
-                    // Stop recording if in progress
-                    if (g_isRecording) {
+                    // Stop recording if in progress - thread-safe check
+                    if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
                         Recording_Stop();
                     }
                     
@@ -2011,8 +2018,8 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     Recording_Stop();
                     break;
                 case ID_RECORDING_PANEL:
-                    // Click on recording panel stops recording
-                    if (g_isRecording) {
+                    // Click on recording panel stops recording - thread-safe check
+                    if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
                         Recording_Stop();
                     }
                     break;
@@ -2238,7 +2245,8 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 int cx = (dis->rcItem.left + dis->rcItem.right) / 2;
                 int cy = (dis->rcItem.top + dis->rcItem.bottom) / 2;
                 
-                if (g_isRecording) {
+                // Thread-safe check for recording state
+                if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
                     // White square (stop icon)
                     HBRUSH iconBrush = CreateSolidBrush(RGB(255, 255, 255));
                     RECT stopRect = { cx - 4, cy - 4, cx + 4, cy + 4 };

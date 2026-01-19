@@ -106,7 +106,7 @@ struct NVENCEncoder {
     
     // Output thread (per API lines 3384-3388)
     HANDLE outputThread;
-    volatile BOOL stopThread;
+    volatile LONG stopThread;  // Thread-safe: use InterlockedExchange
     
     // Callback for completed frames
     EncodedFrameCallback frameCallback;
@@ -120,7 +120,7 @@ struct NVENCEncoder {
     int mutexTimeoutCount;
     
     // Device lost detection
-    volatile BOOL deviceLost;
+    volatile LONG deviceLost;  // Thread-safe: use InterlockedExchange
     
     BOOL initialized;
 };
@@ -398,7 +398,7 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     // wait on the event object to be signaled"
     // ========================================================================
     
-    enc->stopThread = FALSE;
+    InterlockedExchange(&enc->stopThread, FALSE);
     enc->outputThread = (HANDLE)_beginthreadex(NULL, 0, OutputThreadProc, enc, 0, NULL);
     if (!enc->outputThread) {
         NvLog("NVENCEncoder: Failed to create output thread\n");
@@ -425,7 +425,7 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
     if (!enc || !enc->initialized || !nv12Source) return 0;
     
     // Check if device was previously marked as lost
-    if (enc->deviceLost) return -1;
+    if (InterlockedCompareExchange(&enc->deviceLost, 0, 0)) return -1;
     
     // Debug: Log entry every 1000 frames to track if we're still entering
     static LONG submitAttempts = 0;
@@ -459,7 +459,7 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
     
     // Check for device removed/reset errors
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
-        enc->deviceLost = TRUE;
+        InterlockedExchange(&enc->deviceLost, TRUE);
         LeaveCriticalSection(&enc->submitLock);
         NvLog("NVENCEncoder: DEVICE LOST detected on srcMutex acquire (0x%08X)\n", hr);
         return -1;
@@ -489,7 +489,7 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
     // Check for device removed after GPU operation
     hr = enc->srcDevice->lpVtbl->GetDeviceRemovedReason(enc->srcDevice);
     if (hr != S_OK) {
-        enc->deviceLost = TRUE;
+        InterlockedExchange(&enc->deviceLost, TRUE);
         enc->srcMutex[idx]->lpVtbl->ReleaseSync(enc->srcMutex[idx], 0);
         LeaveCriticalSection(&enc->submitLock);
         NvLog("NVENCEncoder: DEVICE LOST after CopyResource (0x%08X)\n", hr);
@@ -508,7 +508,7 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
     
     // Check for device removed/reset errors
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
-        enc->deviceLost = TRUE;
+        InterlockedExchange(&enc->deviceLost, TRUE);
         enc->srcMutex[idx]->lpVtbl->ReleaseSync(enc->srcMutex[idx], 0);
         LeaveCriticalSection(&enc->submitLock);
         NvLog("NVENCEncoder: DEVICE LOST detected on encMutex acquire (0x%08X)\n", hr);
@@ -535,7 +535,7 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
     // Check for NVENC device errors
     if (st == NV_ENC_ERR_DEVICE_NOT_EXIST || st == NV_ENC_ERR_INVALID_DEVICE || 
         st == NV_ENC_ERR_INVALID_ENCODERDEVICE) {
-        enc->deviceLost = TRUE;
+        InterlockedExchange(&enc->deviceLost, TRUE);
         enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
         LeaveCriticalSection(&enc->submitLock);
         NvLog("NVENCEncoder: DEVICE LOST on MapInputResource (%d)\n", st);
@@ -580,7 +580,7 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
     // Check for NVENC device errors
     if (st == NV_ENC_ERR_DEVICE_NOT_EXIST || st == NV_ENC_ERR_INVALID_DEVICE || 
         st == NV_ENC_ERR_INVALID_ENCODERDEVICE) {
-        enc->deviceLost = TRUE;
+        InterlockedExchange(&enc->deviceLost, TRUE);
         enc->fn.nvEncUnmapInputResource(enc->encoder, mapParams.mappedResource);
         enc->mappedResources[idx] = NULL;
         enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
@@ -616,7 +616,7 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
 }
 
 BOOL NVENCEncoder_IsDeviceLost(NVENCEncoder* enc) {
-    return enc ? enc->deviceLost : FALSE;
+    return enc ? InterlockedCompareExchange(&enc->deviceLost, 0, 0) : FALSE;
 }
 
 int NVENCEncoder_DrainCompleted(NVENCEncoder* enc, EncodedFrameCallback callback, void* userData) {
@@ -685,7 +685,7 @@ void NVENCEncoder_Destroy(NVENCEncoder* enc) {
     
     // Stop output thread
     if (enc->outputThread) {
-        enc->stopThread = TRUE;
+        InterlockedExchange(&enc->stopThread, TRUE);
         
         // Signal all events to wake up thread
         for (int i = 0; i < NUM_BUFFERS; i++) {
@@ -780,7 +780,7 @@ static unsigned __stdcall OutputThreadProc(void* param) {
     //  Waits on E3, copies encoded bitstream from O3"
     // We wait on events IN ORDER (retrieveIndex), one at a time.
     
-    while (!enc->stopThread) {
+    while (!InterlockedCompareExchange(&enc->stopThread, 0, 0)) {
         // Heartbeat for monitoring
         Logger_Heartbeat(THREAD_NVENC_OUTPUT);
         
@@ -799,13 +799,13 @@ static unsigned __stdcall OutputThreadProc(void* param) {
         }
         
         if (waitResult != WAIT_OBJECT_0) {
-            if (!enc->stopThread) {
+            if (!InterlockedCompareExchange(&enc->stopThread, 0, 0)) {
                 NvLog("NVENCEncoder: Wait[%d] failed (0x%X)\n", idx, waitResult);
             }
             continue;
         }
         
-        if (enc->stopThread) break;
+        if (InterlockedCompareExchange(&enc->stopThread, 0, 0)) break;
         
         // ====================================================================
         // CHECK DEVICE HEALTH before any GPU/NVENC operations
@@ -813,7 +813,7 @@ static unsigned __stdcall OutputThreadProc(void* param) {
         // ====================================================================
         HRESULT deviceCheck = enc->encDevice->lpVtbl->GetDeviceRemovedReason(enc->encDevice);
         if (deviceCheck != S_OK) {
-            enc->deviceLost = TRUE;
+            InterlockedExchange(&enc->deviceLost, TRUE);
             NvLog("NVENCEncoder: DEVICE REMOVED detected in output thread (0x%08X)\n", deviceCheck);
             break;  // Exit loop immediately
         }
@@ -837,7 +837,7 @@ static unsigned __stdcall OutputThreadProc(void* param) {
         // Check for device lost errors
         if (st == NV_ENC_ERR_DEVICE_NOT_EXIST || st == NV_ENC_ERR_INVALID_DEVICE || 
             st == NV_ENC_ERR_INVALID_ENCODERDEVICE) {
-            enc->deviceLost = TRUE;
+            InterlockedExchange(&enc->deviceLost, TRUE);
             NvLog("NVENCEncoder: DEVICE LOST in OutputThread LockBitstream (%d)\n", st);
             // Release mutex and exit thread - consumer will detect deviceLost
             if (enc->encMutex[idx]) {

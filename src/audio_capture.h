@@ -40,7 +40,7 @@ typedef struct {
     
     // Capture thread
     HANDLE captureThread;
-    BOOL running;
+    volatile LONG running;  // Thread-safe: use InterlockedExchange
     
     // Timing
     LARGE_INTEGER startTime;

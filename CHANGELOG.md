@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.2.6] - 2026-01-19
+
+### Fixed
+- **Thread safety audit - race conditions eliminated**
+  - `g_isRecording` and `g_isSelecting` changed from `BOOL` to `volatile LONG` with atomic operations
+  - `g_stopRecording` loop condition now uses `InterlockedCompareExchange` for proper memory barrier
+  - All reads/writes of recording state flags use `InterlockedExchange`/`InterlockedCompareExchange`
+  - Encoder `initialized` and `recording` flags now use atomic operations across threads
+  - Logger `g_logRunning` and `g_logInitialized` use atomic operations
+  - **Audio capture** `ctx->running`, `src->active`, `src->deviceInvalidated` now atomic operations
+  - **Crash handler** `g_watchdogRunning`, `g_crashInProgress` now use atomic operations for thread safety
+  - **NVENC encoder** `enc->stopThread`, `enc->deviceLost` now use atomic operations for output thread safety
+  
+### Changed
+- **Atomic operations for all shared flags**
+  - Recording thread loop: `while (!InterlockedCompareExchange(&g_stopRecording, 0, 0))`
+  - Recording state checks: `InterlockedCompareExchange(&g_isRecording, 0, 0)`
+  - State transitions: `InterlockedExchange(&g_isRecording, TRUE/FALSE)`
+  - Encoder state: `InterlockedExchange(&state->initialized, TRUE/FALSE)`
+  - Logger state: `InterlockedExchange(&g_logInitialized, TRUE/FALSE)`
+  - Audio sources: `InterlockedExchange(&src->active, TRUE/FALSE)`
+  - Audio context: `InterlockedCompareExchange(&ctx->running, 0, 0)` in thread loops
+  - Watchdog: `InterlockedCompareExchange(&g_watchdogRunning, 0, 0)` in loop
+  - NVENC output: `InterlockedCompareExchange(&enc->stopThread, 0, 0)` in loop
+  - NVENC device lost: `InterlockedExchange(&enc->deviceLost, TRUE)` on errors
+  - Crash in progress: `InterlockedCompareExchange(&g_crashInProgress, TRUE, FALSE)` (CAS)
+
+### Technical Details
+- Race condition pattern fixed: bare `while(!flag)` loops → atomic reads with memory barriers
+- TOCTOU (time-of-check-time-of-use) bugs eliminated in state checks
+- All cross-thread flag access now uses Windows Interlocked* functions
+- Changed `volatile BOOL` → `volatile LONG` for proper atomic semantics
+- Files affected: `main.c`, `overlay.c`, `encoder.c`, `encoder.h`, `logger.c`, `audio_capture.c`, `audio_capture.h`, `crash_handler.c`, `nvenc_encoder.c`
+
+---
+
 ## [1.2.5] - 2026-01-19
 
 ### Added

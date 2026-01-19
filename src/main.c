@@ -46,8 +46,8 @@
 AppConfig g_config;
 CaptureState g_capture;
 ReplayBufferState g_replayBuffer;
-BOOL g_isRecording = FALSE;
-BOOL g_isSelecting = FALSE;
+volatile LONG g_isRecording = FALSE;  // Thread-safe: use InterlockedExchange
+volatile LONG g_isSelecting = FALSE;  // Thread-safe: use InterlockedExchange
 HWND g_overlayWnd = NULL;
 HWND g_controlWnd = NULL;
 

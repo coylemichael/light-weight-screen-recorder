@@ -27,8 +27,8 @@ typedef struct {
     OutputFormat format;
     QualityPreset quality;
     
-    BOOL initialized;
-    BOOL recording;
+    volatile LONG initialized;  // Thread-safe: use InterlockedExchange
+    volatile LONG recording;    // Thread-safe: use InterlockedExchange
     
     char outputPath[MAX_PATH];
     

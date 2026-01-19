@@ -65,11 +65,11 @@ static volatile LONG g_readIndex = 0;   // Next slot for consumer (logger thread
 
 static FILE* g_logFile = NULL;
 static HANDLE g_logThread = NULL;
-static volatile BOOL g_logRunning = FALSE;
+static volatile LONG g_logRunning = FALSE;  // Thread-safe: use InterlockedExchange
 static HANDLE g_logEvent = NULL;        // Signals new log entries
 static DWORD g_startTime = 0;           // For relative timestamps
 
-static volatile BOOL g_logInitialized = FALSE;
+static volatile LONG g_logInitialized = FALSE;  // Thread-safe: use InterlockedExchange
 
 // ============================================================================
 // Logger Thread
@@ -80,7 +80,8 @@ static DWORD WINAPI LoggerThreadProc(LPVOID param) {
     
     DWORD lastHeartbeatLog = GetTickCount();
     
-    while (g_logRunning || g_readIndex != g_writeIndex) {
+    // Thread-safe loop condition
+    while (InterlockedCompareExchange(&g_logRunning, 0, 0) || g_readIndex != g_writeIndex) {
         // Wait for new entries or timeout for heartbeat check
         WaitForSingleObject(g_logEvent, 1000);
         
@@ -162,7 +163,8 @@ static DWORD WINAPI LoggerThreadProc(LPVOID param) {
 // ============================================================================
 
 void Logger_Init(const char* filename, const char* mode) {
-    if (g_logInitialized) return;
+    // Thread-safe check
+    if (InterlockedCompareExchange(&g_logInitialized, 0, 0)) return;
     
     // Open log file
     g_logFile = fopen(filename, mode);
@@ -170,8 +172,8 @@ void Logger_Init(const char* filename, const char* mode) {
     
     // Initialize state
     g_startTime = GetTickCount();
-    g_writeIndex = 0;
-    g_readIndex = 0;
+    InterlockedExchange(&g_writeIndex, 0);
+    InterlockedExchange(&g_readIndex, 0);
     memset(g_logQueue, 0, sizeof(g_logQueue));
     memset(g_heartbeats, 0, sizeof(g_heartbeats));
     
@@ -183,22 +185,22 @@ void Logger_Init(const char* filename, const char* mode) {
         return;
     }
     
-    // Start logger thread
-    g_logRunning = TRUE;
+    // Start logger thread - use atomic write
+    InterlockedExchange(&g_logRunning, TRUE);
     g_logThread = CreateThread(NULL, 0, LoggerThreadProc, NULL, 0, NULL);
     if (!g_logThread) {
         CloseHandle(g_logEvent);
         g_logEvent = NULL;
         fclose(g_logFile);
         g_logFile = NULL;
-        g_logRunning = FALSE;
+        InterlockedExchange(&g_logRunning, FALSE);
         return;
     }
     
     // Set high priority so logging doesn't get starved
     SetThreadPriority(g_logThread, THREAD_PRIORITY_ABOVE_NORMAL);
     
-    g_logInitialized = TRUE;
+    InterlockedExchange(&g_logInitialized, TRUE);
     
     // Write header
     SYSTEMTIME st;
@@ -209,12 +211,13 @@ void Logger_Init(const char* filename, const char* mode) {
 }
 
 void Logger_Shutdown(void) {
-    if (!g_logInitialized) return;
+    // Thread-safe check
+    if (!InterlockedCompareExchange(&g_logInitialized, 0, 0)) return;
     
     Logger_Log("Logger shutting down...\n");
     
-    // Signal thread to stop
-    g_logRunning = FALSE;
+    // Signal thread to stop - atomic write
+    InterlockedExchange(&g_logRunning, FALSE);
     if (g_logEvent) SetEvent(g_logEvent);
     
     // Wait for logger thread to finish (with timeout)
@@ -235,11 +238,12 @@ void Logger_Shutdown(void) {
         g_logFile = NULL;
     }
     
-    g_logInitialized = FALSE;
+    InterlockedExchange(&g_logInitialized, FALSE);
 }
 
 void Logger_Log(const char* fmt, ...) {
-    if (!g_logInitialized) return;
+    // Thread-safe check
+    if (!InterlockedCompareExchange(&g_logInitialized, 0, 0)) return;
     
     // Get next slot (atomic)
     LONG idx = InterlockedIncrement(&g_writeIndex) - 1;
@@ -317,14 +321,17 @@ BOOL Logger_IsThreadStalled(ThreadId thread) {
 }
 
 BOOL Logger_IsInitialized(void) {
-    return g_logInitialized;
+    return InterlockedCompareExchange(&g_logInitialized, 0, 0);
 }
 
 void Logger_Flush(void) {
-    if (!g_logInitialized) return;
+    if (!InterlockedCompareExchange(&g_logInitialized, 0, 0)) return;
     
     // Wait for queue to drain (with timeout)
-    for (int i = 0; i < 100 && g_readIndex != g_writeIndex; i++) {
+    // Use atomic reads for cross-thread safety
+    for (int i = 0; i < 100 && 
+         InterlockedCompareExchange(&g_readIndex, 0, 0) != InterlockedCompareExchange(&g_writeIndex, 0, 0); 
+         i++) {
         SetEvent(g_logEvent);
         Sleep(10);
     }

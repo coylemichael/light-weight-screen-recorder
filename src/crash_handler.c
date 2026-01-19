@@ -50,10 +50,10 @@
 static LPTOP_LEVEL_EXCEPTION_FILTER g_previousFilter = NULL;
 static PVOID g_vectoredHandler = NULL;
 static CRITICAL_SECTION g_crashLock;
-static volatile BOOL g_crashInProgress = FALSE;
+static volatile LONG g_crashInProgress = FALSE;  // Thread-safe: InterlockedCompareExchange
 static volatile LONG g_heartbeatCounter = 0;
 static HANDLE g_watchdogThread = NULL;
-static volatile BOOL g_watchdogRunning = FALSE;
+static volatile LONG g_watchdogRunning = FALSE;  // Thread-safe: use InterlockedExchange
 static BOOL g_crashHandlerInitialized = FALSE;
 
 // Stack overflow handling - reserve memory for guard page restoration
@@ -240,7 +240,7 @@ static DWORD WINAPI DumpWriterThread(LPVOID param) {
 
 static void HandleCrash(EXCEPTION_POINTERS* exInfo, const char* reason) {
     // Prevent re-entrancy - if we crash while handling a crash, just terminate
-    if (InterlockedCompareExchange((LONG*)&g_crashInProgress, TRUE, FALSE)) {
+    if (InterlockedCompareExchange(&g_crashInProgress, TRUE, FALSE)) {
         TerminateProcess(GetCurrentProcess(), 1);
         return;
     }
@@ -250,8 +250,8 @@ static void HandleCrash(EXCEPTION_POINTERS* exInfo, const char* reason) {
     g_crashingThreadId = GetCurrentThreadId();
     g_crashReason = reason;
     
-    // Stop the watchdog immediately
-    g_watchdogRunning = FALSE;
+    // Stop the watchdog immediately - thread-safe
+    InterlockedExchange(&g_watchdogRunning, FALSE);
     
     // Create event for synchronization
     g_dumpCompleteEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
@@ -432,13 +432,13 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
     
     Logger_Log("Watchdog thread started (timeout=%dms)\n", WATCHDOG_TIMEOUT_MS);
     
-    while (g_watchdogRunning) {
+    while (InterlockedCompareExchange(&g_watchdogRunning, 0, 0)) {
         // Heartbeat for logger monitoring
         Logger_Heartbeat(THREAD_WATCHDOG);
         
         Sleep(WATCHDOG_CHECK_INTERVAL);
         
-        if (!g_watchdogRunning) break;
+        if (!InterlockedCompareExchange(&g_watchdogRunning, 0, 0)) break;
         
         LONG currentHeartbeat = InterlockedCompareExchange(&g_heartbeatCounter, 0, 0);
         
@@ -513,15 +513,15 @@ void CrashHandler_StartWatchdog(void) {
     if (!g_crashHandlerInitialized) return;
     if (g_watchdogThread) return;  // Already running
     
-    g_watchdogRunning = TRUE;
-    g_heartbeatCounter = 0;
+    InterlockedExchange(&g_watchdogRunning, TRUE);
+    InterlockedExchange(&g_heartbeatCounter, 0);
     g_watchdogThread = CreateThread(NULL, 0, WatchdogThread, NULL, 0, NULL);
 }
 
 void CrashHandler_StopWatchdog(void) {
     if (!g_watchdogThread) return;
     
-    g_watchdogRunning = FALSE;
+    InterlockedExchange(&g_watchdogRunning, FALSE);
     WaitForSingleObject(g_watchdogThread, 5000);
     CloseHandle(g_watchdogThread);
     g_watchdogThread = NULL;
