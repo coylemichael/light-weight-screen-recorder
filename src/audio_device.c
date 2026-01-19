@@ -8,6 +8,7 @@
 #include "audio_device.h"
 #include "audio_guids.h"
 #include "util.h"
+#include "mem_utils.h"
 #include <mmdeviceapi.h>
 #include <functiondiscoverykeys_devpkey.h>
 #include <stdio.h>
@@ -38,9 +39,12 @@ void AudioDevice_Shutdown(void) {
 
 // Enumerate devices of a specific type (render or capture)
 static int EnumerateDeviceType(AudioDeviceList* list, EDataFlow dataFlow, AudioDeviceType type) {
+    int added = 0;
+    IMMDeviceCollection* collection = NULL;
+    IMMDevice* defaultDevice = NULL;
+    
     if (!g_deviceEnumerator || !list) return 0;
     
-    IMMDeviceCollection* collection = NULL;
     HRESULT hr = g_deviceEnumerator->lpVtbl->EnumAudioEndpoints(
         g_deviceEnumerator,
         dataFlow,
@@ -48,14 +52,13 @@ static int EnumerateDeviceType(AudioDeviceList* list, EDataFlow dataFlow, AudioD
         &collection
     );
     
-    if (FAILED(hr)) return 0;
+    if (FAILED(hr)) goto cleanup;
     
     UINT count = 0;
     collection->lpVtbl->GetCount(collection, &count);
     
     // Get default device ID for comparison
     char defaultId[128] = {0};
-    IMMDevice* defaultDevice = NULL;
     hr = g_deviceEnumerator->lpVtbl->GetDefaultAudioEndpoint(
         g_deviceEnumerator,
         dataFlow,
@@ -70,10 +73,8 @@ static int EnumerateDeviceType(AudioDeviceList* list, EDataFlow dataFlow, AudioD
             Util_WideToUtf8(wideId, defaultId, sizeof(defaultId));
             CoTaskMemFree(wideId);
         }
-        defaultDevice->lpVtbl->Release(defaultDevice);
     }
     
-    int added = 0;
     for (UINT i = 0; i < count && list->count < MAX_AUDIO_DEVICES; i++) {
         IMMDevice* device = NULL;
         hr = collection->lpVtbl->Item(collection, i, &device);
@@ -117,7 +118,9 @@ static int EnumerateDeviceType(AudioDeviceList* list, EDataFlow dataFlow, AudioD
         added++;
     }
     
-    collection->lpVtbl->Release(collection);
+cleanup:
+    SAFE_RELEASE(defaultDevice);
+    SAFE_RELEASE(collection);
     return added;
 }
 

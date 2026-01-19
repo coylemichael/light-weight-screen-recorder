@@ -40,6 +40,7 @@
 #include "replay_buffer.h"
 #include "logger.h"
 #include "crash_handler.h"
+#include "constants.h"
 
 // Global state
 AppConfig g_config;
@@ -85,7 +86,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         // Another instance exists - signal it to stop recording
         HWND existingWnd = FindWindowA(WINDOW_CLASS, NULL);
         if (existingWnd) {
-            PostMessage(existingWnd, WM_USER + 1, 0, 0); // Custom stop message
+            PostMessage(existingWnd, WM_LWSR_STOP, 0, 0);
         }
         CloseHandle(g_mutex);
         return 0;

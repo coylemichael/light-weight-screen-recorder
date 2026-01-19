@@ -1,5 +1,33 @@
 # Changelog
 
+## [1.2.5] - 2026-01-19
+
+### Added
+- **Memory safety utilities** - New `mem_utils.h` and `mem_utils.c` files
+  - `SAFE_FREE`, `SAFE_RELEASE`, `SAFE_CLOSE_HANDLE`, `SAFE_COTASKMEM_FREE` macros
+  - Null-checked cleanup that sets pointers to NULL after release (prevents double-free/use-after-free)
+  - Optional debug memory tracking via `LWSR_DEBUG_MEMORY` flag
+  - `CHECK_ALLOC` macro for consistent allocation error handling
+
+### Fixed
+- **Memory leak in sample_buffer.c** - `WriteToFile` and `GetSamplesForMuxing` leaked array when no samples copied
+- **Memory leak in aac_encoder.c** - `MFTEnumEx` leaked activates array when encoder count was 0
+- **Memory leak in audio_capture.c** - `MixCaptureThread` missing NULL check after malloc
+- **Memory leak in replay_buffer.c** - Missing `GPUConverter_Shutdown` on `SampleBuffer_Init` failure path
+- **Inconsistent cleanup in capture.c** - `frameBufferSize` not reset properly on malloc failure
+
+### Changed
+- **Goto-cleanup pattern** - Refactored 8+ functions across 6 files to use structured cleanup
+  - `capture.c`: `Capture_Init`, `InitDuplicationForOutput`, `ReleaseDuplication`, `Capture_Shutdown`
+  - `encoder.c`: `Encoder_Init`, `Encoder_WriteFrame`
+  - `mp4_muxer.c`: `MP4Muxer_WriteFile`, `MP4Muxer_WriteFileWithAudio`
+  - `aac_encoder.c`: `AACEncoder_Create`
+  - `audio_device.c`: `EnumerateDeviceType`
+  - `audio_capture.c`: `CreateSource`
+- **SAFE_RELEASE macro adoption** - All cleanup blocks now use shared macros instead of inline Release/NULL
+
+---
+
 ## [1.2.4] - 2026-01-19
 
 ### Added

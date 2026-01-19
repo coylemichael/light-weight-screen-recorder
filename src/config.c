@@ -3,6 +3,7 @@
  */
 
 #include "config.h"
+#include "constants.h"
 #include <shlobj.h>
 #include <stdio.h>
 
@@ -32,7 +33,7 @@ void Config_Load(AppConfig* config) {
     
     // Replay buffer defaults
     config->replayEnabled = FALSE;
-    config->replayDuration = 60;  // 1 minute default
+    config->replayDuration = REPLAY_DURATION_DEFAULT;  // 1 minute default
     config->replayCaptureSource = MODE_MONITOR;
     config->replayMonitorIndex = 0;  // Primary monitor
     config->replaySaveKey = VK_F9;  // F9 to save replay
@@ -43,16 +44,16 @@ void Config_Load(AppConfig* config) {
     config->replayAreaRect.right = 0;
     config->replayAreaRect.bottom = 0;
     config->replayAspectRatio = 0;  // Native (no aspect ratio cropping)
-    config->replayFPS = 60;          // 60 FPS default
+    config->replayFPS = DEFAULT_FPS;  // 60 FPS default
     
     // Audio defaults (disabled, no sources selected)
     config->audioEnabled = FALSE;
     config->audioSource1[0] = '\0';
     config->audioSource2[0] = '\0';
     config->audioSource3[0] = '\0';
-    config->audioVolume1 = 100;
-    config->audioVolume2 = 100;
-    config->audioVolume3 = 100;
+    config->audioVolume1 = AUDIO_VOLUME_DEFAULT;
+    config->audioVolume2 = AUDIO_VOLUME_DEFAULT;
+    config->audioVolume3 = AUDIO_VOLUME_DEFAULT;
     
     // Debug logging (disabled by default)
     config->debugLogging = FALSE;
@@ -61,7 +62,7 @@ void Config_Load(AppConfig* config) {
     if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_MYVIDEO, NULL, 0, config->savePath))) {
         strcat(config->savePath, "\\Recordings");
     } else {
-        strcpy(config->savePath, "C:\\Recordings");
+        strcpy(config->savePath, FALLBACK_RECORDINGS_PATH);
     }
     
     SetRectEmpty(&config->lastCaptureRect);

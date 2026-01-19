@@ -4,6 +4,8 @@
  */
 
 #include "capture.h"
+#include "constants.h"
+#include "mem_utils.h"
 #include <stdio.h>
 
 // Monitor enumeration data
@@ -134,7 +136,7 @@ BOOL Capture_GetWindowRect(HWND hwnd, RECT* rect) {
     
     if (pDwmGetWindowAttribute) {
         // DWMWA_EXTENDED_FRAME_BOUNDS = 9
-        if (SUCCEEDED(pDwmGetWindowAttribute(hwnd, 9, rect, sizeof(RECT)))) {
+        if (SUCCEEDED(pDwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS_CONST, rect, sizeof(RECT)))) {
             return TRUE;
         }
     }
@@ -144,28 +146,22 @@ BOOL Capture_GetWindowRect(HWND hwnd, RECT* rect) {
 
 // Helper to release duplication resources without full cleanup
 static void ReleaseDuplication(CaptureState* state) {
-    if (state->stagingTexture) {
-        state->stagingTexture->lpVtbl->Release(state->stagingTexture);
-        state->stagingTexture = NULL;
-    }
-    if (state->duplication) {
-        state->duplication->lpVtbl->Release(state->duplication);
-        state->duplication = NULL;
-    }
+    SAFE_RELEASE(state->stagingTexture);
+    SAFE_RELEASE(state->duplication);
 }
 
 // Initialize desktop duplication for a specific DXGI output index
 static BOOL InitDuplicationForOutput(CaptureState* state, IDXGIAdapter* adapter, int outputIndex) {
+    BOOL result = FALSE;
     IDXGIOutput* dxgiOutput = NULL;
+    IDXGIOutput1* dxgiOutput1 = NULL;
+    
     HRESULT hr = adapter->lpVtbl->EnumOutputs(adapter, outputIndex, &dxgiOutput);
-    if (FAILED(hr)) return FALSE;
+    if (FAILED(hr)) goto cleanup;
     
     // Get output description
     hr = dxgiOutput->lpVtbl->GetDesc(dxgiOutput, &state->outputDesc);
-    if (FAILED(hr)) {
-        dxgiOutput->lpVtbl->Release(dxgiOutput);
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     // Get refresh rate from display mode
     DXGI_MODE_DESC desiredMode = {0};
@@ -179,19 +175,16 @@ static BOOL InitDuplicationForOutput(CaptureState* state, IDXGIAdapter* adapter,
     if (SUCCEEDED(hr) && closestMode.RefreshRate.Denominator > 0) {
         state->monitorRefreshRate = closestMode.RefreshRate.Numerator / closestMode.RefreshRate.Denominator;
     } else {
-        state->monitorRefreshRate = 60;
+        state->monitorRefreshRate = DEFAULT_REFRESH_RATE;
     }
     
     // Get Output1 interface for duplication
-    IDXGIOutput1* dxgiOutput1 = NULL;
     hr = dxgiOutput->lpVtbl->QueryInterface(dxgiOutput, &IID_IDXGIOutput1, (void**)&dxgiOutput1);
-    dxgiOutput->lpVtbl->Release(dxgiOutput);
-    if (FAILED(hr)) return FALSE;
+    if (FAILED(hr)) goto cleanup;
     
     // Create desktop duplication
     hr = dxgiOutput1->lpVtbl->DuplicateOutput(dxgiOutput1, (IUnknown*)state->device, &state->duplication);
-    dxgiOutput1->lpVtbl->Release(dxgiOutput1);
-    if (FAILED(hr)) return FALSE;
+    if (FAILED(hr)) goto cleanup;
     
     state->monitorIndex = outputIndex;
     state->monitorWidth = state->outputDesc.DesktopCoordinates.right - 
@@ -204,7 +197,13 @@ static BOOL InitDuplicationForOutput(CaptureState* state, IDXGIAdapter* adapter,
     state->captureWidth = state->monitorWidth;
     state->captureHeight = state->monitorHeight;
     
-    return TRUE;
+    result = TRUE;
+    
+cleanup:
+    SAFE_RELEASE(dxgiOutput1);
+    SAFE_RELEASE(dxgiOutput);
+    
+    return result;
 }
 
 // Find which DXGI output contains most of the given region
@@ -212,7 +211,7 @@ static int FindOutputForRegion(IDXGIAdapter* adapter, RECT region) {
     int bestOutput = 0;
     int bestOverlap = 0;
     
-    for (int i = 0; i < 8; i++) { // Max 8 monitors
+    for (int i = 0; i < LWSR_MAX_MONITORS; i++) {
         IDXGIOutput* output = NULL;
         if (FAILED(adapter->lpVtbl->EnumOutputs(adapter, i, &output))) break;
         
@@ -234,6 +233,9 @@ static int FindOutputForRegion(IDXGIAdapter* adapter, RECT region) {
 }
 
 BOOL Capture_Init(CaptureState* state) {
+    BOOL result = FALSE;
+    IDXGIDevice* dxgiDevice = NULL;
+    
     ZeroMemory(state, sizeof(CaptureState));
     
     // Create D3D11 device
@@ -253,35 +255,32 @@ BOOL Capture_Init(CaptureState* state) {
         &state->context
     );
     
-    if (FAILED(hr)) {
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     // Get DXGI device
-    IDXGIDevice* dxgiDevice = NULL;
     hr = state->device->lpVtbl->QueryInterface(state->device, &IID_IDXGIDevice, (void**)&dxgiDevice);
-    if (FAILED(hr)) {
-        state->device->lpVtbl->Release(state->device);
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     // Get DXGI adapter and store it
     hr = dxgiDevice->lpVtbl->GetAdapter(dxgiDevice, &state->adapter);
-    dxgiDevice->lpVtbl->Release(dxgiDevice);
-    if (FAILED(hr)) {
-        state->device->lpVtbl->Release(state->device);
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     // Initialize with primary output (output 0)
-    if (!InitDuplicationForOutput(state, state->adapter, 0)) {
-        state->adapter->lpVtbl->Release(state->adapter);
-        state->device->lpVtbl->Release(state->device);
-        return FALSE;
-    }
+    if (!InitDuplicationForOutput(state, state->adapter, 0)) goto cleanup;
     
     state->initialized = TRUE;
-    return TRUE;
+    result = TRUE;
+    
+cleanup:
+    SAFE_RELEASE(dxgiDevice);
+    
+    if (!result) {
+        SAFE_RELEASE(state->adapter);
+        SAFE_RELEASE(state->context);
+        SAFE_RELEASE(state->device);
+    }
+    
+    return result;
 }
 
 BOOL Capture_SetRegion(CaptureState* state, RECT region) {
@@ -318,11 +317,15 @@ BOOL Capture_SetRegion(CaptureState* state, RECT region) {
     state->captureRect.bottom = state->captureRect.top + state->captureHeight;
     
     // Reallocate frame buffer if needed
-    size_t newSize = (size_t)state->captureWidth * state->captureHeight * 4;
+    size_t newSize = (size_t)state->captureWidth * state->captureHeight * BYTES_PER_PIXEL_BGRA;
     if (newSize > state->frameBufferSize) {
         free(state->frameBuffer);
         state->frameBuffer = (BYTE*)malloc(newSize);
-        state->frameBufferSize = newSize;
+        if (state->frameBuffer) {
+            state->frameBufferSize = newSize;
+        } else {
+            state->frameBufferSize = 0;
+        }
     }
     
     return state->frameBuffer != NULL;
@@ -359,7 +362,7 @@ BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
     
     // Try to acquire next frame - wait up to 16ms for vsync
     HRESULT hr = state->duplication->lpVtbl->AcquireNextFrame(
-        state->duplication, 16, &frameInfo, &desktopResource);
+        state->duplication, FRAME_ACQUIRE_TIMEOUT_MS, &frameInfo, &desktopResource);
     
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
         // No new frame, return last frame if available (for static content)
@@ -447,7 +450,7 @@ BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
     // Copy to frame buffer (handle pitch difference)
     BYTE* src = (BYTE*)mapped.pData;
     BYTE* dst = state->frameBuffer;
-    int rowBytes = state->captureWidth * 4;
+    int rowBytes = state->captureWidth * BYTES_PER_PIXEL_BGRA;
     
     for (int y = 0; y < state->captureHeight; y++) {
         memcpy(dst, src, rowBytes);
@@ -569,41 +572,13 @@ int Capture_GetRefreshRate(CaptureState* state) {
 }
 
 void Capture_Shutdown(CaptureState* state) {
-    if (state->frameBuffer) {
-        free(state->frameBuffer);
-        state->frameBuffer = NULL;
-    }
-    
-    if (state->gpuTexture) {
-        state->gpuTexture->lpVtbl->Release(state->gpuTexture);
-        state->gpuTexture = NULL;
-    }
-    
-    if (state->stagingTexture) {
-        state->stagingTexture->lpVtbl->Release(state->stagingTexture);
-        state->stagingTexture = NULL;
-    }
-    
-    if (state->duplication) {
-        state->duplication->lpVtbl->Release(state->duplication);
-        state->duplication = NULL;
-    }
-    
-    if (state->adapter) {
-        state->adapter->lpVtbl->Release(state->adapter);
-        state->adapter = NULL;
-    }
-    
-    if (state->context) {
-        state->context->lpVtbl->Release(state->context);
-        state->context = NULL;
-    }
-    
-    if (state->device) {
-        state->device->lpVtbl->Release(state->device);
-        state->device = NULL;
-    }
-    
+    SAFE_FREE(state->frameBuffer);
+    SAFE_RELEASE(state->gpuTexture);
+    SAFE_RELEASE(state->stagingTexture);
+    SAFE_RELEASE(state->duplication);
+    SAFE_RELEASE(state->adapter);
+    SAFE_RELEASE(state->context);
+    SAFE_RELEASE(state->device);
     state->initialized = FALSE;
 }
 
@@ -612,11 +587,7 @@ BOOL Capture_ReinitDuplication(CaptureState* state) {
     
     // Release old duplication and GPU texture (has stale frames)
     ReleaseDuplication(state);
-    
-    if (state->gpuTexture) {
-        state->gpuTexture->lpVtbl->Release(state->gpuTexture);
-        state->gpuTexture = NULL;
-    }
+    SAFE_RELEASE(state->gpuTexture);
     
     // Recreate duplication on same output
     if (!InitDuplicationForOutput(state, state->adapter, state->monitorIndex)) {

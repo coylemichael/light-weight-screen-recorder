@@ -17,6 +17,7 @@
 #include "aac_encoder.h"
 #include "mp4_muxer.h"
 #include "gpu_converter.h"
+#include "constants.h"
 #include <stdio.h>
 #include <mmsystem.h>  // For timeBeginPeriod/timeEndPeriod
 #include <objbase.h>   // For CoInitializeEx/CoUninitialize
@@ -29,7 +30,7 @@ static NVENCEncoder* g_encoder = NULL;
 static SampleBuffer g_sampleBuffer = {0};
 
 // HEVC sequence header (VPS/SPS/PPS) for muxing
-static BYTE g_seqHeader[256];
+static BYTE g_seqHeader[MAX_SEQ_HEADER_SIZE];
 static DWORD g_seqHeaderSize = 0;
 
 // Audio state
@@ -93,10 +94,10 @@ static void AudioEncoderCallback(const AACSample* sample, void* userData) {
         // Log eviction periodically (counter reset each callback to avoid stale state)
         static int audioEvictLogCounter = 0;
         audioEvictLogCounter++;
-        if (evicted > 0 && (audioEvictLogCounter % 500) == 0) {
+        if (evicted > 0 && (audioEvictLogCounter % AUDIO_EVICT_LOG_INTERVAL) == 0) {
             double spanSec = 0;
             if (g_audioSampleCount > 0) {
-                spanSec = (sample->timestamp - g_audioSamples[0].timestamp) / 10000000.0;
+                spanSec = (sample->timestamp - g_audioSamples[0].timestamp) / (double)MF_UNITS_PER_SECOND;
             }
             ReplayLog("Audio eviction: removed %d samples, count=%d, span=%.2fs\n",
                       evicted, g_audioSampleCount, spanSec);
@@ -105,12 +106,12 @@ static void AudioEncoderCallback(const AACSample* sample, void* userData) {
     
     // Grow array if needed (capacity-based)
     if (g_audioSampleCount >= g_audioSampleCapacity) {
-        int newCapacity = g_audioSampleCapacity == 0 ? 1024 : g_audioSampleCapacity * 2;
+        int newCapacity = g_audioSampleCapacity == 0 ? INITIAL_AUDIO_CAPACITY : g_audioSampleCapacity * AUDIO_CAPACITY_GROWTH_FACTOR;
         if (newCapacity > MAX_AUDIO_SAMPLES) newCapacity = MAX_AUDIO_SAMPLES;
         
         if (g_audioSampleCount >= newCapacity) {
             // Still full after time eviction - emergency capacity eviction
-            int toKeep = newCapacity * 3 / 4;
+            int toKeep = (int)(newCapacity * EMERGENCY_KEEP_FRACTION);
             int toRemove = g_audioSampleCount - toKeep;
             
             for (int i = 0; i < toRemove && i < g_audioSampleCount; i++) {
@@ -131,7 +132,7 @@ static void AudioEncoderCallback(const AACSample* sample, void* userData) {
             } else {
                 // realloc failed - log and drop sample
                 static int reallocFailCount = 0;
-                if (++reallocFailCount <= 5) {
+                if (++reallocFailCount <= MAX_REALLOC_FAIL_LOGS) {
                     ReplayLog("WARNING: Audio buffer realloc failed (count=%d, capacity=%d)\n", 
                               g_audioSampleCount, newCapacity);
                 }
@@ -717,6 +718,8 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                     if (videoSamples[i].data) free(videoSamples[i].data);
                 }
                 free(videoSamples);
+            } else {
+                ReplayLog("  SampleBuffer_GetSamplesForMuxing failed\n");
             }
             
             // Free audio copy

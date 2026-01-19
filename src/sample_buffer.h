@@ -10,6 +10,7 @@
 #include "nvenc_encoder.h"
 #include "config.h"
 #include "mp4_muxer.h"
+#include "constants.h"
 
 // Stored sample in the buffer
 typedef struct {
@@ -35,7 +36,7 @@ typedef struct {
     int fps;                    // Frame rate
     QualityPreset quality;      // Quality preset
     
-    BYTE seqHeader[256];        // HEVC VPS/SPS/PPS sequence header
+    BYTE seqHeader[MAX_SEQ_HEADER_SIZE];  // HEVC VPS/SPS/PPS sequence header
     DWORD seqHeaderSize;        // Sequence header size
     
     CRITICAL_SECTION lock;      // Thread safety

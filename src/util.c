@@ -13,30 +13,30 @@ UINT32 Util_CalculateBitrate(int width, int height, int fps, QualityPreset quali
     float baseMbps;
     
     switch (quality) {
-        case QUALITY_LOW:      baseMbps = 60.0f;  break;
-        case QUALITY_MEDIUM:   baseMbps = 75.0f;  break;
-        case QUALITY_HIGH:     baseMbps = 90.0f;  break;
-        case QUALITY_LOSSLESS: baseMbps = 130.0f; break;
-        default:               baseMbps = 75.0f;  break;
+        case QUALITY_LOW:      baseMbps = BITRATE_LOW_MBPS;      break;
+        case QUALITY_MEDIUM:   baseMbps = BITRATE_MEDIUM_MBPS;   break;
+        case QUALITY_HIGH:     baseMbps = BITRATE_HIGH_MBPS;     break;
+        case QUALITY_LOSSLESS: baseMbps = BITRATE_LOSSLESS_MBPS; break;
+        default:               baseMbps = BITRATE_MEDIUM_MBPS;   break;
     }
     
     // Scale for resolution (base is 2560x1440 = 3.7MP)
     float megapixels = (float)(width * height) / 1000000.0f;
-    float resScale = megapixels / 3.7f;
-    if (resScale < 0.5f) resScale = 0.5f;
-    if (resScale > 2.5f) resScale = 2.5f;
+    float resScale = megapixels / BASE_RESOLUTION_MEGAPIXELS;
+    if (resScale < MIN_RESOLUTION_SCALE) resScale = MIN_RESOLUTION_SCALE;
+    if (resScale > MAX_RESOLUTION_SCALE) resScale = MAX_RESOLUTION_SCALE;
     
     // Scale for FPS (base is 60fps)
-    float fpsScale = (float)fps / 60.0f;
-    if (fpsScale < 0.5f) fpsScale = 0.5f;
-    if (fpsScale > 2.0f) fpsScale = 2.0f;
+    float fpsScale = (float)fps / BASE_FPS;
+    if (fpsScale < MIN_FPS_SCALE) fpsScale = MIN_FPS_SCALE;
+    if (fpsScale > MAX_FPS_SCALE) fpsScale = MAX_FPS_SCALE;
     
     // Use double for intermediate calculation to avoid overflow
     double bitrateCalc = (double)baseMbps * resScale * fpsScale * 1000000.0;
     
     // Bounds: 10 Mbps minimum, 150 Mbps maximum
-    if (bitrateCalc < 10000000.0) bitrateCalc = 10000000.0;
-    if (bitrateCalc > 150000000.0) bitrateCalc = 150000000.0;
+    if (bitrateCalc < MIN_BITRATE_BPS) bitrateCalc = MIN_BITRATE_BPS;
+    if (bitrateCalc > MAX_BITRATE_BPS) bitrateCalc = MAX_BITRATE_BPS;
     
     UINT32 bitrate = (UINT32)bitrateCalc;
     

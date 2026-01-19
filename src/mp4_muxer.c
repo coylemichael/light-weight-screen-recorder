@@ -6,6 +6,8 @@
 #include "mp4_muxer.h"
 #include "util.h"
 #include "logger.h"
+#include "constants.h"
+#include "mem_utils.h"
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
@@ -25,6 +27,13 @@ BOOL MP4Muxer_WriteFile(
     int sampleCount,
     const MuxerConfig* config)
 {
+    BOOL result = FALSE;
+    IMFSinkWriter* writer = NULL;
+    IMFAttributes* attrs = NULL;
+    IMFMediaType* outputType = NULL;
+    DWORD streamIndex = 0;
+    BOOL beginWritingCalled = FALSE;
+    
     if (!outputPath || !samples || sampleCount <= 0 || !config) {
         MuxLog("MP4Muxer: Invalid parameters\n");
         return FALSE;
@@ -37,9 +46,6 @@ BOOL MP4Muxer_WriteFile(
     MultiByteToWideChar(CP_ACP, 0, outputPath, -1, wPath, MAX_PATH);
     
     // Create SinkWriter with hardware acceleration enabled
-    IMFSinkWriter* writer = NULL;
-    IMFAttributes* attrs = NULL;
-    
     HRESULT hr = MFCreateAttributes(&attrs, 2);
     if (SUCCEEDED(hr)) {
         attrs->lpVtbl->SetUINT32(attrs, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
@@ -47,20 +53,14 @@ BOOL MP4Muxer_WriteFile(
     }
     
     hr = MFCreateSinkWriterFromURL(wPath, NULL, attrs, &writer);
-    if (attrs) attrs->lpVtbl->Release(attrs);
-    
     if (FAILED(hr)) {
         MuxLog("MP4Muxer: MFCreateSinkWriterFromURL failed 0x%08X\n", hr);
-        return FALSE;
+        goto cleanup;
     }
     
     // Configure output type (H.264)
-    IMFMediaType* outputType = NULL;
     hr = MFCreateMediaType(&outputType);
-    if (FAILED(hr)) {
-        writer->lpVtbl->Release(writer);
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     // Calculate bitrate using shared utility
     UINT32 bitrate = Util_CalculateBitrate(config->width, config->height, config->fps, config->quality);
@@ -96,33 +96,27 @@ BOOL MP4Muxer_WriteFile(
            config->width, config->height, config->fps, bitrate);
     
     // Add stream
-    DWORD streamIndex = 0;
     hr = writer->lpVtbl->AddStream(writer, outputType, &streamIndex);
     if (FAILED(hr)) {
         MuxLog("MP4Muxer: AddStream failed 0x%08X\n", hr);
-        outputType->lpVtbl->Release(outputType);
-        writer->lpVtbl->Release(writer);
-        return FALSE;
+        goto cleanup;
     }
     
     // For H.264 passthrough, use the SAME type for input as output
     // This triggers passthrough mode - no transcoding
     hr = writer->lpVtbl->SetInputMediaType(writer, streamIndex, outputType, NULL);
-    outputType->lpVtbl->Release(outputType);
-    
     if (FAILED(hr)) {
         MuxLog("MP4Muxer: SetInputMediaType failed 0x%08X\n", hr);
-        writer->lpVtbl->Release(writer);
-        return FALSE;
+        goto cleanup;
     }
     
     // Begin writing
     hr = writer->lpVtbl->BeginWriting(writer);
     if (FAILED(hr)) {
         MuxLog("MP4Muxer: BeginWriting failed 0x%08X\n", hr);
-        writer->lpVtbl->Release(writer);
-        return FALSE;
+        goto cleanup;
     }
+    beginWritingCalled = TRUE;
     
     // Write all samples with precise sequential timestamps
     int samplesWritten = 0;
@@ -186,19 +180,25 @@ BOOL MP4Muxer_WriteFile(
     // Log final stats - use last sample's actual timestamp for accurate duration
     LONGLONG finalDuration = (sampleCount > 0) ? samples[sampleCount-1].timestamp + samples[sampleCount-1].duration : 0;
     MuxLog("MP4Muxer: Wrote %d/%d samples (%.3fs real-time), keyframes: %d\n", 
-           samplesWritten, sampleCount, (double)finalDuration / 10000000.0, keyframeCount);
+           samplesWritten, sampleCount, (double)finalDuration / (double)MF_UNITS_PER_SECOND, keyframeCount);
     
     // Finalize
-    hr = writer->lpVtbl->Finalize(writer);
-    if (FAILED(hr)) {
-        MuxLog("MP4Muxer: Finalize failed with HRESULT 0x%08X\n", hr);
+    if (beginWritingCalled) {
+        hr = writer->lpVtbl->Finalize(writer);
+        if (FAILED(hr)) {
+            MuxLog("MP4Muxer: Finalize failed with HRESULT 0x%08X\n", hr);
+        }
     }
-    writer->lpVtbl->Release(writer);
     
-    BOOL success = SUCCEEDED(hr) && samplesWritten > 0;
-    MuxLog("MP4Muxer: Finalize %s\n", success ? "OK" : "FAILED");
+    result = SUCCEEDED(hr) && samplesWritten > 0;
+    MuxLog("MP4Muxer: Finalize %s\n", result ? "OK" : "FAILED");
     
-    return success;
+cleanup:
+    SAFE_RELEASE(outputType);
+    SAFE_RELEASE(attrs);
+    SAFE_RELEASE(writer);
+    
+    return result;
 }
 
 // Write video and audio to MP4 file
@@ -211,6 +211,15 @@ BOOL MP4Muxer_WriteFileWithAudio(
     int audioSampleCount,
     const MuxerAudioConfig* audioConfig)
 {
+    BOOL result = FALSE;
+    IMFSinkWriter* writer = NULL;
+    IMFAttributes* attrs = NULL;
+    IMFMediaType* videoType = NULL;
+    IMFMediaType* audioType = NULL;
+    BOOL beginWritingCalled = FALSE;
+    DWORD videoStreamIndex = 0;
+    DWORD audioStreamIndex = 0;
+    
     if (!outputPath || !videoSamples || videoSampleCount <= 0 || !videoConfig) {
         MuxLog("MP4Muxer: Invalid video parameters\n");
         return FALSE;
@@ -229,9 +238,6 @@ BOOL MP4Muxer_WriteFileWithAudio(
     MultiByteToWideChar(CP_ACP, 0, outputPath, -1, wPath, MAX_PATH);
     
     // Create SinkWriter
-    IMFSinkWriter* writer = NULL;
-    IMFAttributes* attrs = NULL;
-    
     HRESULT hr = MFCreateAttributes(&attrs, 2);
     if (SUCCEEDED(hr)) {
         attrs->lpVtbl->SetUINT32(attrs, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
@@ -239,20 +245,14 @@ BOOL MP4Muxer_WriteFileWithAudio(
     }
     
     hr = MFCreateSinkWriterFromURL(wPath, NULL, attrs, &writer);
-    if (attrs) attrs->lpVtbl->Release(attrs);
-    
     if (FAILED(hr)) {
         MuxLog("MP4Muxer: MFCreateSinkWriterFromURL failed 0x%08X\n", hr);
-        return FALSE;
+        goto cleanup;
     }
     
     // === VIDEO STREAM ===
-    IMFMediaType* videoType = NULL;
     hr = MFCreateMediaType(&videoType);
-    if (FAILED(hr)) {
-        writer->lpVtbl->Release(writer);
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     UINT32 bitrate = Util_CalculateBitrate(videoConfig->width, videoConfig->height, 
                                            videoConfig->fps, videoConfig->quality);
@@ -281,31 +281,21 @@ BOOL MP4Muxer_WriteFileWithAudio(
         }
     }
     
-    DWORD videoStreamIndex = 0;
     hr = writer->lpVtbl->AddStream(writer, videoType, &videoStreamIndex);
     if (FAILED(hr)) {
         MuxLog("MP4Muxer: AddStream (video) failed 0x%08X\n", hr);
-        videoType->lpVtbl->Release(videoType);
-        writer->lpVtbl->Release(writer);
-        return FALSE;
+        goto cleanup;
     }
     
     hr = writer->lpVtbl->SetInputMediaType(writer, videoStreamIndex, videoType, NULL);
-    videoType->lpVtbl->Release(videoType);
-    
     if (FAILED(hr)) {
         MuxLog("MP4Muxer: SetInputMediaType (video) failed 0x%08X\n", hr);
-        writer->lpVtbl->Release(writer);
-        return FALSE;
+        goto cleanup;
     }
     
     // === AUDIO STREAM ===
-    IMFMediaType* audioType = NULL;
     hr = MFCreateMediaType(&audioType);
-    if (FAILED(hr)) {
-        writer->lpVtbl->Release(writer);
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     audioType->lpVtbl->SetGUID(audioType, &MF_MT_MAJOR_TYPE, &MFMediaType_Audio);
     audioType->lpVtbl->SetGUID(audioType, &MF_MT_SUBTYPE, &MFAudioFormat_AAC);
@@ -321,31 +311,25 @@ BOOL MP4Muxer_WriteFileWithAudio(
             audioConfig->configData, audioConfig->configSize);
     }
     
-    DWORD audioStreamIndex = 0;
     hr = writer->lpVtbl->AddStream(writer, audioType, &audioStreamIndex);
     if (FAILED(hr)) {
         MuxLog("MP4Muxer: AddStream (audio) failed 0x%08X\n", hr);
-        audioType->lpVtbl->Release(audioType);
-        writer->lpVtbl->Release(writer);
-        return FALSE;
+        goto cleanup;
     }
     
     hr = writer->lpVtbl->SetInputMediaType(writer, audioStreamIndex, audioType, NULL);
-    audioType->lpVtbl->Release(audioType);
-    
     if (FAILED(hr)) {
         MuxLog("MP4Muxer: SetInputMediaType (audio) failed 0x%08X\n", hr);
-        writer->lpVtbl->Release(writer);
-        return FALSE;
+        goto cleanup;
     }
     
     // Begin writing
     hr = writer->lpVtbl->BeginWriting(writer);
     if (FAILED(hr)) {
         MuxLog("MP4Muxer: BeginWriting failed 0x%08X\n", hr);
-        writer->lpVtbl->Release(writer);
-        return FALSE;
+        goto cleanup;
     }
+    beginWritingCalled = TRUE;
     
     // === INTERLEAVED WRITING ===
     // Write samples in timestamp order for proper interleaving
@@ -439,14 +423,21 @@ BOOL MP4Muxer_WriteFileWithAudio(
            videoWritten, videoSampleCount, audioWritten, audioSampleCount);
     
     // Finalize
-    hr = writer->lpVtbl->Finalize(writer);
-    if (FAILED(hr)) {
-        MuxLog("MP4Muxer: Finalize failed with HRESULT 0x%08X\n", hr);
+    if (beginWritingCalled) {
+        hr = writer->lpVtbl->Finalize(writer);
+        if (FAILED(hr)) {
+            MuxLog("MP4Muxer: Finalize failed with HRESULT 0x%08X\n", hr);
+        }
     }
-    writer->lpVtbl->Release(writer);
     
-    BOOL success = SUCCEEDED(hr) && videoWritten > 0;
-    MuxLog("MP4Muxer: Finalize %s\n", success ? "OK" : "FAILED");
+    result = SUCCEEDED(hr) && videoWritten > 0;
+    MuxLog("MP4Muxer: Finalize %s\n", result ? "OK" : "FAILED");
     
-    return success;
+cleanup:
+    SAFE_RELEASE(audioType);
+    SAFE_RELEASE(videoType);
+    SAFE_RELEASE(attrs);
+    SAFE_RELEASE(writer);
+    
+    return result;
 }

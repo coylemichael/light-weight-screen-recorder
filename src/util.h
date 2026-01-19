@@ -8,9 +8,7 @@
 
 #include <windows.h>
 #include "config.h"
-
-// Media Foundation time units (100-nanosecond intervals)
-#define MF_UNITS_PER_SECOND 10000000LL
+#include "constants.h"
 
 // Calculate video bitrate based on quality preset
 // Uses ShadowPlay-style scaling: base bitrate scales with resolution and FPS

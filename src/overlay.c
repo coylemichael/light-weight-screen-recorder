@@ -100,6 +100,7 @@ static GdipStartPathFigureFunc GdipStartPathFigure = NULL;
 #include "config.h"
 #include "replay_buffer.h"
 #include "logger.h"
+#include "constants.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")

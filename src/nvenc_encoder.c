@@ -20,6 +20,7 @@
 
 #include "nvenc_encoder.h"
 #include "logger.h"
+#include "constants.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -38,7 +39,7 @@
 
 // Per API docs (line 3444-3445): "at least 4 more than number of B frames"
 // With no B-frames, minimum is 4. We use 8 for better pipelining.
-#define NUM_BUFFERS 8
+#define NUM_BUFFERS NVENC_NUM_BUFFERS
 
 // ============================================================================
 // Encoder State
@@ -162,7 +163,7 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     enc->width = width;
     enc->height = height;
     enc->fps = fps;
-    enc->frameDuration = 10000000ULL / fps;
+    enc->frameDuration = MF_UNITS_PER_SECOND / fps;
     
     InitializeCriticalSection(&enc->submitLock);
     
@@ -288,7 +289,7 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     
     // Customize config for screen recording
     NV_ENC_CONFIG config = presetConfig.presetCfg;
-    config.gopLength = fps * 2;  // 2-second GOP for seeking
+    config.gopLength = fps * GOP_LENGTH_SECONDS;  // 2-second GOP for seeking
     config.frameIntervalP = 1;   // No B-frames (confirmed by user)
     
     // Disable expensive features for maximum speed
@@ -306,15 +307,15 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     // Constant QP mode (fastest, no rate control overhead)
     config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CONSTQP;
     switch (quality) {
-        case QUALITY_LOW:      enc->qp = 28; break;
-        case QUALITY_MEDIUM:   enc->qp = 24; break;
-        case QUALITY_HIGH:     enc->qp = 20; break;
-        case QUALITY_LOSSLESS: enc->qp = 16; break;
-        default:               enc->qp = 24; break;
+        case QUALITY_LOW:      enc->qp = QP_LOW;      break;
+        case QUALITY_MEDIUM:   enc->qp = QP_MEDIUM;   break;
+        case QUALITY_HIGH:     enc->qp = QP_HIGH;     break;
+        case QUALITY_LOSSLESS: enc->qp = QP_LOSSLESS; break;
+        default:               enc->qp = QP_MEDIUM;   break;
     }
     config.rcParams.constQP.qpInterP = enc->qp;
     config.rcParams.constQP.qpInterB = enc->qp;
-    config.rcParams.constQP.qpIntra = enc->qp > 4 ? enc->qp - 4 : 1;
+    config.rcParams.constQP.qpIntra = enc->qp > QP_INTRA_OFFSET ? enc->qp - QP_INTRA_OFFSET : 1;
     
     // ========================================================================
     // Step 4: Initialize encoder
@@ -438,9 +439,9 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
     // Check if pipeline is full
     if (enc->pendingCount >= NUM_BUFFERS) {
         LeaveCriticalSection(&enc->submitLock);
-        // Rate-limit this log to avoid spam (log once per 100 occurrences)
+        // Rate-limit this log to avoid spam (log once per LOG_RATE_LIMIT occurrences)
         enc->pipelineFullCount++;
-        if ((enc->pipelineFullCount % 100) == 1) {
+        if ((enc->pipelineFullCount % LOG_RATE_LIMIT) == 1) {
             NvLog("NVENCEncoder: Pipeline full (%d pending) - frame dropped\n", enc->pendingCount);
         }
         return 0;  // Transient - output thread will drain
@@ -454,7 +455,7 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
     // Step 1: Acquire keyed mutex on SOURCE device for writing
     // Key 0 = available, Key 1 = encoder owns it
     // ========================================================================
-    hr = enc->srcMutex[idx]->lpVtbl->AcquireSync(enc->srcMutex[idx], 0, 100);
+    hr = enc->srcMutex[idx]->lpVtbl->AcquireSync(enc->srcMutex[idx], 0, MUTEX_ACQUIRE_TIMEOUT_MS);
     
     // Check for device removed/reset errors
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
@@ -467,7 +468,7 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
     if (hr == WAIT_TIMEOUT || FAILED(hr)) {
         LeaveCriticalSection(&enc->submitLock);
         enc->mutexTimeoutCount++;
-        if ((enc->mutexTimeoutCount % 100) == 1) {
+        if ((enc->mutexTimeoutCount % LOG_RATE_LIMIT) == 1) {
             NvLog("NVENCEncoder: Mutex acquire timeout[%d] (0x%08X)\n", idx, hr);
         }
         return 0;  // Transient
@@ -503,7 +504,7 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
     // ========================================================================
     // Step 4: Acquire mutex on ENCODER device for encoding
     // ========================================================================
-    hr = enc->encMutex[idx]->lpVtbl->AcquireSync(enc->encMutex[idx], 1, 100);
+    hr = enc->encMutex[idx]->lpVtbl->AcquireSync(enc->encMutex[idx], 1, MUTEX_ACQUIRE_TIMEOUT_MS);
     
     // Check for device removed/reset errors
     if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
@@ -570,7 +571,7 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
     picParams.completionEvent = enc->completionEvents[idx];
     
     // Force IDR every 2 seconds for seeking
-    if (enc->frameNumber % (enc->fps * 2) == 0) {
+    if (enc->frameNumber % (enc->fps * GOP_LENGTH_SECONDS) == 0) {
         picParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR;
     }
     
@@ -693,7 +694,7 @@ void NVENCEncoder_Destroy(NVENCEncoder* enc) {
             }
         }
         
-        WaitForSingleObject(enc->outputThread, 5000);
+        WaitForSingleObject(enc->outputThread, THREAD_JOIN_TIMEOUT_MS);
         CloseHandle(enc->outputThread);
     }
     
@@ -790,7 +791,7 @@ static unsigned __stdcall OutputThreadProc(void* param) {
         // Per docs: "wait on the event object to be signaled"
         // ====================================================================
         
-        DWORD waitResult = WaitForSingleObject(enc->completionEvents[idx], 100);
+        DWORD waitResult = WaitForSingleObject(enc->completionEvents[idx], EVENT_WAIT_TIMEOUT_MS);
         
         if (waitResult == WAIT_TIMEOUT) {
             // No frame ready yet - check if we should stop, then wait again

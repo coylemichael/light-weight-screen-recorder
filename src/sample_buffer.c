@@ -8,6 +8,7 @@
 #include "mp4_muxer.h"
 #include "util.h"
 #include "logger.h"
+#include "constants.h"
 #include <stdio.h>
 
 // Alias for logging
@@ -62,7 +63,7 @@ static void EvictOldSamples(SampleBuffer* buf, LONGLONG newTimestamp) {
     // Log eviction occasionally to show buffer is working
     static int evictLogCounter = 0;
     evictLogCounter++;
-    if (evicted > 0 && (evictLogCounter % 300) == 0 && buf->count > 0) {
+    if (evicted > 0 && (evictLogCounter % EVICT_LOG_INTERVAL) == 0 && buf->count > 0) {
         double span = (double)(newTimestamp - buf->samples[buf->tail].timestamp) / 10000000.0;
         BufLog("Eviction: removed %d samples, count now %d, span=%.2fs\n", 
                evicted, buf->count, span);
@@ -76,9 +77,9 @@ BOOL SampleBuffer_Init(SampleBuffer* buf, int durationSeconds, int fps,
     ZeroMemory(buf, sizeof(SampleBuffer));
     
     // Calculate capacity: frames for 1.5x duration (headroom)
-    int capacity = (int)(durationSeconds * fps * 1.5);
-    if (capacity < 100) capacity = 100;
-    if (capacity > 100000) capacity = 100000;  // ~27 min at 60fps
+    int capacity = (int)(durationSeconds * fps * BUFFER_CAPACITY_HEADROOM);
+    if (capacity < MIN_BUFFER_CAPACITY) capacity = MIN_BUFFER_CAPACITY;
+    if (capacity > MAX_BUFFER_CAPACITY) capacity = MAX_BUFFER_CAPACITY;  // ~27 min at 60fps
     
     buf->samples = (BufferedSample*)calloc(capacity, sizeof(BufferedSample));
     if (!buf->samples) {
@@ -90,7 +91,7 @@ BOOL SampleBuffer_Init(SampleBuffer* buf, int durationSeconds, int fps,
     buf->count = 0;
     buf->head = 0;
     buf->tail = 0;
-    buf->maxDuration = (LONGLONG)durationSeconds * 10000000LL;  // 100-ns units
+    buf->maxDuration = (LONGLONG)durationSeconds * MF_UNITS_PER_SECOND;
     buf->width = width;
     buf->height = height;
     buf->fps = fps;
@@ -286,6 +287,14 @@ BOOL SampleBuffer_WriteToFile(SampleBuffer* buf, const char* outputPath) {
     }
     BufLog("WriteToFile: copied %d samples (%zu bytes total)\n", copiedCount, totalBytes);
     
+    // If no samples were copied, free the array and return failure
+    if (copiedCount == 0) {
+        free(samples);
+        LeaveCriticalSection(&buf->lock);
+        BufLog("WriteToFile: no samples could be copied\n");
+        return FALSE;
+    }
+    
     // Capture config
     MuxerConfig config;
     config.width = buf->width;
@@ -366,9 +375,15 @@ BOOL SampleBuffer_GetSamplesForMuxing(SampleBuffer* buf, MuxerSample** outSample
     
     LeaveCriticalSection(&buf->lock);
     
+    // Free the array if no samples were successfully copied
+    if (copiedCount == 0) {
+        free(samples);
+        return FALSE;
+    }
+    
     *outSamples = samples;
     *outCount = copiedCount;
-    return copiedCount > 0;
+    return TRUE;
 }
 
 void SampleBuffer_SetSequenceHeader(SampleBuffer* buf, const BYTE* header, DWORD size) {

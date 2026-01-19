@@ -10,6 +10,7 @@
 #include "audio_guids.h"
 #include "util.h"
 #include "logger.h"
+#include "constants.h"
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <functiondiscoverykeys_devpkey.h>
@@ -79,16 +80,23 @@ void AudioCapture_Shutdown(void) {
 }
 
 // Create a single capture source
+// Uses goto-cleanup pattern for consistent resource cleanup on all error paths
 static AudioCaptureSource* CreateSource(const char* deviceId) {
     if (!deviceId || deviceId[0] == '\0' || !g_audioEnumerator) {
         return NULL;
     }
     
-    AudioCaptureSource* src = (AudioCaptureSource*)calloc(1, sizeof(AudioCaptureSource));
-    if (!src) return NULL;
+    // Initialize all resources to NULL for safe cleanup
+    AudioCaptureSource* src = NULL;
+    BOOL csInitialized = FALSE;
+    HRESULT hr;
+    
+    src = (AudioCaptureSource*)calloc(1, sizeof(AudioCaptureSource));
+    if (!src) goto cleanup;
     
     strncpy(src->deviceId, deviceId, sizeof(src->deviceId) - 1);
     InitializeCriticalSection(&src->lock);
+    csInitialized = TRUE;
     
     // Get device info to determine if loopback
     AudioDeviceInfo info;
@@ -101,12 +109,8 @@ static AudioCaptureSource* CreateSource(const char* deviceId) {
     WCHAR wideId[256];
     Util_Utf8ToWide(deviceId, wideId, 256);
     
-    HRESULT hr = g_audioEnumerator->lpVtbl->GetDevice(g_audioEnumerator, wideId, &src->device);
-    if (FAILED(hr)) {
-        DeleteCriticalSection(&src->lock);
-        free(src);
-        return NULL;
-    }
+    hr = g_audioEnumerator->lpVtbl->GetDevice(g_audioEnumerator, wideId, &src->device);
+    if (FAILED(hr)) goto cleanup;
     
     // Activate audio client
     hr = src->device->lpVtbl->Activate(
@@ -116,23 +120,11 @@ static AudioCaptureSource* CreateSource(const char* deviceId) {
         NULL,
         (void**)&src->audioClient
     );
-    
-    if (FAILED(hr)) {
-        src->device->lpVtbl->Release(src->device);
-        DeleteCriticalSection(&src->lock);
-        free(src);
-        return NULL;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     // Get device format
     hr = src->audioClient->lpVtbl->GetMixFormat(src->audioClient, &src->deviceFormat);
-    if (FAILED(hr)) {
-        src->audioClient->lpVtbl->Release(src->audioClient);
-        src->device->lpVtbl->Release(src->device);
-        DeleteCriticalSection(&src->lock);
-        free(src);
-        return NULL;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     // Log device format for debugging
     Logger_Log("Audio device format: %d Hz, %d ch, %d bit, tag=%d (target: %d Hz)\n",
@@ -154,16 +146,23 @@ static AudioCaptureSource* CreateSource(const char* deviceId) {
     // Allocate buffer
     src->bufferSize = SOURCE_BUFFER_SIZE;
     src->buffer = (BYTE*)malloc(src->bufferSize);
-    if (!src->buffer) {
-        CoTaskMemFree(src->deviceFormat);
-        src->audioClient->lpVtbl->Release(src->audioClient);
-        src->device->lpVtbl->Release(src->device);
-        DeleteCriticalSection(&src->lock);
-        free(src);
-        return NULL;
-    }
+    if (!src->buffer) goto cleanup;
     
+    // Success - return the source
     return src;
+    
+cleanup:
+    // Clean up in reverse order of acquisition
+    // All pointers were initialized to NULL by calloc, so NULL checks are safe
+    if (src) {
+        if (src->buffer) free(src->buffer);
+        if (src->deviceFormat) CoTaskMemFree(src->deviceFormat);
+        if (src->audioClient) src->audioClient->lpVtbl->Release(src->audioClient);
+        if (src->device) src->device->lpVtbl->Release(src->device);
+        if (csInitialized) DeleteCriticalSection(&src->lock);
+        free(src);
+    }
+    return NULL;
 }
 
 // Destroy a capture source
@@ -195,7 +194,7 @@ static BOOL InitSourceCapture(AudioCaptureSource* src) {
     if (!src || !src->audioClient) return FALSE;
     
     // Buffer duration in 100ns units (100ms)
-    REFERENCE_TIME bufferDuration = 1000000;  // 100ms
+    REFERENCE_TIME bufferDuration = WASAPI_BUFFER_DURATION_100NS;
     
     // NOTE: Don't use AUDCLNT_STREAMFLAGS_EVENTCALLBACK - we poll instead
     // Using event callback requires SetEventHandle which adds complexity
@@ -295,17 +294,17 @@ static int ConvertSamples(
             _r = (srcChannels >= 2) ? sf[1] : _l; \
         } else if (srcBits == 16) { \
             const short* ss = (const short*)(srcData + _i * srcFmt->nBlockAlign); \
-            _l = ss[0] / 32768.0f; \
-            _r = (srcChannels >= 2) ? ss[1] / 32768.0f : _l; \
+            _l = ss[0] / AUDIO_16BIT_MAX; \
+            _r = (srcChannels >= 2) ? ss[1] / AUDIO_16BIT_MAX : _l; \
         } else if (srcBits == 24) { \
             const BYTE* p = srcData + _i * srcFmt->nBlockAlign; \
             int s1 = (p[0] | (p[1] << 8) | (p[2] << 16)); \
-            if (s1 & 0x800000) s1 |= 0xFF000000; \
-            _l = s1 / 8388608.0f; \
+            if (s1 & AUDIO_24BIT_SIGN_MASK) s1 |= AUDIO_24BIT_SIGN_EXTEND; \
+            _l = s1 / AUDIO_24BIT_MAX; \
             if (srcChannels >= 2) { \
                 int s2 = (p[3] | (p[4] << 8) | (p[5] << 16)); \
-                if (s2 & 0x800000) s2 |= 0xFF000000; \
-                _r = s2 / 8388608.0f; \
+                if (s2 & AUDIO_24BIT_SIGN_MASK) s2 |= AUDIO_24BIT_SIGN_EXTEND; \
+                _r = s2 / AUDIO_24BIT_MAX; \
             } else { _r = _l; } \
         } \
         *(pLeft) = _l; *(pRight) = _r; \
@@ -336,9 +335,9 @@ static int ConvertSamples(
         
         // Write to destination as 16-bit
         short* dstShorts = (short*)(dstData + i * dstFmt->nBlockAlign);
-        dstShorts[0] = (short)(left * 32767.0f);
+        dstShorts[0] = (short)(left * AUDIO_16BIT_MAX_SIGNED);
         if (dstChannels >= 2) {
-            dstShorts[1] = (short)(right * 32767.0f);
+            dstShorts[1] = (short)(right * AUDIO_16BIT_MAX_SIGNED);
         }
         
         srcPos += srcStep;
@@ -376,11 +375,11 @@ static DWORD WINAPI SourceCaptureThread(LPVOID param) {
                 break;  // Exit the loop - device is gone
             }
             src->consecutiveErrors++;
-            if (src->consecutiveErrors > 100) {
+            if (src->consecutiveErrors > MAX_CONSECUTIVE_ERRORS) {
                 Logger_Log("Audio source '%s' too many consecutive errors - stopping", src->deviceId);
                 break;
             }
-            Sleep(5);
+            Sleep(AUDIO_POLL_INTERVAL_MS);
             continue;
         }
         src->consecutiveErrors = 0;  // Reset on success
@@ -469,7 +468,7 @@ static DWORD WINAPI SourceCaptureThread(LPVOID param) {
             if (FAILED(hr)) break;
         }
         
-        Sleep(5);  // ~5ms between checks
+        Sleep(AUDIO_POLL_INTERVAL_MS);  // Poll interval between checks
     }
     
     free(convBuffer);
@@ -554,11 +553,19 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
     BOOL srcDormant[MAX_AUDIO_SOURCES] = {0};  // TRUE if source is event-driven and currently silent
     
     for (int i = 0; i < ctx->sourceCount; i++) {
-        srcBuffers[i] = (BYTE*)malloc(4096);
+        srcBuffers[i] = (BYTE*)malloc(AUDIO_MIX_CHUNK_SIZE);
+        if (!srcBuffers[i]) {
+            // Allocation failed - clean up previously allocated buffers and exit
+            Logger_Log("MixCaptureThread: malloc failed for srcBuffer[%d]\n", i);
+            for (int j = 0; j < i; j++) {
+                if (srcBuffers[j]) free(srcBuffers[j]);
+            }
+            return 0;
+        }
     }
     
-    const int chunkSize = 4096;  // Process in chunks
-    const double dormantThresholdMs = 100.0;  // Consider source dormant after 100ms of no packets
+    const int chunkSize = AUDIO_MIX_CHUNK_SIZE;  // Process in chunks
+    const double dormantThresholdMs = DORMANT_THRESHOLD_MS;  // Consider source dormant after no packets
     
     // Rate limiting: track how much audio we should output based on elapsed time
     LARGE_INTEGER rateStartTime;

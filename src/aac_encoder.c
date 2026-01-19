@@ -4,6 +4,8 @@
  */
 
 #include "aac_encoder.h"
+#include "constants.h"
+#include "mem_utils.h"
 #include <mfapi.h>
 #include <mftransform.h>
 #include <mferror.h>
@@ -74,7 +76,7 @@ static IMFMediaType* CreateAACType(void) {
     type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
     type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AAC_BITRATE / 8);
     type->lpVtbl->SetUINT32(type, &MF_MT_AAC_PAYLOAD_TYPE, 0);  // Raw AAC
-    type->lpVtbl->SetUINT32(type, &MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, 0x29);  // AAC-LC
+    type->lpVtbl->SetUINT32(type, &MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, AAC_LC_PROFILE_LEVEL);
     
     return type;
 }
@@ -97,7 +99,7 @@ static void ProcessOutput(AACEncoder* encoder) {
         if (!(streamInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)) {
             // We need to provide the sample
             MFCreateSample(&outputSample);
-            MFCreateMemoryBuffer(streamInfo.cbSize > 0 ? streamInfo.cbSize : 8192, &outputMediaBuffer);
+            MFCreateMemoryBuffer(streamInfo.cbSize > 0 ? streamInfo.cbSize : AAC_OUTPUT_BUFFER_SIZE, &outputMediaBuffer);
             outputSample->lpVtbl->AddBuffer(outputSample, outputMediaBuffer);
             outputBuffer.pSample = outputSample;
         }
@@ -167,10 +169,7 @@ AACEncoder* AACEncoder_Create(void) {
     // Allocate input buffer (hold multiple frames worth)
     encoder->inputBufferSize = encoder->bytesPerFrame * 4;
     encoder->inputBuffer = (BYTE*)malloc(encoder->inputBufferSize);
-    if (!encoder->inputBuffer) {
-        free(encoder);
-        return NULL;
-    }
+    if (!encoder->inputBuffer) goto cleanup_fail;
     
     // Create AAC encoder MFT
     HRESULT hr = CoCreateInstance(
@@ -198,7 +197,7 @@ AACEncoder* AACEncoder_Create(void) {
             &count
         );
         
-        if (SUCCEEDED(hr) && count > 0) {
+        if (SUCCEEDED(hr) && count > 0 && activates) {
             hr = activates[0]->lpVtbl->ActivateObject(
                 activates[0],
                 &IID_IMFTransform,
@@ -209,14 +208,13 @@ AACEncoder* AACEncoder_Create(void) {
                 activates[i]->lpVtbl->Release(activates[i]);
             }
             CoTaskMemFree(activates);
+        } else if (SUCCEEDED(hr) && activates) {
+            // MFTEnumEx succeeded but returned 0 encoders - free the array
+            CoTaskMemFree(activates);
         }
     }
     
-    if (!encoder->transform) {
-        free(encoder->inputBuffer);
-        free(encoder);
-        return NULL;
-    }
+    if (!encoder->transform) goto cleanup_fail;
     
     // Set output type first (AAC encoders often need this)
     encoder->outputType = CreateAACType();
@@ -248,10 +246,7 @@ AACEncoder* AACEncoder_Create(void) {
         }
     }
     
-    if (FAILED(hr)) {
-        AACEncoder_Destroy(encoder);
-        return NULL;
-    }
+    if (FAILED(hr)) goto cleanup_fail;
     
     // Get AudioSpecificConfig from output type
     UINT32 blobSize = 0;
@@ -289,6 +284,10 @@ AACEncoder* AACEncoder_Create(void) {
     
     encoder->initialized = TRUE;
     return encoder;
+    
+cleanup_fail:
+    AACEncoder_Destroy(encoder);
+    return NULL;
 }
 
 void AACEncoder_Destroy(AACEncoder* encoder) {

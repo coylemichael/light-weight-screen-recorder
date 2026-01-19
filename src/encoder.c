@@ -5,6 +5,8 @@
 
 #include "encoder.h"
 #include "util.h"
+#include "constants.h"
+#include "mem_utils.h"
 #include <mferror.h>
 #include <stdio.h>
 #include <time.h>
@@ -33,6 +35,11 @@ void Encoder_GenerateFilename(char* buffer, size_t size,
 BOOL Encoder_Init(EncoderState* state, const char* outputPath,
                   int width, int height, int fps,
                   OutputFormat format, QualityPreset quality) {
+    BOOL result = FALSE;
+    IMFAttributes* attributes = NULL;
+    IMFMediaType* outputType = NULL;
+    IMFMediaType* inputType = NULL;
+    
     ZeroMemory(state, sizeof(EncoderState));
     
     state->width = width;
@@ -40,7 +47,7 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     state->fps = fps;
     state->format = format;
     state->quality = quality;
-    state->frameDuration = 10000000ULL / fps; // 100-nanosecond units
+    state->frameDuration = MF_UNITS_PER_SECOND / fps;
     
     strncpy(state->outputPath, outputPath, MAX_PATH - 1);
     state->outputPath[MAX_PATH - 1] = '\0';
@@ -60,9 +67,8 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     MultiByteToWideChar(CP_ACP, 0, outputPath, -1, wPath, MAX_PATH);
     
     // Create sink writer attributes
-    IMFAttributes* attributes = NULL;
     HRESULT hr = MFCreateAttributes(&attributes, 3);
-    if (FAILED(hr)) return FALSE;
+    if (FAILED(hr)) goto cleanup;
     
     // Enable hardware encoding (NVENC, Intel QSV, AMD VCE)
     attributes->lpVtbl->SetUINT32(attributes, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
@@ -72,18 +78,11 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     
     // Create sink writer
     hr = MFCreateSinkWriterFromURL(wPath, NULL, attributes, &state->sinkWriter);
-    attributes->lpVtbl->Release(attributes);
-    if (FAILED(hr)) {
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     // Configure output media type (encoded)
-    IMFMediaType* outputType = NULL;
     hr = MFCreateMediaType(&outputType);
-    if (FAILED(hr)) {
-        state->sinkWriter->lpVtbl->Release(state->sinkWriter);
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     GUID videoFormat = GetVideoFormat(format);
     UINT32 bitrate = Util_CalculateBitrate(width, height, fps, quality);
@@ -96,7 +95,7 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     // Set H.264 profile (let encoder pick level automatically)
     if (format == FORMAT_MP4 || format == FORMAT_AVI) {
         // eAVEncH264VProfile_High = 100
-        outputType->lpVtbl->SetUINT32(outputType, &MF_MT_MPEG2_PROFILE, 100);
+        outputType->lpVtbl->SetUINT32(outputType, &MF_MT_MPEG2_PROFILE, H264_PROFILE_HIGH);
         // Don't set level - let encoder determine based on resolution/fps
     }
     
@@ -113,19 +112,11 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     outputType->lpVtbl->SetUINT64(outputType, &MF_MT_PIXEL_ASPECT_RATIO, aspectRatio);
     
     hr = state->sinkWriter->lpVtbl->AddStream(state->sinkWriter, outputType, &state->videoStreamIndex);
-    outputType->lpVtbl->Release(outputType);
-    if (FAILED(hr)) {
-        state->sinkWriter->lpVtbl->Release(state->sinkWriter);
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     // Configure input media type (raw BGRA)
-    IMFMediaType* inputType = NULL;
     hr = MFCreateMediaType(&inputType);
-    if (FAILED(hr)) {
-        state->sinkWriter->lpVtbl->Release(state->sinkWriter);
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     inputType->lpVtbl->SetGUID(inputType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
     inputType->lpVtbl->SetGUID(inputType, &MF_MT_SUBTYPE, &MFVideoFormat_RGB32);
@@ -135,54 +126,57 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     inputType->lpVtbl->SetUINT64(inputType, &MF_MT_PIXEL_ASPECT_RATIO, aspectRatio);
     
     // Calculate stride (negative for top-down DIB)
-    LONG stride = -((LONG)width * 4);
+    LONG stride = -((LONG)width * BYTES_PER_PIXEL_BGRA);
     inputType->lpVtbl->SetUINT32(inputType, &MF_MT_DEFAULT_STRIDE, (UINT32)stride);
     
     hr = state->sinkWriter->lpVtbl->SetInputMediaType(state->sinkWriter, state->videoStreamIndex, 
                                                        inputType, NULL);
-    inputType->lpVtbl->Release(inputType);
-    if (FAILED(hr)) {
-        state->sinkWriter->lpVtbl->Release(state->sinkWriter);
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     // Start writing
     hr = state->sinkWriter->lpVtbl->BeginWriting(state->sinkWriter);
-    if (FAILED(hr)) {
-        state->sinkWriter->lpVtbl->Release(state->sinkWriter);
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     state->initialized = TRUE;
     state->recording = TRUE;
     state->frameCount = 0;
     state->startTime = 0;
+    result = TRUE;
     
-    return TRUE;
+cleanup:
+    SAFE_RELEASE(inputType);
+    SAFE_RELEASE(outputType);
+    SAFE_RELEASE(attributes);
+    
+    if (!result) {
+        SAFE_RELEASE(state->sinkWriter);
+    }
+    
+    return result;
 }
 
 BOOL Encoder_WriteFrame(EncoderState* state, const BYTE* frameData, UINT64 timestamp) {
     (void)timestamp;
+    BOOL result = FALSE;
+    IMFMediaBuffer* buffer = NULL;
+    IMFSample* sample = NULL;
+    BYTE* bufferData = NULL;
+    
     if (!state->initialized || !state->recording) return FALSE;
     
     // Create media buffer
-    DWORD bufferSize = state->width * state->height * 4;
-    IMFMediaBuffer* buffer = NULL;
+    DWORD bufferSize = state->width * state->height * BYTES_PER_PIXEL_BGRA;
     HRESULT hr = MFCreateMemoryBuffer(bufferSize, &buffer);
-    if (FAILED(hr)) return FALSE;
+    if (FAILED(hr)) goto cleanup;
     
     // Lock buffer and copy frame data
-    BYTE* bufferData = NULL;
     hr = buffer->lpVtbl->Lock(buffer, &bufferData, NULL, NULL);
-    if (FAILED(hr)) {
-        buffer->lpVtbl->Release(buffer);
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     // Copy frame data (flip vertically for Media Foundation)
-    const BYTE* src = frameData + (state->height - 1) * state->width * 4;
+    const BYTE* src = frameData + (state->height - 1) * state->width * BYTES_PER_PIXEL_BGRA;
     BYTE* dst = bufferData;
-    int rowBytes = state->width * 4;
+    int rowBytes = state->width * BYTES_PER_PIXEL_BGRA;
     
     for (int y = 0; y < state->height; y++) {
         memcpy(dst, src, rowBytes);
@@ -191,22 +185,15 @@ BOOL Encoder_WriteFrame(EncoderState* state, const BYTE* frameData, UINT64 times
     }
     
     buffer->lpVtbl->Unlock(buffer);
+    bufferData = NULL;  // Mark as unlocked
     buffer->lpVtbl->SetCurrentLength(buffer, bufferSize);
     
     // Create sample
-    IMFSample* sample = NULL;
     hr = MFCreateSample(&sample);
-    if (FAILED(hr)) {
-        buffer->lpVtbl->Release(buffer);
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     hr = sample->lpVtbl->AddBuffer(sample, buffer);
-    buffer->lpVtbl->Release(buffer);
-    if (FAILED(hr)) {
-        sample->lpVtbl->Release(sample);
-        return FALSE;
-    }
+    if (FAILED(hr)) goto cleanup;
     
     // Set sample time
     UINT64 sampleTime = state->frameCount * state->frameDuration;
@@ -215,14 +202,17 @@ BOOL Encoder_WriteFrame(EncoderState* state, const BYTE* frameData, UINT64 times
     
     // Write sample
     hr = state->sinkWriter->lpVtbl->WriteSample(state->sinkWriter, state->videoStreamIndex, sample);
-    sample->lpVtbl->Release(sample);
-    
     if (SUCCEEDED(hr)) {
         state->frameCount++;
-        return TRUE;
+        result = TRUE;
     }
     
-    return FALSE;
+cleanup:
+    if (bufferData && buffer) buffer->lpVtbl->Unlock(buffer);
+    SAFE_RELEASE(sample);
+    SAFE_RELEASE(buffer);
+    
+    return result;
 }
 
 void Encoder_Finalize(EncoderState* state) {

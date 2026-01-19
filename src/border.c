@@ -4,6 +4,7 @@
  */
 
 #include "border.h"
+#include "constants.h"
 #include <stdlib.h>
 
 // Module state
@@ -91,11 +92,11 @@ static void UpdateBorderBitmap(int width, int height) {
     HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, hBitmap);
     
     // Clear to transparent
-    memset(pixels, 0, width * height * 4);
+    memset(pixels, 0, width * height * BYTES_PER_PIXEL_BGRA);
     
     // Draw red border with full alpha
     // BGRA format: Blue, Green, Red, Alpha
-    BYTE r = 220, g = 50, b = 50, a = 255;
+    BYTE r = BORDER_COLOR_R, g = BORDER_COLOR_G, b = BORDER_COLOR_B, a = 255;
     
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
