@@ -7,6 +7,12 @@
  * - Thread heartbeat tracking with stall detection
  * - Timestamp on every entry
  * - Designed to survive worker thread crashes
+ *
+ * ERROR HANDLING PATTERN:
+ * - Early return for simple validation checks
+ * - No HRESULT usage - pure Win32 APIs
+ * - Silent failure on log write errors (don't crash due to logging)
+ * - Thread-safe state checks using InterlockedCompareExchange
  */
 
 #include "logger.h"
@@ -151,7 +157,12 @@ static DWORD WINAPI LoggerThreadProc(LPVOID param) {
     
     // Final flush
     if (g_logFile) {
-        fprintf(g_logFile, "[LOGGER] Thread exiting normally\n");
+        DWORD elapsed = GetTickCount() - g_startTime;
+        fprintf(g_logFile, "[%02d:%02d:%02d.%03d] Logger thread exiting normally\n",
+                (elapsed / 3600000) % 24,
+                (elapsed / 60000) % 60,
+                (elapsed / 1000) % 60,
+                elapsed % 1000);
         fflush(g_logFile);
     }
     

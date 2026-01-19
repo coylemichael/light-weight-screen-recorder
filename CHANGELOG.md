@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.2.9] - 2026-01-19
+
+### Improved
+- **Standardized error handling across entire codebase**
+  - All HRESULT checks now use `FAILED()`/`SUCCEEDED()` macros exclusively
+  - Fixed `nvenc_encoder.c`: changed `hr != S_OK` to `FAILED(hr)` for correct device-removed detection
+  - Added missing error logging in `gpu_converter.c` for `CreateVideoProcessorInputView` and `VideoProcessorBlt` failures
+  - Documented error handling pattern in header comment of all 17 source files
+  - Project-wide standards documented in `main.c` header
+
+- **Live debug logging toggle**
+  - Debug logging checkbox now takes effect immediately (no restart required)
+  - Toggling off gracefully shuts down logger with final "disabled" message
+
+- **Reduced log verbosity**
+  - Removed 9 per-frame debug logs from NVENC encoder (was ~540 lines/sec at 60fps)
+  - Logs now contain only meaningful events: init/shutdown, errors, rate-limited warnings
+
+### Technical Details
+- Error patterns used: goto-cleanup (multi-resource), early-return (validation), continue-on-error (loops)
+- All functions return BOOL/NULL for error propagation; callers must check
+- Thread-safe flags use `InterlockedExchange`/`InterlockedCompareExchange`
+- See `mem_utils.h` for goto-cleanup pattern examples
+
+---
+
 ## [1.2.8] - 2026-01-19
 
 ### Fixed

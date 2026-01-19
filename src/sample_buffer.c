@@ -2,6 +2,13 @@
  * Sample Buffer Implementation
  * Thread-safe circular buffer for H.264 encoded frames
  * Muxing responsibility delegated to mp4_muxer module
+ *
+ * ERROR HANDLING PATTERN:
+ * - Early return for simple validation/precondition checks
+ * - No HRESULT usage - pure memory buffer operations
+ * - Allocation failures logged and return FALSE
+ * - Thread-safe access via CRITICAL_SECTION
+ * - Returns BOOL to propagate errors; callers must check
  */
 
 #include "sample_buffer.h"

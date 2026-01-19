@@ -1,6 +1,12 @@
 /*
  * Audio Device Enumeration Implementation
  * Uses Windows Core Audio (MMDevice) API
+ *
+ * ERROR HANDLING PATTERN:
+ * - Early return for simple validation checks
+ * - HRESULT checks use FAILED()/SUCCEEDED() macros exclusively
+ * - COM errors are logged and result in graceful fallback
+ * - Returns BOOL/NULL to propagate errors; callers must check
  */
 
 #define COBJMACROS

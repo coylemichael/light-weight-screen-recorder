@@ -1,5 +1,11 @@
 /*
  * Configuration Implementation
+ *
+ * ERROR HANDLING PATTERN:
+ * - Early return for simple validation checks
+ * - Uses sensible defaults when config file missing/corrupt
+ * - File I/O errors are silent (defaults used instead)
+ * - No HRESULT usage - pure Win32 file/registry APIs
  */
 
 #include "config.h"

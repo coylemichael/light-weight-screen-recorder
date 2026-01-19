@@ -16,6 +16,13 @@
  * - Desktop Duplication and NVENC use SEPARATE D3D11 devices
  * - Shared textures with keyed mutex for cross-device synchronization
  * - This eliminates thread contention that caused hangs
+ *
+ * ERROR HANDLING PATTERN:
+ * - HRESULT checks use FAILED()/SUCCEEDED() macros exclusively
+ * - NVENC errors checked against NV_ENC_SUCCESS and specific error codes
+ * - Device loss detection triggers graceful shutdown (-1 return)
+ * - Transient errors return 0 for retry; fatal errors return -1
+ * - All errors logged with status codes for debugging
  */
 
 #include "nvenc_encoder.h"
@@ -427,13 +434,6 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
     // Check if device was previously marked as lost
     if (InterlockedCompareExchange(&enc->deviceLost, 0, 0)) return -1;
     
-    // Debug: Log entry every 1000 frames to track if we're still entering
-    static LONG submitAttempts = 0;
-    LONG attempt = InterlockedIncrement(&submitAttempts);
-    if (attempt % 1000 == 1) {
-        NvLog("NVENCEncoder: [DEBUG] SubmitTexture entry #%d, pending=%d\n", attempt, enc->pendingCount);
-    }
-    
     EnterCriticalSection(&enc->submitLock);
     
     // Check if pipeline is full
@@ -488,7 +488,7 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
     
     // Check for device removed after GPU operation
     hr = enc->srcDevice->lpVtbl->GetDeviceRemovedReason(enc->srcDevice);
-    if (hr != S_OK) {
+    if (FAILED(hr)) {
         InterlockedExchange(&enc->deviceLost, TRUE);
         enc->srcMutex[idx]->lpVtbl->ReleaseSync(enc->srcMutex[idx], 0);
         LeaveCriticalSection(&enc->submitLock);
@@ -823,16 +823,12 @@ static unsigned __stdcall OutputThreadProc(void* param) {
         // Per docs (lines 3623-3626): event signaled means data is ready
         // ====================================================================
         
-        NvLog("NVENCEncoder: [DEBUG] Calling LockBitstream[%d]...\n", idx);
-        
         NV_ENC_LOCK_BITSTREAM lockParams = {0};
         lockParams.version = NV_ENC_LOCK_BITSTREAM_VER;
         lockParams.outputBitstream = enc->outputBuffers[idx];
         lockParams.doNotWait = 1;  // Don't block - event already signaled
         
         NVENCSTATUS st = enc->fn.nvEncLockBitstream(enc->encoder, &lockParams);
-        
-        NvLog("NVENCEncoder: [DEBUG] LockBitstream[%d] returned %d\n", idx, st);
         
         // Check for device lost errors
         if (st == NV_ENC_ERR_DEVICE_NOT_EXIST || st == NV_ENC_ERR_INVALID_DEVICE || 
@@ -872,9 +868,7 @@ static unsigned __stdcall OutputThreadProc(void* param) {
         }
         
         // Unlock bitstream
-        NvLog("NVENCEncoder: [DEBUG] Calling UnlockBitstream[%d]...\n", idx);
         enc->fn.nvEncUnlockBitstream(enc->encoder, enc->outputBuffers[idx]);
-        NvLog("NVENCEncoder: [DEBUG] UnlockBitstream[%d] done\n", idx);
         
         // ====================================================================
         // Step 4: Unmap input resource
@@ -888,9 +882,7 @@ static unsigned __stdcall OutputThreadProc(void* param) {
             if (enc->encContext) {
                 enc->encContext->lpVtbl->Flush(enc->encContext);
             }
-            NvLog("NVENCEncoder: [DEBUG] Calling UnmapInputResource[%d]...\n", idx);
             enc->fn.nvEncUnmapInputResource(enc->encoder, enc->mappedResources[idx]);
-            NvLog("NVENCEncoder: [DEBUG] UnmapInputResource[%d] done\n", idx);
             enc->mappedResources[idx] = NULL;
         }
         
@@ -900,9 +892,7 @@ static unsigned __stdcall OutputThreadProc(void* param) {
         // ====================================================================
         
         if (enc->encMutex[idx]) {
-            NvLog("NVENCEncoder: [DEBUG] ReleaseSync[%d]...\n", idx);
             enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
-            NvLog("NVENCEncoder: [DEBUG] ReleaseSync[%d] done\n", idx);
         }
         
         // ====================================================================

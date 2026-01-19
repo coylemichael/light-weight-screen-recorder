@@ -1,6 +1,12 @@
 /*
  * GPU Color Converter Implementation
  * Uses D3D11 Video Processor for hardware BGRA→NV12 conversion
+ *
+ * ERROR HANDLING PATTERN:
+ * - Goto-cleanup (fail label) for Init with multiple resource allocations
+ * - HRESULT checks use FAILED()/SUCCEEDED() macros exclusively
+ * - All D3D11 errors are logged with HRESULT values
+ * - Returns BOOL/NULL to propagate errors; callers must check
  */
 
 #include "gpu_converter.h"
@@ -123,6 +129,7 @@ ID3D11Texture2D* GPUConverter_Convert(GPUConverter* conv, ID3D11Texture2D* bgraT
         conv->processorEnum, &inputViewDesc, &inputView);
     
     if (FAILED(hr)) {
+        GPULog("GPUConverter: CreateVideoProcessorInputView failed: 0x%08X\n", hr);
         return NULL;
     }
     
@@ -148,6 +155,7 @@ ID3D11Texture2D* GPUConverter_Convert(GPUConverter* conv, ID3D11Texture2D* bgraT
     inputView->lpVtbl->Release(inputView);
     
     if (FAILED(hr)) {
+        GPULog("GPUConverter: VideoProcessorBlt failed: 0x%08X\n", hr);
         return NULL;
     }
     

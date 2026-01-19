@@ -17,6 +17,13 @@
  * 3. Separate stack for stack overflow handling
  * 4. Watchdog thread for hang detection
  * 5. Multiple CRT error handlers
+ *
+ * ERROR HANDLING PATTERN:
+ * - This IS the error handler - must not throw/crash itself
+ * - Uses atomic operations (InterlockedCompareExchange) for thread safety
+ * - Minimal dependencies to survive corrupted state
+ * - HRESULT checks use FAILED()/SUCCEEDED() macros where applicable
+ * - Silent failure preferred over cascading crash
  */
 
 #define WIN32_LEAN_AND_MEAN

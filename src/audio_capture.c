@@ -1,6 +1,13 @@
 /*
  * Audio Capture Implementation
  * WASAPI-based audio capture with loopback support
+ *
+ * ERROR HANDLING PATTERN:
+ * - Goto-cleanup for CreateSource() with multiple COM allocations
+ * - HRESULT checks use FAILED()/SUCCEEDED() macros exclusively
+ * - Device invalidation errors (AUDCLNT_E_*) trigger graceful shutdown
+ * - All WASAPI errors are logged with HRESULT values
+ * - Returns BOOL/NULL to propagate errors; callers must check
  */
 
 #define COBJMACROS

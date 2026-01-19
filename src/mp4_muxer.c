@@ -1,6 +1,13 @@
 /*
  * MP4 Muxer Implementation
  * Writes HEVC (H.265) encoded samples to MP4 file using IMFSinkWriter passthrough
+ *
+ * ERROR HANDLING PATTERN:
+ * - Goto-cleanup for functions with multiple resource allocations
+ * - HRESULT checks use FAILED()/SUCCEEDED() macros exclusively
+ * - Continue-on-error for individual samples in loops (best effort)
+ * - All MF errors are logged with HRESULT values
+ * - Returns BOOL to propagate errors; callers must check
  */
 
 #include "mp4_muxer.h"

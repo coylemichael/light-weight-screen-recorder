@@ -195,6 +195,8 @@ void  MemDebug_Shutdown(void);
  *   3. Cleanup in reverse order of acquisition
  *   4. Use SAFE_* macros that check for NULL
  *   5. Set success flag only after all operations complete
+ *
+ * See main.c for project-wide error handling standards.
  */
 
 #endif /* MEM_UTILS_H */

@@ -1,6 +1,12 @@
 /*
  * Media Foundation Encoder Implementation
  * Using proper C-style COM vtable calls
+ *
+ * ERROR HANDLING PATTERN:
+ * - Goto-cleanup for functions with multiple resource allocations
+ * - HRESULT checks use FAILED()/SUCCEEDED() macros exclusively
+ * - All MF errors are logged with HRESULT values
+ * - Returns BOOL to propagate errors; callers must check
  */
 
 #include "encoder.h"

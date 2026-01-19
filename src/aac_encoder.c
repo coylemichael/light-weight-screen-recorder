@@ -1,6 +1,13 @@
 /*
  * AAC Audio Encoder Implementation
  * Uses Media Foundation AAC encoder MFT
+ *
+ * ERROR HANDLING PATTERN:
+ * - Goto-cleanup (cleanup_fail label) for Create with multiple allocations
+ * - HRESULT checks use FAILED()/SUCCEEDED() macros exclusively
+ * - Continue-on-error for ProcessOutput loop (best effort encoding)
+ * - All MF errors allow graceful degradation
+ * - Returns NULL to propagate errors; callers must check
  */
 
 #include "aac_encoder.h"

@@ -1,5 +1,14 @@
-// action_toolbar.c - Custom action toolbar with smooth rounded corners
-// Uses layered window with per-pixel alpha for anti-aliased transparency
+/*
+ * action_toolbar.c - Custom action toolbar with smooth rounded corners
+ * Uses layered window with per-pixel alpha for anti-aliased transparency
+ *
+ * ERROR HANDLING PATTERN:
+ * - Early return for simple validation checks
+ * - GDI+ function return codes checked (GpStatus != Ok)
+ * - Window creation failures return FALSE
+ * - GDI/GDI+ resource cleanup in shutdown function
+ * - Returns BOOL to propagate errors; callers must check
+ */
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>

@@ -4,6 +4,13 @@
  * Uses RAM-based circular buffer of encoded HEVC samples.
  * On save: muxes buffered samples to MP4 (no re-encoding).
  * Full GPU pipeline: DXGI capture → GPU color convert → NVENC (native API)
+ *
+ * ERROR HANDLING PATTERN:
+ * - Early return for simple validation/precondition checks
+ * - HRESULT checks use FAILED()/SUCCEEDED() macros exclusively
+ * - Thread-safe state checks using InterlockedCompareExchange
+ * - All errors logged; non-critical errors allow graceful degradation
+ * - Returns BOOL to propagate errors; callers must check
  */
 
 #include "replay_buffer.h"

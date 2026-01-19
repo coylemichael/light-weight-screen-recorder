@@ -1,6 +1,12 @@
 /*
  * Overlay Implementation
  * Selection UI, recording controls, and main logic
+ *
+ * ERROR HANDLING PATTERN:
+ * - Early return for simple validation/precondition checks
+ * - HRESULT checks use FAILED()/SUCCEEDED() macros exclusively
+ * - UI errors show MessageBox to user when appropriate
+ * - Returns BOOL to propagate errors; callers must check
  */
 
 #define WIN32_LEAN_AND_MEAN
@@ -3617,6 +3623,30 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 
                 case ID_CHK_DEBUG_LOGGING:
                     g_config.debugLogging = (IsDlgButtonChecked(hwnd, ID_CHK_DEBUG_LOGGING) == BST_CHECKED);
+                    // Live toggle: start or stop logging immediately
+                    if (g_config.debugLogging && !Logger_IsInitialized()) {
+                        // Start logging
+                        char exePath[MAX_PATH];
+                        char debugFolder[MAX_PATH];
+                        char logFilename[MAX_PATH];
+                        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+                        char* lastSlash = strrchr(exePath, '\\');
+                        if (lastSlash) {
+                            *lastSlash = '\0';
+                            snprintf(debugFolder, sizeof(debugFolder), "%s\\Debug", exePath);
+                            CreateDirectoryA(debugFolder, NULL);
+                            SYSTEMTIME st;
+                            GetLocalTime(&st);
+                            snprintf(logFilename, sizeof(logFilename), "%s\\lwsr_log_%04d%02d%02d_%02d%02d%02d.txt",
+                                    debugFolder, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+                            Logger_Init(logFilename, "w");
+                            Logger_Log("Debug logging enabled (live toggle)\n");
+                        }
+                    } else if (!g_config.debugLogging && Logger_IsInitialized()) {
+                        // Stop logging
+                        Logger_Log("Debug logging disabled (live toggle)\n");
+                        Logger_Shutdown();
+                    }
                     break;
                     
                 case ID_CMB_AUDIO_SOURCE1:

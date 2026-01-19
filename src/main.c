@@ -2,6 +2,40 @@
  * Ultra Lightweight Screen Recorder
  * Pure Win32 + DXGI Desktop Duplication + Media Foundation
  * Zero external dependencies, maximum performance
+ *
+ * ============================================================================
+ * PROJECT-WIDE ERROR HANDLING STANDARDS
+ * ============================================================================
+ *
+ * This codebase follows these consistent error handling patterns:
+ *
+ * 1. HRESULT CHECKING:
+ *    - ALWAYS use FAILED(hr) or SUCCEEDED(hr) macros
+ *    - NEVER compare directly: hr != S_OK, hr == E_FAIL, etc.
+ *    - Log the HRESULT value in hex: Logger_Log("...failed: 0x%08X\n", hr);
+ *
+ * 2. ERROR LOGGING:
+ *    - All errors MUST be logged with descriptive context
+ *    - Include function name and parameter values when helpful
+ *    - Use rate limiting for high-frequency error paths (LOG_RATE_LIMIT)
+ *
+ * 3. PATTERN SELECTION:
+ *    - Goto-cleanup: Functions allocating multiple COM/heap resources
+ *    - Early return: Simple validation at function start
+ *    - Continue-on-error: Loops processing multiple items (best effort)
+ *
+ * 4. ERROR PROPAGATION:
+ *    - Functions return BOOL (success/fail) or NULL (pointer-returning)
+ *    - Callers MUST check return values
+ *    - Fatal errors may return special codes (e.g., -1 for device loss)
+ *
+ * 5. THREAD SAFETY:
+ *    - Use InterlockedExchange/InterlockedCompareExchange for flags
+ *    - Use CRITICAL_SECTION for shared data structures
+ *    - Document thread-safety expectations in comments
+ *
+ * Each source file documents its specific pattern in the file header comment.
+ * See mem_utils.h for SAFE_FREE/SAFE_RELEASE macros and goto-cleanup examples.
  */
 
 #define WIN32_LEAN_AND_MEAN

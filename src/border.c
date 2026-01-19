@@ -1,6 +1,12 @@
 /*
  * Recording Border Highlight Implementation
  * Uses a layered window with per-pixel alpha for a clean red border
+ *
+ * ERROR HANDLING PATTERN:
+ * - Early return for simple validation checks
+ * - Window creation failures return FALSE
+ * - GDI resource cleanup in shutdown function
+ * - Returns BOOL to propagate errors; callers must check
  */
 
 #include "border.h"

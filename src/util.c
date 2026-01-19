@@ -1,6 +1,11 @@
 /*
  * Utility Functions Implementation
  * Shared calculations and helpers used across modules
+ *
+ * ERROR HANDLING PATTERN:
+ * - Pure computation functions - no external resources
+ * - Input validation via early return with safe defaults
+ * - No HRESULT usage - these are pure C helper functions
  */
 
 #include "util.h"
