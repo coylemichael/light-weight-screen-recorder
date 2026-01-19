@@ -371,13 +371,21 @@ BOOL MP4Muxer_WriteFileWithAudio(
             if (FAILED(hr)) continue;
             
             BYTE* bufData = NULL;
-            mfBuffer->lpVtbl->Lock(mfBuffer, &bufData, NULL, NULL);
+            hr = mfBuffer->lpVtbl->Lock(mfBuffer, &bufData, NULL, NULL);
+            if (FAILED(hr)) {
+                mfBuffer->lpVtbl->Release(mfBuffer);
+                continue;
+            }
             memcpy(bufData, sample->data, sample->size);
             mfBuffer->lpVtbl->Unlock(mfBuffer);
             mfBuffer->lpVtbl->SetCurrentLength(mfBuffer, sample->size);
             
             IMFSample* mfSample = NULL;
-            MFCreateSample(&mfSample);
+            hr = MFCreateSample(&mfSample);
+            if (FAILED(hr)) {
+                mfBuffer->lpVtbl->Release(mfBuffer);
+                continue;
+            }
             mfSample->lpVtbl->AddBuffer(mfSample, mfBuffer);
             mfSample->lpVtbl->SetSampleTime(mfSample, sample->timestamp);
             mfSample->lpVtbl->SetSampleDuration(mfSample, sample->duration);
@@ -400,13 +408,21 @@ BOOL MP4Muxer_WriteFileWithAudio(
             if (FAILED(hr)) continue;
             
             BYTE* bufData = NULL;
-            mfBuffer->lpVtbl->Lock(mfBuffer, &bufData, NULL, NULL);
+            hr = mfBuffer->lpVtbl->Lock(mfBuffer, &bufData, NULL, NULL);
+            if (FAILED(hr)) {
+                mfBuffer->lpVtbl->Release(mfBuffer);
+                continue;
+            }
             memcpy(bufData, sample->data, sample->size);
             mfBuffer->lpVtbl->Unlock(mfBuffer);
             mfBuffer->lpVtbl->SetCurrentLength(mfBuffer, sample->size);
             
             IMFSample* mfSample = NULL;
-            MFCreateSample(&mfSample);
+            hr = MFCreateSample(&mfSample);
+            if (FAILED(hr)) {
+                mfBuffer->lpVtbl->Release(mfBuffer);
+                continue;
+            }
             mfSample->lpVtbl->AddBuffer(mfSample, mfBuffer);
             mfSample->lpVtbl->SetSampleTime(mfSample, sample->timestamp);
             mfSample->lpVtbl->SetSampleDuration(mfSample, sample->duration);

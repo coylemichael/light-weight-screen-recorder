@@ -98,8 +98,14 @@ static void ProcessOutput(AACEncoder* encoder) {
         
         if (!(streamInfo.dwFlags & MFT_OUTPUT_STREAM_PROVIDES_SAMPLES)) {
             // We need to provide the sample
-            MFCreateSample(&outputSample);
-            MFCreateMemoryBuffer(streamInfo.cbSize > 0 ? streamInfo.cbSize : AAC_OUTPUT_BUFFER_SIZE, &outputMediaBuffer);
+            HRESULT hrSample = MFCreateSample(&outputSample);
+            if (FAILED(hrSample)) break;
+            
+            HRESULT hrBuffer = MFCreateMemoryBuffer(streamInfo.cbSize > 0 ? streamInfo.cbSize : AAC_OUTPUT_BUFFER_SIZE, &outputMediaBuffer);
+            if (FAILED(hrBuffer)) {
+                outputSample->lpVtbl->Release(outputSample);
+                break;
+            }
             outputSample->lpVtbl->AddBuffer(outputSample, outputMediaBuffer);
             outputBuffer.pSample = outputSample;
         }
@@ -197,19 +203,19 @@ AACEncoder* AACEncoder_Create(void) {
             &count
         );
         
-        if (SUCCEEDED(hr) && count > 0 && activates) {
-            hr = activates[0]->lpVtbl->ActivateObject(
-                activates[0],
-                &IID_IMFTransform,
-                (void**)&encoder->transform
-            );
+        if (SUCCEEDED(hr) && activates) {
+            if (count > 0) {
+                hr = activates[0]->lpVtbl->ActivateObject(
+                    activates[0],
+                    &IID_IMFTransform,
+                    (void**)&encoder->transform
+                );
+            }
             
+            // Release all activates (even if ActivateObject failed)
             for (UINT32 i = 0; i < count; i++) {
                 activates[i]->lpVtbl->Release(activates[i]);
             }
-            CoTaskMemFree(activates);
-        } else if (SUCCEEDED(hr) && activates) {
-            // MFTEnumEx succeeded but returned 0 encoders - free the array
             CoTaskMemFree(activates);
         }
     }
@@ -338,11 +344,22 @@ BOOL AACEncoder_Feed(AACEncoder* encoder, const BYTE* pcmData, int pcmSize, LONG
             IMFSample* sample = NULL;
             IMFMediaBuffer* buffer = NULL;
             
-            MFCreateSample(&sample);
-            MFCreateMemoryBuffer(encoder->bytesPerFrame, &buffer);
+            HRESULT hr = MFCreateSample(&sample);
+            if (FAILED(hr)) break;
+            
+            hr = MFCreateMemoryBuffer(encoder->bytesPerFrame, &buffer);
+            if (FAILED(hr)) {
+                sample->lpVtbl->Release(sample);
+                break;
+            }
             
             BYTE* bufData = NULL;
-            buffer->lpVtbl->Lock(buffer, &bufData, NULL, NULL);
+            hr = buffer->lpVtbl->Lock(buffer, &bufData, NULL, NULL);
+            if (FAILED(hr)) {
+                buffer->lpVtbl->Release(buffer);
+                sample->lpVtbl->Release(sample);
+                break;
+            }
             memcpy(bufData, encoder->inputBuffer, encoder->bytesPerFrame);
             buffer->lpVtbl->Unlock(buffer);
             buffer->lpVtbl->SetCurrentLength(buffer, encoder->bytesPerFrame);
@@ -352,7 +369,7 @@ BOOL AACEncoder_Feed(AACEncoder* encoder, const BYTE* pcmData, int pcmSize, LONG
             sample->lpVtbl->SetSampleDuration(sample, encoder->frameDuration);
             
             // Feed to encoder
-            HRESULT hr = encoder->transform->lpVtbl->ProcessInput(encoder->transform, 0, sample, 0);
+            hr = encoder->transform->lpVtbl->ProcessInput(encoder->transform, 0, sample, 0);
             
             buffer->lpVtbl->Release(buffer);
             sample->lpVtbl->Release(sample);

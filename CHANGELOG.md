@@ -1,5 +1,23 @@
 # Changelog
 
+## [1.2.8] - 2026-01-19
+
+### Fixed
+- **COM object lifecycle audit - memory leaks in error paths**
+  - `aac_encoder.c` `ProcessOutput()`: Fixed leak when `MFCreateSample`/`MFCreateMemoryBuffer` fails
+  - `aac_encoder.c` `AACEncoder_Create()`: Unified `MFTEnumEx` cleanup paths (was split into two branches)
+  - `aac_encoder.c` `AACEncoder_Feed()`: Added error checking for `MFCreateSample`, `MFCreateMemoryBuffer`, and `Lock()`
+  - `mp4_muxer.c` `WriteFileWithAudio()`: Fixed leaks when `Lock()` or `MFCreateSample()` fails in write loops
+
+### Technical Details
+- All 19 source files audited for COM lifecycle management
+- Pattern enforced: check HRESULT → release on failure → cascade cleanup
+- Hot-path functions (called per-frame) now have proper error handling
+- Prevents memory accumulation during long recording sessions
+- Files with exemplary patterns: `gpu_converter.c`, `nvenc_encoder.c`, `capture.c`
+
+---
+
 ## [1.2.7] - 2026-01-19
 
 ### Fixed
