@@ -1,6 +1,6 @@
 # Light Weight Screen Recorder
 
-Lightweight screen recorder for Windows with instant replay. Buffer as much as your RAM allows and save replays instantly. Requires an NVIDIA GPU.
+Lightweight screen recorder for Windows with instant replay. Buffer as much as your RAM allows and save replays instantly. Supports 8K, super ultrawide (32:9), and multi-monitor setups. Requires an NVIDIA GPU.
 
 ## Quick Start
 
