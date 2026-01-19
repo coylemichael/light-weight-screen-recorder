@@ -142,6 +142,7 @@ extern HWND g_controlWnd;
 #define ID_TIMER_LIMIT     2002
 #define ID_TIMER_DISPLAY   2003
 #define ID_TIMER_HOVER     2004  // Timer to update hover state on icon buttons
+#define ID_TIMER_REPLAY_CHECK 2005  // Timer to check replay buffer health
 
 // Replay buffer settings control IDs
 #define ID_CHK_REPLAY_ENABLED   4001
@@ -168,6 +169,13 @@ extern HWND g_controlWnd;
 #define ID_LBL_AUDIO_VOL1       5008
 #define ID_LBL_AUDIO_VOL2       5009
 #define ID_LBL_AUDIO_VOL3       5010
+
+// Debug settings control IDs
+#define ID_CHK_DEBUG_LOGGING    6001
+
+// Settings window dimensions
+#define SETTINGS_WIDTH  620
+#define SETTINGS_HEIGHT 770
 
 // Action toolbar button IDs
 #define ID_ACTION_RECORD   3001
@@ -1032,8 +1040,6 @@ static void ActionToolbar_OnSettings(void) {
     
     RECT ctrlRect;
     GetWindowRect(g_controlWnd, &ctrlRect);
-    int settingsW = 620;
-    int settingsH = 725;
     int ctrlCenterX = (ctrlRect.left + ctrlRect.right) / 2;
     
     g_settingsWnd = CreateWindowExA(
@@ -1041,8 +1047,8 @@ static void ActionToolbar_OnSettings(void) {
         "LWSRSettings",
         NULL,
         WS_POPUP | WS_VISIBLE | WS_BORDER,
-        ctrlCenterX - settingsW / 2, ctrlRect.bottom + 5,
-        settingsW, settingsH,
+        ctrlCenterX - SETTINGS_WIDTH / 2, ctrlRect.bottom + 5,
+        SETTINGS_WIDTH, SETTINGS_HEIGHT,
         g_controlWnd, NULL, g_hInstance, NULL
     );
 }
@@ -1897,6 +1903,9 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // Start hover timer for icon button updates
             SetTimer(hwnd, ID_TIMER_HOVER, 50, NULL);
             
+            // Start replay buffer health check timer (every 2 seconds)
+            SetTimer(hwnd, ID_TIMER_REPLAY_CHECK, 2000, NULL);
+            
             return 0;
         }
         
@@ -1940,8 +1949,6 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                         // Open settings below control panel, centered
                         RECT ctrlRect;
                         GetWindowRect(hwnd, &ctrlRect);
-                        int settingsW = 620;
-                        int settingsH = 725;  // Height to fit all controls including audio section
                         int ctrlCenterX = (ctrlRect.left + ctrlRect.right) / 2;
                         
                         g_settingsWnd = CreateWindowExA(
@@ -1949,8 +1956,8 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                             "LWSRSettings",
                             NULL,
                             WS_POPUP | WS_VISIBLE | WS_BORDER,
-                            ctrlCenterX - settingsW / 2, ctrlRect.bottom + 5,
-                            settingsW, settingsH,
+                            ctrlCenterX - SETTINGS_WIDTH / 2, ctrlRect.bottom + 5,
+                            SETTINGS_WIDTH, SETTINGS_HEIGHT,
                             hwnd, NULL, g_hInstance, NULL
                         );
                         
@@ -2018,6 +2025,29 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             } else if (wParam == ID_TIMER_DISPLAY) {
                 // Update timer display
                 UpdateTimerDisplay();
+            } else if (wParam == ID_TIMER_REPLAY_CHECK) {
+                // Check for replay buffer stall and auto-restart
+                // Detect stall via heartbeats - more reliable than waiting for buffer thread to set state
+                if (g_config.replayEnabled && g_replayBuffer.state == REPLAY_STATE_CAPTURING) {
+                    BOOL bufferStalled = Logger_IsThreadStalled(THREAD_BUFFER);
+                    BOOL nvencStalled = Logger_IsThreadStalled(THREAD_NVENC_OUTPUT);
+                    
+                    if (bufferStalled || nvencStalled) {
+                        Logger_Log("Replay thread stall detected (BUFFER=%s, NVENC=%s) - forcing restart...\n",
+                                   bufferStalled ? "STALLED" : "ok", 
+                                   nvencStalled ? "STALLED" : "ok");
+                        
+                        // Force state to STALLED so Stop() knows threads are hung
+                        InterlockedExchange(&g_replayBuffer.state, REPLAY_STATE_STALLED);
+                        
+                        // Stop will try to signal threads but they may be hung
+                        // It should have a timeout mechanism
+                        ReplayBuffer_Stop(&g_replayBuffer);
+                        Sleep(1000);  // Give hung threads time to potentially recover
+                        ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                        Logger_Log("Replay buffer restarted after stall recovery\n");
+                    }
+                }
             } else if (wParam == ID_TIMER_HOVER) {
                 // Check which icon button is currently hovered (if any)
                 POINT pt;
@@ -3334,6 +3364,30 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SendMessage(cmbAudio2, CB_SETCURSEL, PopulateAudioDropdown(cmbAudio2, &audioDevices, g_config.audioSource2), 0);
             SendMessage(cmbAudio3, CB_SETCURSEL, PopulateAudioDropdown(cmbAudio3, &audioDevices, g_config.audioSource3), 0);
             
+            // ============================================================
+            // DEBUG SETTINGS SECTION
+            // ============================================================
+            y += 35;
+            
+            // Divider line
+            CreateWindowExA(0, "STATIC", "",
+                WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+                labelX, y, contentW, 2, hwnd, NULL, g_hInstance, NULL);
+            y += 14;
+            
+            // Enable Debug Logging checkbox
+            HWND chkDebug = CreateWindowExA(0, "BUTTON", "Enable Debug Logging",
+                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+                labelX, y, 200, 24, hwnd, (HMENU)ID_CHK_DEBUG_LOGGING, g_hInstance, NULL);
+            SendMessage(chkDebug, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            SendMessage(chkDebug, BM_SETCHECK, g_config.debugLogging ? BST_CHECKED : BST_UNCHECKED, 0);
+            
+            // Add description text
+            HWND lblDebugInfo = CreateWindowExA(0, "STATIC", "(Logs are saved to Debug folder next to exe)",
+                WS_CHILD | WS_VISIBLE,
+                labelX + 205, y + 4, 300, 20, hwnd, NULL, g_hInstance, NULL);
+            SendMessage(lblDebugInfo, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
+            
             // Initialize preview border and area selector
             PreviewBorder_Init(g_hInstance);
             AreaSelector_Init(g_hInstance);
@@ -3433,14 +3487,18 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 case ID_CHK_REPLAY_ENABLED: {
                     BOOL wasEnabled = g_config.replayEnabled;
                     g_config.replayEnabled = IsDlgButtonChecked(hwnd, ID_CHK_REPLAY_ENABLED) == BST_CHECKED;
+                    Logger_Log("Replay enabled toggled: %d -> %d\n", wasEnabled, g_config.replayEnabled);
                     
                     // Start or stop replay buffer based on new state
                     if (g_config.replayEnabled && !wasEnabled) {
                         // Starting replay buffer
+                        Logger_Log("Starting replay buffer from settings\n");
                         ReplayBuffer_Start(&g_replayBuffer, &g_config);
-                        RegisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE, 0, g_config.replaySaveKey);
+                        BOOL ok = RegisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE, 0, g_config.replaySaveKey);
+                        Logger_Log("RegisterHotKey from settings: %s (key=0x%02X)\n", ok ? "OK" : "FAILED", g_config.replaySaveKey);
                     } else if (!g_config.replayEnabled && wasEnabled) {
                         // Stopping replay buffer
+                        Logger_Log("Stopping replay buffer from settings\n");
                         UnregisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE);
                         ReplayBuffer_Stop(&g_replayBuffer);
                     }
@@ -3531,6 +3589,10 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     
                 case ID_CHK_AUDIO_ENABLED:
                     g_config.audioEnabled = (IsDlgButtonChecked(hwnd, ID_CHK_AUDIO_ENABLED) == BST_CHECKED);
+                    break;
+                
+                case ID_CHK_DEBUG_LOGGING:
+                    g_config.debugLogging = (IsDlgButtonChecked(hwnd, ID_CHK_DEBUG_LOGGING) == BST_CHECKED);
                     break;
                     
                 case ID_CMB_AUDIO_SOURCE1:
@@ -3625,15 +3687,18 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 
                 // Unregister old hotkey if replay is enabled
                 if (g_config.replayEnabled) {
+                    Logger_Log("Unregistering old hotkey (key change)\n");
                     UnregisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE);
                 }
                 
                 // Save the new hotkey
                 g_config.replaySaveKey = vk;
+                Logger_Log("Hotkey changed to VK=0x%02X\n", vk);
                 
                 // Re-register with new hotkey if replay is enabled
                 if (g_config.replayEnabled) {
-                    RegisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE, 0, g_config.replaySaveKey);
+                    BOOL ok = RegisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE, 0, g_config.replaySaveKey);
+                    Logger_Log("RegisterHotKey (key change): %s (key=0x%02X)\n", ok ? "OK" : "FAILED", g_config.replaySaveKey);
                 }
                 
                 // Update button text with key name

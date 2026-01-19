@@ -27,7 +27,7 @@
 #include <signal.h>
 #include <time.h>
 #include "crash_handler.h"
-
+#include "logger.h"
 #pragma comment(lib, "dbghelp.lib")
 
 // ============================================================================
@@ -430,7 +430,12 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
     LONG lastHeartbeat = g_heartbeatCounter;
     DWORD missedCount = 0;
     
+    Logger_Log("Watchdog thread started (timeout=%dms)\n", WATCHDOG_TIMEOUT_MS);
+    
     while (g_watchdogRunning) {
+        // Heartbeat for logger monitoring
+        Logger_Heartbeat(THREAD_WATCHDOG);
+        
         Sleep(WATCHDOG_CHECK_INTERVAL);
         
         if (!g_watchdogRunning) break;
@@ -440,7 +445,11 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
         if (currentHeartbeat == lastHeartbeat) {
             missedCount++;
             if (missedCount >= (WATCHDOG_TIMEOUT_MS / WATCHDOG_CHECK_INTERVAL)) {
-                // Hang detected!
+                // Hang detected - log it before crash handling
+                Logger_Log("WATCHDOG: Hang detected! Main thread not responding for %dms\n", 
+                           WATCHDOG_TIMEOUT_MS);
+                Logger_Flush();
+                
                 CONTEXT ctx;
                 RtlCaptureContext(&ctx);
                 
@@ -461,6 +470,7 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
         }
     }
     
+    Logger_Log("Watchdog thread exiting\n");
     return 0;
 }
 

@@ -54,6 +54,9 @@ void Config_Load(AppConfig* config) {
     config->audioVolume2 = 100;
     config->audioVolume3 = 100;
     
+    // Debug logging (disabled by default)
+    config->debugLogging = FALSE;
+    
     // Default save path to Videos folder
     if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_MYVIDEO, NULL, 0, config->savePath))) {
         strcat(config->savePath, "\\Recordings");
@@ -115,6 +118,9 @@ void Config_Load(AppConfig* config) {
         config->audioVolume1 = GetPrivateProfileIntA("Audio", "Volume1", 100, configPath);
         config->audioVolume2 = GetPrivateProfileIntA("Audio", "Volume2", 100, configPath);
         config->audioVolume3 = GetPrivateProfileIntA("Audio", "Volume3", 100, configPath);
+        
+        // Debug logging
+        config->debugLogging = GetPrivateProfileIntA("Debug", "Logging", 0, configPath);
         
         GetPrivateProfileStringA("Recording", "SavePath", config->savePath,
             config->savePath, MAX_PATH, configPath);
@@ -202,6 +208,10 @@ void Config_Save(const AppConfig* config) {
     WritePrivateProfileStringA("Audio", "Volume2", buffer, configPath);
     sprintf(buffer, "%d", config->audioVolume3);
     WritePrivateProfileStringA("Audio", "Volume3", buffer, configPath);
+    
+    // Debug logging
+    sprintf(buffer, "%d", config->debugLogging);
+    WritePrivateProfileStringA("Debug", "Logging", buffer, configPath);
     
     WritePrivateProfileStringA("Recording", "SavePath", config->savePath, configPath);
     

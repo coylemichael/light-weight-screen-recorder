@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.2.4] - 2026-01-19
+
+### Added
+- **Debug logging toggle** - New checkbox in settings to enable/disable debug logging
+  - Off by default for normal use (no performance overhead)
+  - When enabled, logs are saved to `Debug/` folder next to the executable
+  - Timestamped log files preserve history for troubleshooting
+- **Audio device invalidation handling** - Graceful handling when audio devices are removed
+  - Detects `AUDCLNT_E_DEVICE_INVALIDATED` and `AUDCLNT_E_SERVICE_NOT_RUNNING`
+  - Logs device invalidation events for debugging
+  - Consecutive error counting to detect sustained failures
+
+### Fixed
+- **D3D11 GPU synchronization** - Added `Flush()` calls before NVENC operations
+  - Prevents potential hangs when GPU device becomes invalid
+  - Based on NVIDIA forum recommendations for D3D11/NVENC interop
+- **Settings window dimensions** - Consolidated to single constant (`SETTINGS_WIDTH`, `SETTINGS_HEIGHT`)
+  - Fixes bug where window size was defined in two places with different values
+
+### Changed
+- **Repo cleanup** - Removed build artifacts and empty folders
+  - Updated `.gitignore` to exclude `tools/*.exe`, `tools/*.obj`, and `Debug/`
+  - Removed empty `bin/WinSpy/` folder
+
+---
+
 ## [1.2.3] - 2026-01-15
 
 ### Fixed

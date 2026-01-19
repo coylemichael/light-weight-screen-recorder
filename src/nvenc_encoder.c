@@ -118,6 +118,9 @@ struct NVENCEncoder {
     int pipelineFullCount;
     int mutexTimeoutCount;
     
+    // Device lost detection
+    volatile BOOL deviceLost;
+    
     BOOL initialized;
 };
 
@@ -416,8 +419,19 @@ void NVENCEncoder_SetCallback(NVENCEncoder* enc, EncodedFrameCallback callback, 
     enc->callbackUserData = userData;
 }
 
-BOOL NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, LONGLONG timestamp) {
-    if (!enc || !enc->initialized || !nv12Source) return FALSE;
+// Returns: 1 = success, 0 = transient failure (retry), -1 = device lost (must recreate)
+int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, LONGLONG timestamp) {
+    if (!enc || !enc->initialized || !nv12Source) return 0;
+    
+    // Check if device was previously marked as lost
+    if (enc->deviceLost) return -1;
+    
+    // Debug: Log entry every 1000 frames to track if we're still entering
+    static LONG submitAttempts = 0;
+    LONG attempt = InterlockedIncrement(&submitAttempts);
+    if (attempt % 1000 == 1) {
+        NvLog("NVENCEncoder: [DEBUG] SubmitTexture entry #%d, pending=%d\n", attempt, enc->pendingCount);
+    }
     
     EnterCriticalSection(&enc->submitLock);
     
@@ -429,7 +443,7 @@ BOOL NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, 
         if ((enc->pipelineFullCount % 100) == 1) {
             NvLog("NVENCEncoder: Pipeline full (%d pending) - frame dropped\n", enc->pendingCount);
         }
-        return FALSE;
+        return 0;  // Transient - output thread will drain
     }
     
     int idx = enc->submitIndex;
@@ -441,13 +455,22 @@ BOOL NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, 
     // Key 0 = available, Key 1 = encoder owns it
     // ========================================================================
     hr = enc->srcMutex[idx]->lpVtbl->AcquireSync(enc->srcMutex[idx], 0, 100);
+    
+    // Check for device removed/reset errors
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+        enc->deviceLost = TRUE;
+        LeaveCriticalSection(&enc->submitLock);
+        NvLog("NVENCEncoder: DEVICE LOST detected on srcMutex acquire (0x%08X)\n", hr);
+        return -1;
+    }
+    
     if (hr == WAIT_TIMEOUT || FAILED(hr)) {
         LeaveCriticalSection(&enc->submitLock);
         enc->mutexTimeoutCount++;
         if ((enc->mutexTimeoutCount % 100) == 1) {
             NvLog("NVENCEncoder: Mutex acquire timeout[%d] (0x%08X)\n", idx, hr);
         }
-        return FALSE;
+        return 0;  // Transient
     }
     
     // ========================================================================
@@ -458,6 +481,20 @@ BOOL NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, 
                                            (ID3D11Resource*)enc->stagingTextures[idx], 
                                            (ID3D11Resource*)nv12Source);
     
+    // Flush after copy to ensure GPU work completes before mutex release
+    // This prevents race conditions between source and encoder devices
+    enc->srcContext->lpVtbl->Flush(enc->srcContext);
+    
+    // Check for device removed after GPU operation
+    hr = enc->srcDevice->lpVtbl->GetDeviceRemovedReason(enc->srcDevice);
+    if (hr != S_OK) {
+        enc->deviceLost = TRUE;
+        enc->srcMutex[idx]->lpVtbl->ReleaseSync(enc->srcMutex[idx], 0);
+        LeaveCriticalSection(&enc->submitLock);
+        NvLog("NVENCEncoder: DEVICE LOST after CopyResource (0x%08X)\n", hr);
+        return -1;
+    }
+    
     // ========================================================================
     // Step 3: Release mutex with key 1 (signaling encoder can use it)
     // ========================================================================
@@ -467,12 +504,22 @@ BOOL NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, 
     // Step 4: Acquire mutex on ENCODER device for encoding
     // ========================================================================
     hr = enc->encMutex[idx]->lpVtbl->AcquireSync(enc->encMutex[idx], 1, 100);
+    
+    // Check for device removed/reset errors
+    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
+        enc->deviceLost = TRUE;
+        enc->srcMutex[idx]->lpVtbl->ReleaseSync(enc->srcMutex[idx], 0);
+        LeaveCriticalSection(&enc->submitLock);
+        NvLog("NVENCEncoder: DEVICE LOST detected on encMutex acquire (0x%08X)\n", hr);
+        return -1;
+    }
+    
     if (hr == WAIT_TIMEOUT || FAILED(hr)) {
         // Try to recover by releasing back to state 0
         enc->srcMutex[idx]->lpVtbl->ReleaseSync(enc->srcMutex[idx], 0);
         LeaveCriticalSection(&enc->submitLock);
         NvLog("NVENCEncoder: Encoder mutex acquire failed[%d]\n", idx);
-        return FALSE;
+        return 0;  // Transient
     }
     
     // ========================================================================
@@ -483,11 +530,22 @@ BOOL NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, 
     mapParams.registeredResource = enc->registeredResources[idx];
     
     st = enc->fn.nvEncMapInputResource(enc->encoder, &mapParams);
+    
+    // Check for NVENC device errors
+    if (st == NV_ENC_ERR_DEVICE_NOT_EXIST || st == NV_ENC_ERR_INVALID_DEVICE || 
+        st == NV_ENC_ERR_INVALID_ENCODERDEVICE) {
+        enc->deviceLost = TRUE;
+        enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
+        LeaveCriticalSection(&enc->submitLock);
+        NvLog("NVENCEncoder: DEVICE LOST on MapInputResource (%d)\n", st);
+        return -1;
+    }
+    
     if (st != NV_ENC_SUCCESS) {
         enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
         LeaveCriticalSection(&enc->submitLock);
         NvLog("NVENCEncoder: MapInputResource[%d] failed (%d)\n", idx, st);
-        return FALSE;
+        return 0;  // Transient
     }
     
     // Store for later unmap (per API lines 4165-4167: unmap after LockBitstream)
@@ -518,6 +576,18 @@ BOOL NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, 
     
     st = enc->fn.nvEncEncodePicture(enc->encoder, &picParams);
     
+    // Check for NVENC device errors
+    if (st == NV_ENC_ERR_DEVICE_NOT_EXIST || st == NV_ENC_ERR_INVALID_DEVICE || 
+        st == NV_ENC_ERR_INVALID_ENCODERDEVICE) {
+        enc->deviceLost = TRUE;
+        enc->fn.nvEncUnmapInputResource(enc->encoder, mapParams.mappedResource);
+        enc->mappedResources[idx] = NULL;
+        enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
+        LeaveCriticalSection(&enc->submitLock);
+        NvLog("NVENCEncoder: DEVICE LOST on EncodePicture (%d)\n", st);
+        return -1;
+    }
+    
     // Per API: NV_ENC_ERR_NEED_MORE_INPUT is not an error (B-frame buffering)
     // But we don't use B-frames, so this shouldn't happen
     if (st != NV_ENC_SUCCESS && st != NV_ENC_ERR_NEED_MORE_INPUT) {
@@ -527,7 +597,7 @@ BOOL NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, 
         enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
         LeaveCriticalSection(&enc->submitLock);
         NvLog("NVENCEncoder: EncodePicture[%d] failed (%d)\n", idx, st);
-        return FALSE;
+        return 0;  // Transient
     }
     
     // NOTE: encMutex[idx] is still held! The output thread will release it
@@ -541,7 +611,11 @@ BOOL NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, 
     
     LeaveCriticalSection(&enc->submitLock);
     
-    return TRUE;
+    return 1;  // Success
+}
+
+BOOL NVENCEncoder_IsDeviceLost(NVENCEncoder* enc) {
+    return enc ? enc->deviceLost : FALSE;
 }
 
 int NVENCEncoder_DrainCompleted(NVENCEncoder* enc, EncodedFrameCallback callback, void* userData) {
@@ -625,6 +699,18 @@ void NVENCEncoder_Destroy(NVENCEncoder* enc) {
     
     // Cleanup NVENC resources
     if (enc->encoder) {
+        // Flush D3D11 contexts to ensure all pending GPU work is complete
+        // This is the D3D11 equivalent of cuCtxSynchronize() recommended by NVIDIA
+        // to prevent NVENC API calls from hanging
+        if (enc->encContext) {
+            NvLog("NVENCEncoder: Flushing encoder D3D11 context before cleanup\n");
+            enc->encContext->lpVtbl->Flush(enc->encContext);
+        }
+        if (enc->srcContext) {
+            NvLog("NVENCEncoder: Flushing source D3D11 context before cleanup\n");
+            enc->srcContext->lpVtbl->Flush(enc->srcContext);
+        }
+        
         // Send EOS
         NV_ENC_PIC_PARAMS picParams = {0};
         picParams.version = NV_ENC_PIC_PARAMS_VER;
@@ -694,6 +780,9 @@ static unsigned __stdcall OutputThreadProc(void* param) {
     // We wait on events IN ORDER (retrieveIndex), one at a time.
     
     while (!enc->stopThread) {
+        // Heartbeat for monitoring
+        Logger_Heartbeat(THREAD_NVENC_OUTPUT);
+        
         int idx = enc->retrieveIndex;
         
         // ====================================================================
@@ -718,19 +807,50 @@ static unsigned __stdcall OutputThreadProc(void* param) {
         if (enc->stopThread) break;
         
         // ====================================================================
+        // CHECK DEVICE HEALTH before any GPU/NVENC operations
+        // This prevents hanging on dead device calls
+        // ====================================================================
+        HRESULT deviceCheck = enc->encDevice->lpVtbl->GetDeviceRemovedReason(enc->encDevice);
+        if (deviceCheck != S_OK) {
+            enc->deviceLost = TRUE;
+            NvLog("NVENCEncoder: DEVICE REMOVED detected in output thread (0x%08X)\n", deviceCheck);
+            break;  // Exit loop immediately
+        }
+        
+        // ====================================================================
         // Step 2: Lock bitstream to get encoded data
         // Per docs (lines 3623-3626): event signaled means data is ready
         // ====================================================================
         
+        NvLog("NVENCEncoder: [DEBUG] Calling LockBitstream[%d]...\n", idx);
+        
         NV_ENC_LOCK_BITSTREAM lockParams = {0};
         lockParams.version = NV_ENC_LOCK_BITSTREAM_VER;
         lockParams.outputBitstream = enc->outputBuffers[idx];
-        lockParams.doNotWait = 0;  // Event signaled, so this won't block
+        lockParams.doNotWait = 1;  // Don't block - event already signaled
         
         NVENCSTATUS st = enc->fn.nvEncLockBitstream(enc->encoder, &lockParams);
+        
+        NvLog("NVENCEncoder: [DEBUG] LockBitstream[%d] returned %d\n", idx, st);
+        
+        // Check for device lost errors
+        if (st == NV_ENC_ERR_DEVICE_NOT_EXIST || st == NV_ENC_ERR_INVALID_DEVICE || 
+            st == NV_ENC_ERR_INVALID_ENCODERDEVICE) {
+            enc->deviceLost = TRUE;
+            NvLog("NVENCEncoder: DEVICE LOST in OutputThread LockBitstream (%d)\n", st);
+            // Release mutex and exit thread - consumer will detect deviceLost
+            if (enc->encMutex[idx]) {
+                enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
+            }
+            break;  // Exit the while loop
+        }
+        
         if (st != NV_ENC_SUCCESS) {
             NvLog("NVENCEncoder: LockBitstream[%d] failed (%d)\n", idx, st);
             // Still advance to avoid getting stuck
+            if (enc->encMutex[idx]) {
+                enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
+            }
             enc->retrieveIndex = (enc->retrieveIndex + 1) % NUM_BUFFERS;
             InterlockedDecrement(&enc->pendingCount);
             continue;
@@ -751,15 +871,25 @@ static unsigned __stdcall OutputThreadProc(void* param) {
         }
         
         // Unlock bitstream
+        NvLog("NVENCEncoder: [DEBUG] Calling UnlockBitstream[%d]...\n", idx);
         enc->fn.nvEncUnlockBitstream(enc->encoder, enc->outputBuffers[idx]);
+        NvLog("NVENCEncoder: [DEBUG] UnlockBitstream[%d] done\n", idx);
         
         // ====================================================================
         // Step 4: Unmap input resource
         // Per docs (lines 4165-4167): unmap AFTER LockBitstream
+        // Flush D3D11 context before unmap to ensure GPU work is complete
+        // (NVIDIA forum recommendation to prevent nvEncUnmapInputResource hangs)
         // ====================================================================
         
         if (enc->mappedResources[idx]) {
+            // Flush encoder context before unmap to sync GPU state
+            if (enc->encContext) {
+                enc->encContext->lpVtbl->Flush(enc->encContext);
+            }
+            NvLog("NVENCEncoder: [DEBUG] Calling UnmapInputResource[%d]...\n", idx);
             enc->fn.nvEncUnmapInputResource(enc->encoder, enc->mappedResources[idx]);
+            NvLog("NVENCEncoder: [DEBUG] UnmapInputResource[%d] done\n", idx);
             enc->mappedResources[idx] = NULL;
         }
         
@@ -769,7 +899,9 @@ static unsigned __stdcall OutputThreadProc(void* param) {
         // ====================================================================
         
         if (enc->encMutex[idx]) {
+            NvLog("NVENCEncoder: [DEBUG] ReleaseSync[%d]...\n", idx);
             enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
+            NvLog("NVENCEncoder: [DEBUG] ReleaseSync[%d] done\n", idx);
         }
         
         // ====================================================================

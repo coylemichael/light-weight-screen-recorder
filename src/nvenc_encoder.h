@@ -34,7 +34,11 @@ void NVENCEncoder_SetCallback(NVENCEncoder* enc, EncodedFrameCallback callback, 
 
 // Submit texture for encoding (fast, non-blocking in async mode)
 // The texture will be copied internally, so caller can reuse it immediately
-BOOL NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Texture, LONGLONG timestamp);
+// Returns: 1 = success, 0 = transient failure (retry), -1 = device lost (must recreate)
+int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Texture, LONGLONG timestamp);
+
+// Check if device was lost (call after SubmitTexture returns -1)
+BOOL NVENCEncoder_IsDeviceLost(NVENCEncoder* enc);
 
 // Drain completed frames (for sync mode or manual draining)
 int NVENCEncoder_DrainCompleted(NVENCEncoder* enc, EncodedFrameCallback callback, void* userData);

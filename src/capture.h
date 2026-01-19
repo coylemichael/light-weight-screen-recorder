@@ -39,6 +39,7 @@ typedef struct {
     // State
     BOOL initialized;
     BOOL capturing;
+    BOOL accessLost;  // Set when DXGI_ERROR_ACCESS_LOST occurs
     
 } CaptureState;
 
@@ -86,5 +87,9 @@ void Capture_EnumMonitors(MonitorEnumProc callback, void* userData);
 
 // Helper: Get monitor bounds by index
 BOOL Capture_GetMonitorBoundsByIndex(int monitorIndex, RECT* bounds);
+
+// Reinitialize desktop duplication (after access lost)
+// Returns TRUE if successful, FALSE if needs retry
+BOOL Capture_ReinitDuplication(CaptureState* state);
 
 #endif // CAPTURE_H

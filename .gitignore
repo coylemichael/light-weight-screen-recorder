@@ -6,6 +6,16 @@ obj/
 *.pdb
 *.ilk
 
+# Tools build artifacts
+tools/*.exe
+tools/*.obj
+
+# Tools folder (local debugging utilities, not for public repo)
+tools/
+
+# Debug logs (created when debug logging enabled)
+Debug/
+
 # Config files (user-specific)
 lwsr_config.ini
 

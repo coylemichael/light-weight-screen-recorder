@@ -66,6 +66,9 @@ typedef struct {
     // Save location
     char savePath[MAX_PATH];
     
+    // Debug/logging settings
+    BOOL debugLogging;               // Enable debug logging to file
+    
     // Last capture area (for quick re-record)
     RECT lastCaptureRect;
     CaptureMode lastMode;

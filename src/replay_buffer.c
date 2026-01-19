@@ -288,11 +288,37 @@ void ReplayBuffer_Stop(ReplayBufferState* state) {
     if (!state || !state->isBuffering) return;
     
     // Signal stop via event (proper cross-thread communication)
-    InterlockedExchange(&state->state, REPLAY_STATE_STOPPING);
+    LONG prevState = InterlockedExchange(&state->state, REPLAY_STATE_STOPPING);
     SetEvent(state->hStopEvent);
     
     if (state->bufferThread) {
-        WaitForSingleObject(state->bufferThread, 10000);
+        DWORD waitResult = WaitForSingleObject(state->bufferThread, 5000);
+        
+        if (waitResult == WAIT_TIMEOUT) {
+            // Thread is hung! We can't safely clean up the encoder from here
+            // because the hung thread may still be using it.
+            // Log it and leak the resources - safer than crashing.
+            ReplayLog("WARNING: Buffer thread hung (5s timeout) - forcing cleanup\n");
+            
+            // Try to terminate the hung thread (dangerous but necessary)
+            // This may leak resources but prevents deadlock
+            TerminateThread(state->bufferThread, 1);
+            
+            // Give terminated thread a moment to die
+            WaitForSingleObject(state->bufferThread, 1000);
+            
+            // Force destroy the encoder since the thread won't do it
+            // This may crash if the thread was in the middle of an NVENC call,
+            // but it's better than leaking the encoder session forever
+            if (g_encoder) {
+                ReplayLog("Force-destroying hung encoder...\n");
+                // Don't call NVENCEncoder_Destroy - it tries to stop output thread
+                // which is also likely hung. Just leak it.
+                // The NVENC session will be cleaned up when the process exits.
+                g_encoder = NULL;
+            }
+        }
+        
         CloseHandle(state->bufferThread);
         state->bufferThread = NULL;
     }
@@ -577,8 +603,12 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     
     // Build wait handle array for event-driven loop
     HANDLE waitHandles[2] = { state->hStopEvent, state->hSaveRequestEvent };
+    DWORD lastHeartbeat = GetTickCount();
     
     while (InterlockedCompareExchange(&state->state, 0, 0) == REPLAY_STATE_CAPTURING) {
+        // Heartbeat every iteration (non-blocking)
+        Logger_Heartbeat(THREAD_BUFFER);
+        
         // Check for stop/save events with 1ms timeout (allows frame timing)
         DWORD waitResult = WaitForMultipleObjects(2, waitHandles, FALSE, 1);
         
@@ -751,11 +781,13 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                     if (nv12Texture) {
                         // Async API: Submit frame (fast, non-blocking)
                         // Output thread will call DrainCallback when frame completes
-                        BOOL submitted = NVENCEncoder_SubmitTexture(g_encoder, nv12Texture, realTimestamp);
+                        // Returns: 1=success, 0=transient failure, -1=device lost
+                        int submitResult = NVENCEncoder_SubmitTexture(g_encoder, nv12Texture, realTimestamp);
                         QueryPerformanceCounter(&t4);
                         
-                        if (submitted) {
+                        if (submitResult == 1) {
                             frameCount++;  // Count submissions (frames delivered via callback)
+                            encodeFailCount = 0;  // Reset consecutive failure counter
                             
                             // Update state machine frame count
                             LONG newCount = InterlockedIncrement(&state->framesCaptured);
@@ -771,14 +803,57 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                             totalConvertMs += (double)(t3.QuadPart - t2.QuadPart) * 1000.0 / perfFreq.QuadPart;
                             totalSubmitMs += (double)(t4.QuadPart - t3.QuadPart) * 1000.0 / perfFreq.QuadPart;
                             timingCount++;
+                        } else if (submitResult == -1) {
+                            // Device lost - must restart the entire pipeline
+                            ReplayLog("NVENC DEVICE LOST - buffer needs restart\n");
+                            InterlockedExchange(&state->state, REPLAY_STATE_STALLED);
+                            break;  // Exit capture loop immediately
                         } else {
+                            // submitResult == 0: Transient failure
                             encodeFailCount++;
+                            
+                            // If NVENC fails for 5+ seconds straight, pipeline is stalled
+                            // This can happen when GPU goes to sleep or device is removed
+                            if (encodeFailCount >= fps * 5) {
+                                ReplayLog("NVENC pipeline stalled (%d consecutive failures) - restarting buffer\n", encodeFailCount);
+                                // Signal ourselves to restart by breaking out of the loop
+                                // The buffer will need to be stopped and restarted by the app
+                                InterlockedExchange(&state->state, REPLAY_STATE_STALLED);
+                                break;  // Exit capture loop - app should restart buffer
+                            }
                         }
                     } else {
                         convertNullCount++;
                     }
                 } else {
                     captureNullCount++;
+                    
+                    // Check if access was lost (monitor sleep, resolution change, etc.)
+                    if (capture->accessLost) {
+                        ReplayLog("DXGI access lost detected - reinitializing duplication...\n");
+                        
+                        // Wait for desktop to stabilize, but check stop/save events
+                        DWORD stabilizeWait = WaitForMultipleObjects(2, waitHandles, FALSE, 500);
+                        if (stabilizeWait == WAIT_OBJECT_0) {
+                            ReplayLog("Stop event during reinit wait\n");
+                            break;  // Exit capture loop
+                        }
+                        if (stabilizeWait == WAIT_OBJECT_0 + 1) {
+                            // Save requested during reinit - can't save with stale data
+                            ReplayLog("Save requested during reinit - rejecting (access lost)\n");
+                            state->saveSuccess = FALSE;
+                            SetEvent(state->hSaveCompleteEvent);
+                        }
+                        
+                        if (Capture_ReinitDuplication(capture)) {
+                            ReplayLog("Duplication reinitialized successfully\n");
+                            captureNullCount = 0;  // Reset counter after reinit
+                        } else {
+                            ReplayLog("WARNING: Failed to reinit duplication, will retry...\n");
+                            // Longer wait before retry, but still check events
+                            WaitForMultipleObjects(2, waitHandles, FALSE, 1000);
+                        }
+                    }
                 }
             }
             

@@ -44,6 +44,10 @@ struct AudioCaptureSource {
     LARGE_INTEGER lastPacketTime;   // Last time we received a packet from this source
     LARGE_INTEGER perfFreq;         // Performance counter frequency
     BOOL hasReceivedPacket;         // TRUE once we've received at least one packet
+    
+    // Device invalidation tracking
+    volatile BOOL deviceInvalidated; // TRUE if device was yanked (AUDCLNT_E_DEVICE_INVALIDATED)
+    DWORD consecutiveErrors;         // Count of consecutive errors
 };
 
 // Global enumerator
@@ -355,15 +359,31 @@ static DWORD WINAPI SourceCaptureThread(LPVOID param) {
     if (!convBuffer) return 0;
     
     while (src->active) {
+        // Heartbeat (use AUDIO_SRC1 - we could differentiate but keep it simple)
+        Logger_Heartbeat(THREAD_AUDIO_SRC1);
+        
         UINT32 packetLength = 0;
         HRESULT hr = src->captureClient->lpVtbl->GetNextPacketSize(
             src->captureClient, &packetLength
         );
         
         if (FAILED(hr)) {
+            // Check for device invalidation (device yanked, audio service restarted, etc.)
+            if (hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_SERVICE_NOT_RUNNING) {
+                src->deviceInvalidated = TRUE;
+                Logger_Log("Audio source '%s' device invalidated (hr=0x%08X) - stopping capture",
+                      src->deviceId, hr);
+                break;  // Exit the loop - device is gone
+            }
+            src->consecutiveErrors++;
+            if (src->consecutiveErrors > 100) {
+                Logger_Log("Audio source '%s' too many consecutive errors - stopping", src->deviceId);
+                break;
+            }
             Sleep(5);
             continue;
         }
+        src->consecutiveErrors = 0;  // Reset on success
         
         while (packetLength > 0 && src->active) {
             BYTE* data = NULL;
@@ -379,7 +399,12 @@ static DWORD WINAPI SourceCaptureThread(LPVOID param) {
                 NULL
             );
             
-            if (FAILED(hr)) break;
+            if (FAILED(hr)) {
+                if (hr == AUDCLNT_E_DEVICE_INVALIDATED || hr == AUDCLNT_E_SERVICE_NOT_RUNNING) {
+                    src->deviceInvalidated = TRUE;
+                }
+                break;
+            }
             
             if (numFrames > 0 && data) {
                 int convertedBytes = 0;
@@ -541,6 +566,9 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
     LONGLONG totalBytesOutput = 0;  // Total bytes we've written to mix buffer
     
     while (ctx->running) {
+        // Heartbeat for monitoring
+        Logger_Heartbeat(THREAD_AUDIO_MIX);
+        
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
         

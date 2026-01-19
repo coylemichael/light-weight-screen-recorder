@@ -484,8 +484,11 @@ ID3D11Texture2D* Capture_GetFrameTexture(CaptureState* state, UINT64* timestamp)
         return NULL;
     }
     
-    if (hr == DXGI_ERROR_ACCESS_LOST) {
-        // Desktop duplication lost - needs reinit (handled by caller)
+    if (hr == DXGI_ERROR_ACCESS_LOST || 
+        hr == DXGI_ERROR_DEVICE_REMOVED || 
+        hr == DXGI_ERROR_DEVICE_RESET) {
+        // Desktop duplication lost - set flag for caller to handle
+        state->accessLost = TRUE;
         return NULL;
     }
     
@@ -602,4 +605,32 @@ void Capture_Shutdown(CaptureState* state) {
     }
     
     state->initialized = FALSE;
+}
+
+BOOL Capture_ReinitDuplication(CaptureState* state) {
+    if (!state->initialized || !state->adapter) return FALSE;
+    
+    // Release old duplication and GPU texture (has stale frames)
+    ReleaseDuplication(state);
+    
+    if (state->gpuTexture) {
+        state->gpuTexture->lpVtbl->Release(state->gpuTexture);
+        state->gpuTexture = NULL;
+    }
+    
+    // Recreate duplication on same output
+    if (!InitDuplicationForOutput(state, state->adapter, state->monitorIndex)) {
+        return FALSE;
+    }
+    
+    // Restore capture region
+    RECT savedRect = state->captureRect;
+    if (!Capture_SetRegion(state, savedRect)) {
+        return FALSE;
+    }
+    
+    // Clear the access lost flag
+    state->accessLost = FALSE;
+    
+    return TRUE;
 }
