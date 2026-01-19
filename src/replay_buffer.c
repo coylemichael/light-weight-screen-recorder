@@ -376,7 +376,8 @@ void ReplayBuffer_GetStatus(ReplayBufferState* state, char* buffer, int bufferSi
         size_t memMB = SampleBuffer_GetMemoryUsage(&g_sampleBuffer) / (1024 * 1024);
         snprintf(buffer, bufferSize, "Replay: %.0fs (%zuMB)", duration, memMB);
     } else {
-        strcpy(buffer, "Replay: OFF");
+        strncpy(buffer, "Replay: OFF", bufferSize - 1);
+        buffer[bufferSize - 1] = '\0';
     }
 }
 

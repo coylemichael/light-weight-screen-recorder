@@ -930,7 +930,9 @@ static void LoadSettingsIcon(void) {
         GetModuleFileNameA(NULL, exePath, MAX_PATH);
         char* lastSlash = strrchr(exePath, '\\');
         if (lastSlash) {
-            strcpy(lastSlash + 1, "..\\static\\settings.png");
+            size_t remaining = sizeof(exePath) - (lastSlash + 1 - exePath);
+            strncpy(lastSlash + 1, "..\\static\\settings.png", remaining - 1);
+            exePath[sizeof(exePath) - 1] = '\0';
             g_settingsImage = LoadPNGImage(exePath);
         }
     }
@@ -951,13 +953,16 @@ static void AddTrayIcon(void) {
         GetModuleFileNameA(NULL, exePath, MAX_PATH);
         char* lastSlash = strrchr(exePath, '\\');
         if (lastSlash) {
-            strcpy(lastSlash + 1, "..\\static\\lwsr_icon.png");
+            size_t remaining = sizeof(exePath) - (lastSlash + 1 - exePath);
+            strncpy(lastSlash + 1, "..\\static\\lwsr_icon.png", remaining - 1);
+            exePath[sizeof(exePath) - 1] = '\0';
             g_trayHIcon = LoadIconFromPNG(exePath);
         }
     }
     
     g_trayIcon.hIcon = g_trayHIcon ? g_trayHIcon : LoadIcon(NULL, IDI_APPLICATION);
-    strcpy(g_trayIcon.szTip, "LWSR - Screen Recorder");
+    strncpy(g_trayIcon.szTip, "LWSR - Screen Recorder", sizeof(g_trayIcon.szTip) - 1);
+    g_trayIcon.szTip[sizeof(g_trayIcon.szTip) - 1] = '\0';
     Shell_NotifyIconA(NIM_ADD, &g_trayIcon);
 }
 
@@ -1069,9 +1074,9 @@ static void UpdateTimerDisplay(void) {
     int hours = elapsed / 3600000;
     
     if (hours > 0) {
-        sprintf(g_timerText, "%d:%02d:%02d", hours, mins, secs);
+        snprintf(g_timerText, sizeof(g_timerText), "%d:%02d:%02d", hours, mins, secs);
     } else {
-        sprintf(g_timerText, "%02d:%02d", mins, secs);  // MM:SS with leading zero
+        snprintf(g_timerText, sizeof(g_timerText), "%02d:%02d", mins, secs);  // MM:SS with leading zero
     }
     
     // Trigger repaint of recording panel
@@ -1346,7 +1351,8 @@ void Recording_Start(void) {
     InterlockedExchange(&g_stopRecording, FALSE);
     g_recordStartTime = GetTickCount();
     g_recordingMode = g_currentMode;  // Remember which mode started recording
-    strcpy(g_timerText, "00:00");
+    strncpy(g_timerText, "00:00", sizeof(g_timerText) - 1);
+    g_timerText[sizeof(g_timerText) - 1] = '\0';
     
     // Show recording border if enabled
     if (g_config.showRecordingBorder) {
@@ -2437,7 +2443,7 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 char filename[MAX_PATH];
                 SYSTEMTIME st;
                 GetLocalTime(&st);
-                sprintf(filename, "%s\\Replay_%04d%02d%02d_%02d%02d%02d.mp4",
+                snprintf(filename, sizeof(filename), "%s\\Replay_%04d%02d%02d_%02d%02d%02d.mp4",
                     g_config.savePath, st.wYear, st.wMonth, st.wDay,
                     st.wHour, st.wMinute, st.wSecond);
                 
@@ -2503,58 +2509,67 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 // Helper function to get key name from virtual key code
 static void GetKeyNameFromVK(int vk, char* buffer, int bufferSize) {
+    if (bufferSize < 1) return;
+    buffer[0] = '\0';
+    
+    // Helper macro for safe string copy
+    #define SAFE_COPY(str) do { strncpy(buffer, str, bufferSize - 1); buffer[bufferSize - 1] = '\0'; return; } while(0)
+    
     // Handle special keys
     switch (vk) {
-        case VK_F1: strcpy(buffer, "F1"); return;
-        case VK_F2: strcpy(buffer, "F2"); return;
-        case VK_F3: strcpy(buffer, "F3"); return;
-        case VK_F4: strcpy(buffer, "F4"); return;
-        case VK_F5: strcpy(buffer, "F5"); return;
-        case VK_F6: strcpy(buffer, "F6"); return;
-        case VK_F7: strcpy(buffer, "F7"); return;
-        case VK_F8: strcpy(buffer, "F8"); return;
-        case VK_F9: strcpy(buffer, "F9"); return;
-        case VK_F10: strcpy(buffer, "F10"); return;
-        case VK_F11: strcpy(buffer, "F11"); return;
-        case VK_F12: strcpy(buffer, "F12"); return;
-        case VK_ESCAPE: strcpy(buffer, "Escape"); return;
-        case VK_TAB: strcpy(buffer, "Tab"); return;
-        case VK_RETURN: strcpy(buffer, "Enter"); return;
-        case VK_SPACE: strcpy(buffer, "Space"); return;
-        case VK_BACK: strcpy(buffer, "Backspace"); return;
-        case VK_DELETE: strcpy(buffer, "Delete"); return;
-        case VK_INSERT: strcpy(buffer, "Insert"); return;
-        case VK_HOME: strcpy(buffer, "Home"); return;
-        case VK_END: strcpy(buffer, "End"); return;
-        case VK_PRIOR: strcpy(buffer, "Page Up"); return;
-        case VK_NEXT: strcpy(buffer, "Page Down"); return;
-        case VK_LEFT: strcpy(buffer, "Left"); return;
-        case VK_RIGHT: strcpy(buffer, "Right"); return;
-        case VK_UP: strcpy(buffer, "Up"); return;
-        case VK_DOWN: strcpy(buffer, "Down"); return;
-        case VK_PAUSE: strcpy(buffer, "Pause"); return;
-        case VK_SCROLL: strcpy(buffer, "Scroll Lock"); return;
-        case VK_SNAPSHOT: strcpy(buffer, "Print Screen"); return;
-        case VK_NUMLOCK: strcpy(buffer, "Num Lock"); return;
+        case VK_F1: SAFE_COPY("F1");
+        case VK_F2: SAFE_COPY("F2");
+        case VK_F3: SAFE_COPY("F3");
+        case VK_F4: SAFE_COPY("F4");
+        case VK_F5: SAFE_COPY("F5");
+        case VK_F6: SAFE_COPY("F6");
+        case VK_F7: SAFE_COPY("F7");
+        case VK_F8: SAFE_COPY("F8");
+        case VK_F9: SAFE_COPY("F9");
+        case VK_F10: SAFE_COPY("F10");
+        case VK_F11: SAFE_COPY("F11");
+        case VK_F12: SAFE_COPY("F12");
+        case VK_ESCAPE: SAFE_COPY("Escape");
+        case VK_TAB: SAFE_COPY("Tab");
+        case VK_RETURN: SAFE_COPY("Enter");
+        case VK_SPACE: SAFE_COPY("Space");
+        case VK_BACK: SAFE_COPY("Backspace");
+        case VK_DELETE: SAFE_COPY("Delete");
+        case VK_INSERT: SAFE_COPY("Insert");
+        case VK_HOME: SAFE_COPY("Home");
+        case VK_END: SAFE_COPY("End");
+        case VK_PRIOR: SAFE_COPY("Page Up");
+        case VK_NEXT: SAFE_COPY("Page Down");
+        case VK_LEFT: SAFE_COPY("Left");
+        case VK_RIGHT: SAFE_COPY("Right");
+        case VK_UP: SAFE_COPY("Up");
+        case VK_DOWN: SAFE_COPY("Down");
+        case VK_PAUSE: SAFE_COPY("Pause");
+        case VK_SCROLL: SAFE_COPY("Scroll Lock");
+        case VK_SNAPSHOT: SAFE_COPY("Print Screen");
+        case VK_NUMLOCK: SAFE_COPY("Num Lock");
         default:
             // For letters and numbers, just use the character
             if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
-                buffer[0] = (char)vk;
-                buffer[1] = '\0';
+                if (bufferSize >= 2) {
+                    buffer[0] = (char)vk;
+                    buffer[1] = '\0';
+                }
                 return;
             }
             // Numpad keys
             if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) {
-                sprintf(buffer, "Numpad %d", vk - VK_NUMPAD0);
+                snprintf(buffer, bufferSize, "Numpad %d", vk - VK_NUMPAD0);
                 return;
             }
             // Default: use scan code
             UINT scanCode = MapVirtualKey(vk, MAPVK_VK_TO_VSC);
             if (GetKeyNameTextA(scanCode << 16, buffer, bufferSize) == 0) {
-                sprintf(buffer, "Key 0x%02X", vk);
+                snprintf(buffer, bufferSize, "Key 0x%02X", vk);
             }
             break;
     }
+    #undef SAFE_COPY
 }
 
 // Settings window procedure
@@ -2629,7 +2644,7 @@ static int PopulateAudioDropdown(HWND comboBox, const AudioDeviceList* devices, 
         if (devices->devices[i].type == AUDIO_DEVICE_OUTPUT) {
             char displayName[160];
             if (devices->devices[i].isDefault) {
-                sprintf(displayName, "%s (Default)", devices->devices[i].name);
+                snprintf(displayName, sizeof(displayName), "%s (Default)", devices->devices[i].name);
             } else {
                 strncpy(displayName, devices->devices[i].name, sizeof(displayName) - 1);
                 displayName[sizeof(displayName) - 1] = '\0';
@@ -2657,7 +2672,7 @@ static int PopulateAudioDropdown(HWND comboBox, const AudioDeviceList* devices, 
         if (devices->devices[i].type == AUDIO_DEVICE_INPUT) {
             char displayName[160];
             if (devices->devices[i].isDefault) {
-                sprintf(displayName, "%s (Default)", devices->devices[i].name);
+                snprintf(displayName, sizeof(displayName), "%s (Default)", devices->devices[i].name);
             } else {
                 strncpy(displayName, devices->devices[i].name, sizeof(displayName) - 1);
                 displayName[sizeof(displayName) - 1] = '\0';
@@ -2711,7 +2726,7 @@ static void UpdateReplayRAMEstimate(HWND hwndSettings) {
     
     // Update explanation text
     char explainText[256];
-    sprintf(explainText, "When enabled, ~%d MB of RAM is reserved for the video buffer. See the calculation below:", ramMB);
+    snprintf(explainText, sizeof(explainText), "When enabled, ~%d MB of RAM is reserved for the video buffer. See the calculation below:", ramMB);
     SetWindowTextA(lblRam, explainText);
     
     // Update calculation text
@@ -2720,12 +2735,12 @@ static void UpdateReplayRAMEstimate(HWND hwndSettings) {
         int mins = durationSecs / 60;
         int secs = durationSecs % 60;
         if (secs > 0) {
-            sprintf(calcText, "%dm %ds @ %d FPS, %dx%d = ~%d MB", mins, secs, fps, estWidth, estHeight, ramMB);
+            snprintf(calcText, sizeof(calcText), "%dm %ds @ %d FPS, %dx%d = ~%d MB", mins, secs, fps, estWidth, estHeight, ramMB);
         } else {
-            sprintf(calcText, "%dm @ %d FPS, %dx%d = ~%d MB", mins, fps, estWidth, estHeight, ramMB);
+            snprintf(calcText, sizeof(calcText), "%dm @ %d FPS, %dx%d = ~%d MB", mins, fps, estWidth, estHeight, ramMB);
         }
     } else {
-        sprintf(calcText, "%ds @ %d FPS, %dx%d = ~%d MB", durationSecs, fps, estWidth, estHeight, ramMB);
+        snprintf(calcText, sizeof(calcText), "%ds @ %d FPS, %dx%d = ~%d MB", durationSecs, fps, estWidth, estHeight, ramMB);
     }
     SetWindowTextA(lblCalc, calcText);
 }
@@ -3240,7 +3255,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 
                 // Explanation text
                 char explainText[256];
-                sprintf(explainText, "When enabled, ~%d MB of RAM is reserved for the video buffer. See the calculation below:", ramMB);
+                snprintf(explainText, sizeof(explainText), "When enabled, ~%d MB of RAM is reserved for the video buffer. See the calculation below:", ramMB);
                 HWND lblExplain = CreateWindowExA(0, "STATIC", explainText,
                     WS_CHILD | WS_VISIBLE,
                     labelX, y + 4, contentW, 20, hwnd, (HMENU)ID_STATIC_REPLAY_RAM, g_hInstance, NULL);
@@ -3253,12 +3268,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     int calcMins = durationSecs / 60;
                     int calcSecs = durationSecs % 60;
                     if (calcSecs > 0) {
-                        sprintf(calcText, "%dm %ds @ %d FPS, %dx%d = ~%d MB", calcMins, calcSecs, fps, estWidth, estHeight, ramMB);
+                        snprintf(calcText, sizeof(calcText), "%dm %ds @ %d FPS, %dx%d = ~%d MB", calcMins, calcSecs, fps, estWidth, estHeight, ramMB);
                     } else {
-                        sprintf(calcText, "%dm @ %d FPS, %dx%d = ~%d MB", calcMins, fps, estWidth, estHeight, ramMB);
+                        snprintf(calcText, sizeof(calcText), "%dm @ %d FPS, %dx%d = ~%d MB", calcMins, fps, estWidth, estHeight, ramMB);
                     }
                 } else {
-                    sprintf(calcText, "%ds @ %d FPS, %dx%d = ~%d MB", durationSecs, fps, estWidth, estHeight, ramMB);
+                    snprintf(calcText, sizeof(calcText), "%ds @ %d FPS, %dx%d = ~%d MB", durationSecs, fps, estWidth, estHeight, ramMB);
                 }
                 
                 HWND lblCalc = CreateWindowExA(0, "STATIC", calcText,
@@ -3314,7 +3329,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SendMessage(sldVol1, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
             SendMessage(sldVol1, TBM_SETPOS, TRUE, g_config.audioVolume1);
             
-            char volBuf1[16]; sprintf(volBuf1, "%d%%", g_config.audioVolume1);
+            char volBuf1[16]; snprintf(volBuf1, sizeof(volBuf1), "%d%%", g_config.audioVolume1);
             HWND lblVol1 = CreateWindowExA(0, "STATIC", volBuf1,
                 WS_CHILD | WS_VISIBLE,
                 volLblX, y + 5, volLblW, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL1, g_hInstance, NULL);
@@ -3338,7 +3353,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SendMessage(sldVol2, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
             SendMessage(sldVol2, TBM_SETPOS, TRUE, g_config.audioVolume2);
             
-            char volBuf2[16]; sprintf(volBuf2, "%d%%", g_config.audioVolume2);
+            char volBuf2[16]; snprintf(volBuf2, sizeof(volBuf2), "%d%%", g_config.audioVolume2);
             HWND lblVol2 = CreateWindowExA(0, "STATIC", volBuf2,
                 WS_CHILD | WS_VISIBLE,
                 volLblX, y + 5, volLblW, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL2, g_hInstance, NULL);
@@ -3362,7 +3377,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SendMessage(sldVol3, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
             SendMessage(sldVol3, TBM_SETPOS, TRUE, g_config.audioVolume3);
             
-            char volBuf3[16]; sprintf(volBuf3, "%d%%", g_config.audioVolume3);
+            char volBuf3[16]; snprintf(volBuf3, sizeof(volBuf3), "%d%%", g_config.audioVolume3);
             HWND lblVol3 = CreateWindowExA(0, "STATIC", volBuf3,
                 WS_CHILD | WS_VISIBLE,
                 volLblX, y + 5, volLblW, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL3, g_hInstance, NULL);
@@ -3666,15 +3681,15 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             
             if (ctrlId == ID_SLD_AUDIO_VOLUME1) {
                 g_config.audioVolume1 = pos;
-                sprintf(buf, "%d%%", pos);
+                snprintf(buf, sizeof(buf), "%d%%", pos);
                 SetWindowTextA(GetDlgItem(hwnd, ID_LBL_AUDIO_VOL1), buf);
             } else if (ctrlId == ID_SLD_AUDIO_VOLUME2) {
                 g_config.audioVolume2 = pos;
-                sprintf(buf, "%d%%", pos);
+                snprintf(buf, sizeof(buf), "%d%%", pos);
                 SetWindowTextA(GetDlgItem(hwnd, ID_LBL_AUDIO_VOL2), buf);
             } else if (ctrlId == ID_SLD_AUDIO_VOLUME3) {
                 g_config.audioVolume3 = pos;
-                sprintf(buf, "%d%%", pos);
+                snprintf(buf, sizeof(buf), "%d%%", pos);
                 SetWindowTextA(GetDlgItem(hwnd, ID_LBL_AUDIO_VOL3), buf);
             }
             return 0;
@@ -3813,7 +3828,7 @@ static LRESULT CALLBACK CrosshairWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
                 char sizeText[64];
                 int w = g_selectedRect.right - g_selectedRect.left;
                 int h = g_selectedRect.bottom - g_selectedRect.top;
-                sprintf(sizeText, "%d x %d", w, h);
+                snprintf(sizeText, sizeof(sizeText), "%d x %d", w, h);
                 
                 SetBkMode(hdc, TRANSPARENT);
                 SetTextColor(hdc, RGB(255, 255, 255));

@@ -147,12 +147,12 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
         char* lastSlash = strrchr(exePath, '\\');
         if (lastSlash) {
             *lastSlash = '\0';
-            sprintf(debugFolder, "%s\\Debug", exePath);
+            snprintf(debugFolder, sizeof(debugFolder), "%s\\Debug", exePath);
             CreateDirectoryA(debugFolder, NULL);  // Create Debug folder if it doesn't exist
             
             SYSTEMTIME st;
             GetLocalTime(&st);
-            sprintf(logFilename, "%s\\lwsr_log_%04d%02d%02d_%02d%02d%02d.txt",
+            snprintf(logFilename, sizeof(logFilename), "%s\\lwsr_log_%04d%02d%02d_%02d%02d%02d.txt",
                     debugFolder, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
             Logger_Init(logFilename, "w");
             Logger_Log("Debug logging enabled\n");

@@ -15,7 +15,9 @@ void Config_GetPath(char* buffer, size_t size) {
     GetModuleFileNameA(NULL, buffer, (DWORD)size);
     char* lastSlash = strrchr(buffer, '\\');
     if (lastSlash) {
-        strcpy(lastSlash + 1, "lwsr_config.ini");
+        size_t remaining = size - (lastSlash + 1 - buffer);
+        strncpy(lastSlash + 1, "lwsr_config.ini", remaining - 1);
+        buffer[size - 1] = '\0';
     }
 }
 
@@ -60,9 +62,11 @@ void Config_Load(AppConfig* config) {
     
     // Default save path to Videos folder
     if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_MYVIDEO, NULL, 0, config->savePath))) {
-        strcat(config->savePath, "\\Recordings");
+        strncat(config->savePath, "\\Recordings", sizeof(config->savePath) - strlen(config->savePath) - 1);
+        config->savePath[sizeof(config->savePath) - 1] = '\0';
     } else {
-        strcpy(config->savePath, FALLBACK_RECORDINGS_PATH);
+        strncpy(config->savePath, FALLBACK_RECORDINGS_PATH, sizeof(config->savePath) - 1);
+        config->savePath[sizeof(config->savePath) - 1] = '\0';
     }
     
     SetRectEmpty(&config->lastCaptureRect);
@@ -148,87 +152,87 @@ void Config_Save(const AppConfig* config) {
     
     char buffer[32];
     
-    sprintf(buffer, "%d", config->outputFormat);
+    snprintf(buffer, sizeof(buffer), "%d", config->outputFormat);
     WritePrivateProfileStringA("Recording", "Format", buffer, configPath);
     
-    sprintf(buffer, "%d", config->quality);
+    snprintf(buffer, sizeof(buffer), "%d", config->quality);
     WritePrivateProfileStringA("Recording", "Quality", buffer, configPath);
     
-    sprintf(buffer, "%d", config->captureMouse);
+    snprintf(buffer, sizeof(buffer), "%d", config->captureMouse);
     WritePrivateProfileStringA("Recording", "CaptureMouse", buffer, configPath);
     
-    sprintf(buffer, "%d", config->showRecordingBorder);
+    snprintf(buffer, sizeof(buffer), "%d", config->showRecordingBorder);
     WritePrivateProfileStringA("Recording", "ShowBorder", buffer, configPath);
     
-    sprintf(buffer, "%d", config->maxRecordingSeconds);
+    snprintf(buffer, sizeof(buffer), "%d", config->maxRecordingSeconds);
     WritePrivateProfileStringA("Recording", "MaxSeconds", buffer, configPath);
     
-    sprintf(buffer, "%d", config->cancelKey);
+    snprintf(buffer, sizeof(buffer), "%d", config->cancelKey);
     WritePrivateProfileStringA("UI", "CancelKey", buffer, configPath);
     
     // Replay buffer settings
-    sprintf(buffer, "%d", config->replayEnabled);
+    snprintf(buffer, sizeof(buffer), "%d", config->replayEnabled);
     WritePrivateProfileStringA("ReplayBuffer", "Enabled", buffer, configPath);
     
-    sprintf(buffer, "%d", config->replayDuration);
+    snprintf(buffer, sizeof(buffer), "%d", config->replayDuration);
     WritePrivateProfileStringA("ReplayBuffer", "Duration", buffer, configPath);
     
-    sprintf(buffer, "%d", config->replayCaptureSource);
+    snprintf(buffer, sizeof(buffer), "%d", config->replayCaptureSource);
     WritePrivateProfileStringA("ReplayBuffer", "CaptureSource", buffer, configPath);
     
-    sprintf(buffer, "%d", config->replayMonitorIndex);
+    snprintf(buffer, sizeof(buffer), "%d", config->replayMonitorIndex);
     WritePrivateProfileStringA("ReplayBuffer", "MonitorIndex", buffer, configPath);
     
-    sprintf(buffer, "%d", config->replaySaveKey);
+    snprintf(buffer, sizeof(buffer), "%d", config->replaySaveKey);
     WritePrivateProfileStringA("ReplayBuffer", "SaveKey", buffer, configPath);
     
-    sprintf(buffer, "%ld", config->replayAreaRect.left);
+    snprintf(buffer, sizeof(buffer), "%ld", config->replayAreaRect.left);
     WritePrivateProfileStringA("ReplayBuffer", "AreaLeft", buffer, configPath);
-    sprintf(buffer, "%ld", config->replayAreaRect.top);
+    snprintf(buffer, sizeof(buffer), "%ld", config->replayAreaRect.top);
     WritePrivateProfileStringA("ReplayBuffer", "AreaTop", buffer, configPath);
-    sprintf(buffer, "%ld", config->replayAreaRect.right);
+    snprintf(buffer, sizeof(buffer), "%ld", config->replayAreaRect.right);
     WritePrivateProfileStringA("ReplayBuffer", "AreaRight", buffer, configPath);
-    sprintf(buffer, "%ld", config->replayAreaRect.bottom);
+    snprintf(buffer, sizeof(buffer), "%ld", config->replayAreaRect.bottom);
     WritePrivateProfileStringA("ReplayBuffer", "AreaBottom", buffer, configPath);
     
-    sprintf(buffer, "%d", config->replayAspectRatio);
+    snprintf(buffer, sizeof(buffer), "%d", config->replayAspectRatio);
     WritePrivateProfileStringA("ReplayBuffer", "AspectRatio", buffer, configPath);
     
-    sprintf(buffer, "%d", config->replayFPS);
+    snprintf(buffer, sizeof(buffer), "%d", config->replayFPS);
     WritePrivateProfileStringA("ReplayBuffer", "FPS", buffer, configPath);
     
     // Audio settings
-    sprintf(buffer, "%d", config->audioEnabled);
+    snprintf(buffer, sizeof(buffer), "%d", config->audioEnabled);
     WritePrivateProfileStringA("Audio", "Enabled", buffer, configPath);
     WritePrivateProfileStringA("Audio", "Source1", config->audioSource1, configPath);
     WritePrivateProfileStringA("Audio", "Source2", config->audioSource2, configPath);
     WritePrivateProfileStringA("Audio", "Source3", config->audioSource3, configPath);
-    sprintf(buffer, "%d", config->audioVolume1);
+    snprintf(buffer, sizeof(buffer), "%d", config->audioVolume1);
     WritePrivateProfileStringA("Audio", "Volume1", buffer, configPath);
-    sprintf(buffer, "%d", config->audioVolume2);
+    snprintf(buffer, sizeof(buffer), "%d", config->audioVolume2);
     WritePrivateProfileStringA("Audio", "Volume2", buffer, configPath);
-    sprintf(buffer, "%d", config->audioVolume3);
+    snprintf(buffer, sizeof(buffer), "%d", config->audioVolume3);
     WritePrivateProfileStringA("Audio", "Volume3", buffer, configPath);
     
     // Debug logging
-    sprintf(buffer, "%d", config->debugLogging);
+    snprintf(buffer, sizeof(buffer), "%d", config->debugLogging);
     WritePrivateProfileStringA("Debug", "Logging", buffer, configPath);
     
     WritePrivateProfileStringA("Recording", "SavePath", config->savePath, configPath);
     
-    sprintf(buffer, "%ld", config->lastCaptureRect.left);
+    snprintf(buffer, sizeof(buffer), "%ld", config->lastCaptureRect.left);
     WritePrivateProfileStringA("LastCapture", "Left", buffer, configPath);
     
-    sprintf(buffer, "%ld", config->lastCaptureRect.top);
+    snprintf(buffer, sizeof(buffer), "%ld", config->lastCaptureRect.top);
     WritePrivateProfileStringA("LastCapture", "Top", buffer, configPath);
     
-    sprintf(buffer, "%ld", config->lastCaptureRect.right);
+    snprintf(buffer, sizeof(buffer), "%ld", config->lastCaptureRect.right);
     WritePrivateProfileStringA("LastCapture", "Right", buffer, configPath);
     
-    sprintf(buffer, "%ld", config->lastCaptureRect.bottom);
+    snprintf(buffer, sizeof(buffer), "%ld", config->lastCaptureRect.bottom);
     WritePrivateProfileStringA("LastCapture", "Bottom", buffer, configPath);
     
-    sprintf(buffer, "%d", config->lastMode);
+    snprintf(buffer, sizeof(buffer), "%d", config->lastMode);
     WritePrivateProfileStringA("LastCapture", "Mode", buffer, configPath);
 }
 
