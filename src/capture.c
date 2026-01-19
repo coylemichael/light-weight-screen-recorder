@@ -450,7 +450,7 @@ BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
     // Copy to frame buffer (handle pitch difference)
     BYTE* src = (BYTE*)mapped.pData;
     BYTE* dst = state->frameBuffer;
-    int rowBytes = state->captureWidth * BYTES_PER_PIXEL_BGRA;
+    size_t rowBytes = (size_t)state->captureWidth * BYTES_PER_PIXEL_BGRA;
     
     for (int y = 0; y < state->captureHeight; y++) {
         memcpy(dst, src, rowBytes);

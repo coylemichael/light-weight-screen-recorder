@@ -385,7 +385,8 @@ int ReplayBuffer_EstimateRAMUsage(int durationSec, int w, int h, int fps) {
     // Estimate based on bitrate
     // At 90 Mbps, 60 sec = 90 * 60 / 8 = 675 MB
     float baseMbps = 75.0f;  // Medium quality default
-    float megapixels = (float)(w * h) / 1000000.0f;
+    // Cast to size_t before multiplication to prevent 32-bit overflow
+    float megapixels = (float)((size_t)w * (size_t)h) / 1000000.0f;
     float resScale = megapixels / 3.7f;
     if (resScale < 0.5f) resScale = 0.5f;
     if (resScale > 2.5f) resScale = 2.5f;
@@ -644,8 +645,14 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
             MuxerAudioSample* audioCopy = NULL;
             
             if (audioCount > 0 && g_audioSamples && g_aacConfigData && g_aacConfigSize > 0) {
-                // Deep copy audio samples
-                audioCopy = (MuxerAudioSample*)malloc(audioCount * sizeof(MuxerAudioSample));
+                // Deep copy audio samples with overflow check
+                size_t allocSize = (size_t)audioCount * sizeof(MuxerAudioSample);
+                if (allocSize / sizeof(MuxerAudioSample) != (size_t)audioCount) {
+                    ReplayLog("WARNING: Audio allocation overflow, skipping audio\n");
+                    audioCount = 0;
+                } else {
+                    audioCopy = (MuxerAudioSample*)malloc(allocSize);
+                }
                 if (audioCopy) {
                     LONGLONG firstAudioTs = g_audioSamples[0].timestamp;
                     int copiedCount = 0;

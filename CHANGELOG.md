@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.2.7] - 2026-01-19
+
+### Fixed
+- **Integer overflow protection for large resolutions**
+  - Frame buffer size calculations now use `size_t` to prevent 32-bit overflow
+  - Added overflow validation before memory allocations in `sample_buffer.c`
+  - `encoder.c`: Buffer size uses safe 64-bit math, validates against `MAXDWORD` for Media Foundation API
+  - `capture.c`: Row bytes calculation uses `size_t` for proper `memcpy` size
+  - `util.c`: Megapixels calculation casts to `size_t` before multiplication
+  - `replay_buffer.c`: RAM estimation and audio allocation include overflow checks
+
+### Technical Details
+- Pattern: `(size_t)width * (size_t)height * BYTES_PER_PIXEL` prevents overflow before cast
+- Overflow check pattern: `if (count > 0 && allocSize / count != elementSize)` detects wrap
+- Affected calculations: frame buffers, sample arrays, muxer allocations
+- Enables safe operation with 8K+ resolutions and multi-monitor setups
+- Graceful failure (returns error) instead of crash/corruption on extreme resolutions
+
+---
+
 ## [1.2.6] - 2026-01-19
 
 ### Fixed

@@ -168,7 +168,10 @@ BOOL Encoder_WriteFrame(EncoderState* state, const BYTE* frameData, UINT64 times
         !InterlockedCompareExchange(&state->recording, 0, 0)) return FALSE;
     
     // Create media buffer
-    DWORD bufferSize = state->width * state->height * BYTES_PER_PIXEL_BGRA;
+    // Use size_t for multiplication to prevent overflow, then validate for DWORD
+    size_t frameSize = (size_t)state->width * (size_t)state->height * BYTES_PER_PIXEL_BGRA;
+    if (frameSize > MAXDWORD) return FALSE;  // Overflow check for MF API (takes DWORD)
+    DWORD bufferSize = (DWORD)frameSize;
     HRESULT hr = MFCreateMemoryBuffer(bufferSize, &buffer);
     if (FAILED(hr)) goto cleanup;
     
@@ -177,9 +180,9 @@ BOOL Encoder_WriteFrame(EncoderState* state, const BYTE* frameData, UINT64 times
     if (FAILED(hr)) goto cleanup;
     
     // Copy frame data (flip vertically for Media Foundation)
-    const BYTE* src = frameData + (state->height - 1) * state->width * BYTES_PER_PIXEL_BGRA;
+    size_t rowBytes = (size_t)state->width * BYTES_PER_PIXEL_BGRA;
+    const BYTE* src = frameData + (size_t)(state->height - 1) * rowBytes;
     BYTE* dst = bufferData;
-    int rowBytes = state->width * BYTES_PER_PIXEL_BGRA;
     
     for (int y = 0; y < state->height; y++) {
         memcpy(dst, src, rowBytes);

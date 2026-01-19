@@ -21,7 +21,8 @@ UINT32 Util_CalculateBitrate(int width, int height, int fps, QualityPreset quali
     }
     
     // Scale for resolution (base is 2560x1440 = 3.7MP)
-    float megapixels = (float)(width * height) / 1000000.0f;
+    // Cast to size_t first to prevent int overflow on large resolutions
+    float megapixels = (float)((size_t)width * (size_t)height) / 1000000.0f;
     float resScale = megapixels / BASE_RESOLUTION_MEGAPIXELS;
     if (resScale < MIN_RESOLUTION_SCALE) resScale = MIN_RESOLUTION_SCALE;
     if (resScale > MAX_RESOLUTION_SCALE) resScale = MAX_RESOLUTION_SCALE;

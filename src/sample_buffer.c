@@ -73,13 +73,30 @@ static void EvictOldSamples(SampleBuffer* buf, LONGLONG newTimestamp) {
 BOOL SampleBuffer_Init(SampleBuffer* buf, int durationSeconds, int fps,
                         int width, int height, QualityPreset quality) {
     if (!buf) return FALSE;
+    if (durationSeconds <= 0 || fps <= 0 || width <= 0 || height <= 0) return FALSE;
     
     ZeroMemory(buf, sizeof(SampleBuffer));
     
     // Calculate capacity: frames for 1.5x duration (headroom)
-    int capacity = (int)(durationSeconds * fps * BUFFER_CAPACITY_HEADROOM);
-    if (capacity < MIN_BUFFER_CAPACITY) capacity = MIN_BUFFER_CAPACITY;
-    if (capacity > MAX_BUFFER_CAPACITY) capacity = MAX_BUFFER_CAPACITY;  // ~27 min at 60fps
+    // Use size_t to prevent overflow during calculation
+    size_t rawCapacity = (size_t)durationSeconds * (size_t)fps;
+    rawCapacity = (size_t)(rawCapacity * BUFFER_CAPACITY_HEADROOM);
+    
+    int capacity;
+    if (rawCapacity < MIN_BUFFER_CAPACITY) {
+        capacity = MIN_BUFFER_CAPACITY;
+    } else if (rawCapacity > MAX_BUFFER_CAPACITY) {
+        capacity = MAX_BUFFER_CAPACITY;  // ~27 min at 60fps
+    } else {
+        capacity = (int)rawCapacity;
+    }
+    
+    // Verify allocation won't overflow
+    size_t allocSize = (size_t)capacity * sizeof(BufferedSample);
+    if (allocSize / sizeof(BufferedSample) != (size_t)capacity) {
+        BufLog("SampleBuffer_Init: allocation size overflow\n");
+        return FALSE;
+    }
     
     buf->samples = (BufferedSample*)calloc(capacity, sizeof(BufferedSample));
     if (!buf->samples) {
@@ -247,9 +264,16 @@ BOOL SampleBuffer_WriteToFile(SampleBuffer* buf, const char* outputPath) {
     bufDuration = (double)(buf->samples[newestIdx].timestamp - buf->samples[buf->tail].timestamp) / 10000000.0;
     BufLog("WriteToFile: %d samples, %.1fs to %s\n", count, bufDuration, outputPath);
     
-    // Allocate sample array
-    BufLog("WriteToFile: allocating %d samples (%zu bytes)\n", count, count * sizeof(MuxerSample));
-    MuxerSample* samples = (MuxerSample*)malloc(count * sizeof(MuxerSample));
+    // Allocate sample array with overflow check
+    size_t allocSize = (size_t)count * sizeof(MuxerSample);
+    // Check for multiplication overflow: if allocSize / count != sizeof(MuxerSample), overflow occurred
+    if (count > 0 && allocSize / (size_t)count != sizeof(MuxerSample)) {
+        LeaveCriticalSection(&buf->lock);
+        BufLog("WriteToFile: allocation size overflow\n");
+        return FALSE;
+    }
+    BufLog("WriteToFile: allocating %d samples (%zu bytes)\n", count, allocSize);
+    MuxerSample* samples = (MuxerSample*)malloc(allocSize);
     if (!samples) {
         LeaveCriticalSection(&buf->lock);
         BufLog("WriteToFile: failed to allocate samples array\n");
@@ -339,8 +363,13 @@ BOOL SampleBuffer_GetSamplesForMuxing(SampleBuffer* buf, MuxerSample** outSample
         return FALSE;
     }
     
-    // Allocate output array
-    MuxerSample* samples = (MuxerSample*)malloc(count * sizeof(MuxerSample));
+    // Allocate output array with overflow check
+    size_t allocSize = (size_t)count * sizeof(MuxerSample);
+    if (count > 0 && allocSize / (size_t)count != sizeof(MuxerSample)) {
+        LeaveCriticalSection(&buf->lock);
+        return FALSE;  // Overflow
+    }
+    MuxerSample* samples = (MuxerSample*)malloc(allocSize);
     if (!samples) {
         LeaveCriticalSection(&buf->lock);
         return FALSE;
