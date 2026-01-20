@@ -471,6 +471,365 @@ int ReplayBuffer_EstimateRAMUsage(int durationSec, int w, int h, int fps) {
 }
 
 /* ============================================================================
+ * BUFFER THREAD HELPER FUNCTIONS
+ * ============================================================================ */
+
+/**
+ * Initialize capture region based on replay buffer configuration.
+ * Sets up monitor bounds or all-monitors capture as configured.
+ * 
+ * @param state    Replay buffer state with capture source config
+ * @param capture  Capture state to configure
+ * @param outRect  Output rectangle for capture bounds
+ * @return TRUE if capture region was configured successfully
+ */
+static BOOL InitCaptureRegion(ReplayBufferState* state, CaptureState* capture, RECT* outRect) {
+    SetRectEmpty(outRect);
+    
+    if (state->captureSource == MODE_ALL_MONITORS) {
+        Capture_GetAllMonitorsBounds(outRect);
+        Capture_SetAllMonitors(capture);
+    } else {
+        if (!Capture_GetMonitorBoundsByIndex(state->monitorIndex, outRect)) {
+            POINT pt = {0, 0};
+            Capture_GetMonitorFromPoint(pt, outRect, NULL);
+        }
+        Capture_SetMonitor(capture, state->monitorIndex);
+    }
+    
+    return !IsRectEmpty(outRect);
+}
+
+/**
+ * Apply aspect ratio adjustment to capture rectangle.
+ * Crops the capture region to match the configured aspect ratio.
+ * 
+ * @param rect   Rectangle to adjust (in/out)
+ * @param width  Width to update (in/out)
+ * @param height Height to update (in/out)
+ */
+static void ApplyAspectRatioAdjustment(RECT* rect, int* width, int* height) {
+    if (g_config.replayAspectRatio <= 0) return;
+    
+    int ratioW = 0, ratioH = 0;
+    Util_GetAspectRatioDimensions(g_config.replayAspectRatio, &ratioW, &ratioH);
+    
+    if (ratioW > 0 && ratioH > 0) {
+        int oldW = *width, oldH = *height;
+        
+        /* Use utility to calculate aspect-corrected rect */
+        *rect = Util_CalculateAspectRect(*rect, ratioW, ratioH);
+        *width = rect->right - rect->left;
+        *height = rect->bottom - rect->top;
+        
+        ReplayLog("Aspect ratio %d:%d applied: %dx%d -> %dx%d\n",
+                  ratioW, ratioH, oldW, oldH, *width, *height);
+    }
+}
+
+/**
+ * Initialize video encoding pipeline (GPU converter + NVENC).
+ * Creates the color converter and hardware encoder.
+ * 
+ * @param capture      Capture state with D3D11 device
+ * @param video        Video state to initialize
+ * @param gpuConverter GPU converter to initialize
+ * @param width        Frame width
+ * @param height       Frame height
+ * @param fps          Target frame rate
+ * @return TRUE if pipeline initialized successfully
+ */
+static BOOL InitVideoPipeline(CaptureState* capture, ReplayVideoState* video, 
+                               GPUConverter* gpuConverter, int width, int height, int fps) {
+    /* Initialize GPU color converter (BGRA → NV12 on GPU) */
+    if (!GPUConverter_Init(gpuConverter, capture->device, width, height)) {
+        ReplayLog("GPUConverter_Init failed - GPU color conversion required!\n");
+        return FALSE;
+    }
+    ReplayLog("GPU color converter initialized (D3D11 Video Processor)\n");
+    
+    /* Initialize NVENC HEVC encoder with D3D11 device (native API) */
+    ReplayLog("Creating NVENCEncoder (%dx%d @ %d fps, quality=%d)...\n", 
+              width, height, fps, g_config.quality);
+    video->encoder = NVENCEncoder_Create(capture->device, width, height, fps, g_config.quality);
+    if (!video->encoder) {
+        ReplayLog("NVENCEncoder_Create failed - NVIDIA GPU with NVENC required!\n");
+        GPUConverter_Shutdown(gpuConverter);
+        return FALSE;
+    }
+    ReplayLog("NVENC HEVC hardware encoder initialized (native API)\n");
+    
+    /* Extract HEVC sequence header (VPS/SPS/PPS) for MP4 muxing */
+    if (NVENCEncoder_GetSequenceHeader(video->encoder, video->seqHeader, 
+                                        sizeof(video->seqHeader), &video->seqHeaderSize)) {
+        ReplayLog("HEVC sequence header extracted (%u bytes)\n", video->seqHeaderSize);
+    } else {
+        ReplayLog("WARNING: Failed to get HEVC sequence header - muxing may fail!\n");
+        video->seqHeaderSize = 0;
+    }
+    
+    /* Initialize sample buffer */
+    if (!SampleBuffer_Init(&video->sampleBuffer, g_config.replayDuration, fps, 
+                           width, height, g_config.quality)) {
+        ReplayLog("SampleBuffer_Init failed\n");
+        NVENCEncoder_Destroy(video->encoder);
+        video->encoder = NULL;
+        GPUConverter_Shutdown(gpuConverter);
+        return FALSE;
+    }
+    
+    /* Set encoder callback for async mode */
+    NVENCEncoder_SetCallback(video->encoder, DrainCallback, &video->sampleBuffer);
+    
+    /* Pass sequence header to sample buffer */
+    if (video->seqHeaderSize > 0) {
+        SampleBuffer_SetSequenceHeader(&video->sampleBuffer, video->seqHeader, video->seqHeaderSize);
+    }
+    
+    ReplayLog("Sample buffer initialized (max %ds)\n", g_config.replayDuration);
+    return TRUE;
+}
+
+/**
+ * Initialize audio capture pipeline (WASAPI + AAC encoder).
+ * Creates audio capture and encoder if audio sources are configured.
+ * 
+ * @param state Replay buffer state with audio configuration
+ * @param audio Audio state to initialize
+ * @return TRUE if audio is active and ready
+ */
+static BOOL InitAudioPipeline(ReplayBufferState* state, ReplayAudioState* audio) {
+    if (!state->audioEnabled) return FALSE;
+    if (!state->audioSource1[0] && !state->audioSource2[0] && !state->audioSource3[0]) return FALSE;
+    
+    ReplayLog("Audio capture enabled, sources: [%s] [%s] [%s]\n",
+              state->audioSource1[0] ? state->audioSource1 : "none",
+              state->audioSource2[0] ? state->audioSource2 : "none",
+              state->audioSource3[0] ? state->audioSource3 : "none");
+    
+    audio->capture = AudioCapture_Create(
+        state->audioSource1, state->audioVolume1,
+        state->audioSource2, state->audioVolume2,
+        state->audioSource3, state->audioVolume3
+    );
+    
+    if (!audio->capture) {
+        ReplayLog("AudioCapture_Create failed\n");
+        return FALSE;
+    }
+    
+    audio->encoder = AACEncoder_Create();
+    if (!audio->encoder) {
+        ReplayLog("AACEncoder_Create failed\n");
+        AudioCapture_Destroy(audio->capture);
+        audio->capture = NULL;
+        return FALSE;
+    }
+    
+    AACEncoder_SetCallback(audio->encoder, AudioEncoderCallback, audio);
+    
+    /* Set audio max duration to match video buffer (in 100-ns units) */
+    audio->maxDuration = (LONGLONG)g_config.replayDuration * 10000000LL;
+    ReplayLog("Audio eviction enabled: max duration = %ds\n", g_config.replayDuration);
+    
+    /* Get AAC config for muxer */
+    AACEncoder_GetConfig(audio->encoder, &audio->configData, &audio->configSize);
+    
+    if (!AudioCapture_Start(audio->capture)) {
+        ReplayLog("AudioCapture_Start failed\n");
+        AACEncoder_Destroy(audio->encoder);
+        AudioCapture_Destroy(audio->capture);
+        audio->encoder = NULL;
+        audio->capture = NULL;
+        return FALSE;
+    }
+    
+    ReplayLog("Audio capture started successfully\n");
+    return TRUE;
+}
+
+/**
+ * Shutdown audio pipeline and release resources.
+ * 
+ * @param audio Audio state to shut down
+ */
+static void ShutdownAudioPipeline(ReplayAudioState* audio) {
+    if (audio->capture) {
+        AudioCapture_Stop(audio->capture);
+        AudioCapture_Destroy(audio->capture);
+        audio->capture = NULL;
+    }
+    if (audio->encoder) {
+        AACEncoder_Destroy(audio->encoder);
+        audio->encoder = NULL;
+    }
+    ReplayLog("Audio capture stopped\n");
+}
+
+/**
+ * Shutdown video pipeline and release resources.
+ * 
+ * @param video        Video state to shut down
+ * @param gpuConverter GPU converter to shut down
+ */
+static void ShutdownVideoPipeline(ReplayVideoState* video, GPUConverter* gpuConverter) {
+    GPUConverter_Shutdown(gpuConverter);
+    
+    if (video->encoder) {
+        /* Flush remaining frames */
+        EncodedFrame flushed = {0};
+        while (NVENCEncoder_Flush(video->encoder, &flushed)) {
+            SampleBuffer_Add(&video->sampleBuffer, &flushed);
+        }
+        
+        NVENCEncoder_Destroy(video->encoder);
+        video->encoder = NULL;
+    }
+    SampleBuffer_Shutdown(&video->sampleBuffer);
+}
+
+/**
+ * Deep copy audio samples for muxing.
+ * Creates independent copies of audio data that can be freed after muxing.
+ * 
+ * @param audio      Audio state to copy from (locked externally)
+ * @param outCopy    Output array pointer
+ * @param outCount   Output sample count
+ * @return TRUE if copy succeeded (may be 0 samples if none available)
+ */
+static BOOL CopyAudioSamplesForMuxing(ReplayAudioState* audio, MuxerAudioSample** outCopy, int* outCount) {
+    *outCopy = NULL;
+    *outCount = 0;
+    
+    if (audio->sampleCount <= 0 || !audio->samples || 
+        !audio->configData || audio->configSize <= 0) {
+        return TRUE;  /* No audio - not an error */
+    }
+    
+    int audioCount = audio->sampleCount;
+    
+    /* Overflow check */
+    size_t allocSize = (size_t)audioCount * sizeof(MuxerAudioSample);
+    if (allocSize / sizeof(MuxerAudioSample) != (size_t)audioCount) {
+        ReplayLog("WARNING: Audio allocation overflow, skipping audio\n");
+        return TRUE;
+    }
+    
+    MuxerAudioSample* audioCopy = (MuxerAudioSample*)malloc(allocSize);
+    if (!audioCopy) return TRUE;
+    
+    LONGLONG firstAudioTs = audio->samples[0].timestamp;
+    int copiedCount = 0;
+    
+    for (int i = 0; i < audioCount; i++) {
+        audioCopy[i].data = (BYTE*)malloc(audio->samples[i].size);
+        if (audioCopy[i].data) {
+            memcpy(audioCopy[i].data, audio->samples[i].data, audio->samples[i].size);
+            audioCopy[i].size = audio->samples[i].size;
+            audioCopy[i].timestamp = audio->samples[i].timestamp - firstAudioTs;
+            audioCopy[i].duration = audio->samples[i].duration;
+            copiedCount++;
+        } else {
+            /* malloc failed - free all previous copies and abort */
+            ReplayLog("WARNING: Audio copy malloc failed at sample %d/%d\n", i, audioCount);
+            for (int j = 0; j < i; j++) {
+                if (audioCopy[j].data) free(audioCopy[j].data);
+            }
+            free(audioCopy);
+            return TRUE;  /* Continue without audio */
+        }
+    }
+    
+    *outCopy = audioCopy;
+    *outCount = copiedCount;
+    return TRUE;
+}
+
+/**
+ * Free audio sample copies created by CopyAudioSamplesForMuxing.
+ * 
+ * @param samples   Array to free
+ * @param count     Number of samples
+ */
+static void FreeAudioSampleCopies(MuxerAudioSample* samples, int count) {
+    if (!samples) return;
+    for (int i = 0; i < count; i++) {
+        if (samples[i].data) free(samples[i].data);
+    }
+    free(samples);
+}
+
+/**
+ * Handle save request - muxes buffered video and audio to file.
+ * Called when save event is signaled during capture loop.
+ * 
+ * @param state      Replay buffer state with output path
+ * @param video      Video state with sample buffer
+ * @param audio      Audio state with samples
+ * @return TRUE if save succeeded
+ */
+static BOOL HandleSaveRequest(ReplayBufferState* state, ReplayVideoState* video, 
+                               ReplayAudioState* audio) {
+    BOOL ok = FALSE;
+    MuxerAudioSample* audioCopy = NULL;
+    int audioCount = 0;
+    
+    /* Copy audio samples while holding lock */
+    EnterCriticalSection(&audio->lock);
+    CopyAudioSamplesForMuxing(audio, &audioCopy, &audioCount);
+    LeaveCriticalSection(&audio->lock);
+    
+    /* Get video samples */
+    MuxerSample* videoSamples = NULL;
+    int videoCount = 0;
+    
+    if (!SampleBuffer_GetSamplesForMuxing(&video->sampleBuffer, &videoSamples, &videoCount)) {
+        ReplayLog("  SampleBuffer_GetSamplesForMuxing failed\n");
+        FreeAudioSampleCopies(audioCopy, audioCount);
+        return FALSE;
+    }
+    
+    /* Build video config */
+    MuxerConfig videoConfig;
+    videoConfig.width = video->sampleBuffer.width;
+    videoConfig.height = video->sampleBuffer.height;
+    videoConfig.fps = video->sampleBuffer.fps;
+    videoConfig.quality = video->sampleBuffer.quality;
+    videoConfig.seqHeader = video->sampleBuffer.seqHeaderSize > 0 ? video->sampleBuffer.seqHeader : NULL;
+    videoConfig.seqHeaderSize = video->sampleBuffer.seqHeaderSize;
+    
+    /* Mux to file */
+    if (audioCopy && audioCount > 0) {
+        ReplayLog("  Starting save (audio+video path, %d audio samples)...\n", audioCount);
+        MuxerAudioConfig audioConfig;
+        audioConfig.sampleRate = AAC_SAMPLE_RATE;
+        audioConfig.channels = AAC_CHANNELS;
+        audioConfig.bitrate = AAC_BITRATE;
+        audioConfig.configData = audio->configData;
+        audioConfig.configSize = audio->configSize;
+        
+        ok = MP4Muxer_WriteFileWithAudio(state->savePath, 
+                                         videoSamples, videoCount, &videoConfig,
+                                         audioCopy, audioCount, &audioConfig);
+    } else {
+        ReplayLog("  Starting save (video-only path)...\n");
+        ok = MP4Muxer_WriteFile(state->savePath, videoSamples, videoCount, &videoConfig);
+    }
+    
+    /* Free video samples */
+    for (int i = 0; i < videoCount; i++) {
+        if (videoSamples[i].data) free(videoSamples[i].data);
+    }
+    free(videoSamples);
+    
+    /* Free audio copy */
+    FreeAudioSampleCopies(audioCopy, audioCount);
+    
+    ReplayLog("SAVE %s\n", ok ? "OK" : "FAILED");
+    return ok;
+}
+
+/* ============================================================================
  * CAPTURE THREAD
  * ============================================================================ */
 
@@ -495,19 +854,13 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     ReplayLog("Config: replayFPS=%d, replayAspectRatio=%d, quality=%d\n",
               g_config.replayFPS, g_config.replayAspectRatio, g_config.quality);
     
-    // Setup capture
+    /* Setup capture region */
     CaptureState* capture = &g_capture;
     RECT rect = {0};
     
-    if (state->captureSource == MODE_ALL_MONITORS) {
-        Capture_GetAllMonitorsBounds(&rect);
-        Capture_SetAllMonitors(capture);
-    } else {
-        if (!Capture_GetMonitorBoundsByIndex(state->monitorIndex, &rect)) {
-            POINT pt = {0, 0};
-            Capture_GetMonitorFromPoint(pt, &rect, NULL);
-        }
-        Capture_SetMonitor(capture, state->monitorIndex);
+    if (!InitCaptureRegion(state, capture, &rect)) {
+        ReplayLog("InitCaptureRegion failed\n");
+        return 1;
     }
     
     int width = rect.right - rect.left;
@@ -516,23 +869,8 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     ReplayLog("Raw monitor bounds: %dx%d (rect: %d,%d,%d,%d)\n", 
               width, height, rect.left, rect.top, rect.right, rect.bottom);
     
-    // Apply aspect ratio adjustment if set
-    if (g_config.replayAspectRatio > 0) {
-        int ratioW = 0, ratioH = 0;
-        Util_GetAspectRatioDimensions(g_config.replayAspectRatio, &ratioW, &ratioH);
-        
-        if (ratioW > 0 && ratioH > 0) {
-            int oldW = width, oldH = height;
-            
-            // Use utility to calculate aspect-corrected rect
-            rect = Util_CalculateAspectRect(rect, ratioW, ratioH);
-            width = rect.right - rect.left;
-            height = rect.bottom - rect.top;
-            
-            ReplayLog("Aspect ratio %d:%d applied: %dx%d -> %dx%d\n",
-                      ratioW, ratioH, oldW, oldH, width, height);
-        }
-    }
+    /* Apply aspect ratio adjustment if configured */
+    ApplyAspectRatioAdjustment(&rect, &width, &height);
     
     if (width <= 0 || height <= 0) {
         ReplayLog("Invalid capture size: %dx%d\n", width, height);
@@ -556,95 +894,17 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     ReplayLog("Final capture params: %dx%d @ %d FPS, duration=%ds, quality=%d\n", 
               width, height, fps, g_config.replayDuration, g_config.quality);
     
-    // Initialize GPU color converter (BGRA → NV12 on GPU)
+    /* Initialize video encoding pipeline */
     GPUConverter gpuConverter = {0};
-    if (!GPUConverter_Init(&gpuConverter, capture->device, width, height)) {
-        ReplayLog("GPUConverter_Init failed - GPU color conversion required!\n");
-        return 1;
-    }
-    ReplayLog("GPU color converter initialized (D3D11 Video Processor)\n");
-    
-    /* Initialize NVENC HEVC encoder with D3D11 device (native API) */
     ReplayVideoState* video = &g_internal.video;
-    ReplayLog("Creating NVENCEncoder (%dx%d @ %d fps, quality=%d)...\n", width, height, fps, g_config.quality);
-    video->encoder = NVENCEncoder_Create(capture->device, width, height, fps, g_config.quality);
-    if (!video->encoder) {
-        ReplayLog("NVENCEncoder_Create failed - NVIDIA GPU with NVENC required!\n");
-        GPUConverter_Shutdown(&gpuConverter);
+    
+    if (!InitVideoPipeline(capture, video, &gpuConverter, width, height, fps)) {
         return 1;
     }
-    ReplayLog("NVENC HEVC hardware encoder initialized (native API)\n");
-    
-    /* Extract HEVC sequence header (VPS/SPS/PPS) for MP4 muxing */
-    if (NVENCEncoder_GetSequenceHeader(video->encoder, video->seqHeader, sizeof(video->seqHeader), &video->seqHeaderSize)) {
-        ReplayLog("HEVC sequence header extracted (%u bytes)\n", video->seqHeaderSize);
-    } else {
-        ReplayLog("WARNING: Failed to get HEVC sequence header - muxing may fail!\n");
-        video->seqHeaderSize = 0;
-    };
-    
-    /* Initialize sample buffer BEFORE setting encoder callback
-     * (callback needs valid buffer pointer) */
-    if (!SampleBuffer_Init(&video->sampleBuffer, g_config.replayDuration, fps, 
-                           width, height, g_config.quality)) {
-        ReplayLog("SampleBuffer_Init failed\n");
-        NVENCEncoder_Destroy(video->encoder);
-        video->encoder = NULL;
-        GPUConverter_Shutdown(&gpuConverter);
-        return 1;
-    }
-    
-    /* Set encoder callback to receive completed frames (async mode)
-     * The output thread will call DrainCallback when frames complete */
-    NVENCEncoder_SetCallback(video->encoder, DrainCallback, &video->sampleBuffer);
-    
-    /* Pass sequence header to sample buffer for video-only saves */
-    if (video->seqHeaderSize > 0) {
-        SampleBuffer_SetSequenceHeader(&video->sampleBuffer, video->seqHeader, video->seqHeaderSize);
-    }
-    
-    ReplayLog("Sample buffer initialized (max %ds)\n", g_config.replayDuration);
     
     /* Initialize audio capture if enabled */
     ReplayAudioState* audio = &g_internal.audio;
-    BOOL audioActive = FALSE;
-    if (state->audioEnabled && (state->audioSource1[0] || state->audioSource2[0] || state->audioSource3[0])) {
-        ReplayLog("Audio capture enabled, sources: [%s] [%s] [%s]\n",
-                  state->audioSource1[0] ? state->audioSource1 : "none",
-                  state->audioSource2[0] ? state->audioSource2 : "none",
-                  state->audioSource3[0] ? state->audioSource3 : "none");
-        
-        audio->capture = AudioCapture_Create(
-            state->audioSource1, state->audioVolume1,
-            state->audioSource2, state->audioVolume2,
-            state->audioSource3, state->audioVolume3
-        );
-        
-        if (audio->capture) {
-            audio->encoder = AACEncoder_Create();
-            if (audio->encoder) {
-                AACEncoder_SetCallback(audio->encoder, AudioEncoderCallback, audio);
-                
-                /* Set audio max duration to match video buffer (in 100-ns units) */
-                audio->maxDuration = (LONGLONG)g_config.replayDuration * 10000000LL;
-                ReplayLog("Audio eviction enabled: max duration = %ds\n", g_config.replayDuration);
-                
-                /* Get AAC config for muxer */
-                AACEncoder_GetConfig(audio->encoder, &audio->configData, &audio->configSize);
-                
-                if (AudioCapture_Start(audio->capture)) {
-                    audioActive = TRUE;
-                    ReplayLog("Audio capture started successfully\n");
-                } else {
-                    ReplayLog("AudioCapture_Start failed\n");
-                }
-            } else {
-                ReplayLog("AACEncoder_Create failed\n");
-            }
-        } else {
-            ReplayLog("AudioCapture_Create failed\n");
-        }
-    }
+    BOOL audioActive = InitAudioPipeline(state, audio);
     
     // Timing - use floating point for precise frame intervals
     double frameIntervalMs = 1000.0 / (double)fps;  // 16.667ms for 60fps
@@ -707,110 +967,8 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
             ReplayLog("  Actual capture rate: %.2f fps (target: %d fps)\n", actualFPS, fps);
             ReplayLog("  Output path: %s\n", state->savePath);
             
-            /* Write buffer to file (with audio if available) */
-            BOOL ok = FALSE;
-            
-            EnterCriticalSection(&audio->lock);
-            int audioCount = audio->sampleCount;
-            MuxerAudioSample* audioCopy = NULL;
-            
-            if (audioCount > 0 && audio->samples && audio->configData && audio->configSize > 0) {
-                /* Deep copy audio samples with overflow check */
-                size_t allocSize = (size_t)audioCount * sizeof(MuxerAudioSample);
-                if (allocSize / sizeof(MuxerAudioSample) != (size_t)audioCount) {
-                    ReplayLog("WARNING: Audio allocation overflow, skipping audio\n");
-                    audioCount = 0;
-                } else {
-                    audioCopy = (MuxerAudioSample*)malloc(allocSize);
-                }
-                if (audioCopy) {
-                    LONGLONG firstAudioTs = audio->samples[0].timestamp;
-                    int copiedCount = 0;
-                    BOOL copyFailed = FALSE;
-                    
-                    for (int i = 0; i < audioCount; i++) {
-                        audioCopy[i].data = (BYTE*)malloc(audio->samples[i].size);
-                        if (audioCopy[i].data) {
-                            memcpy(audioCopy[i].data, audio->samples[i].data, audio->samples[i].size);
-                            audioCopy[i].size = audio->samples[i].size;
-                            audioCopy[i].timestamp = audio->samples[i].timestamp - firstAudioTs;
-                            audioCopy[i].duration = audio->samples[i].duration;
-                            copiedCount++;
-                        } else {
-                            /* malloc failed - free all previous copies and abort */
-                            ReplayLog("WARNING: Audio copy malloc failed at sample %d/%d\n", i, audioCount);
-                            for (int j = 0; j < i; j++) {
-                                if (audioCopy[j].data) free(audioCopy[j].data);
-                            }
-                            free(audioCopy);
-                            audioCopy = NULL;
-                            copyFailed = TRUE;
-                            break;
-                        }
-                    }
-                    
-                    /* Update audioCount to reflect actual copied samples */
-                    if (!copyFailed) {
-                        audioCount = copiedCount;
-                    } else {
-                        audioCount = 0;
-                    }
-                }
-            }
-            LeaveCriticalSection(&audio->lock);
-            
-            /* Get video samples */
-            MuxerSample* videoSamples = NULL;
-            int videoCount = 0;
-            if (SampleBuffer_GetSamplesForMuxing(&video->sampleBuffer, &videoSamples, &videoCount)) {
-                /* Build video config */
-                MuxerConfig videoConfig;
-                videoConfig.width = video->sampleBuffer.width;
-                videoConfig.height = video->sampleBuffer.height;
-                videoConfig.fps = video->sampleBuffer.fps;
-                videoConfig.quality = video->sampleBuffer.quality;
-                videoConfig.seqHeader = video->sampleBuffer.seqHeaderSize > 0 ? video->sampleBuffer.seqHeader : NULL;
-                videoConfig.seqHeaderSize = video->sampleBuffer.seqHeaderSize;
-                
-                if (audioCopy && audioCount > 0) {
-                    /* Mux with audio */
-                    ReplayLog("  Starting save (audio+video path, %d audio samples)...\n", audioCount);
-                    MuxerAudioConfig audioConfig;
-                    audioConfig.sampleRate = AAC_SAMPLE_RATE;
-                    audioConfig.channels = AAC_CHANNELS;
-                    audioConfig.bitrate = AAC_BITRATE;
-                    audioConfig.configData = audio->configData;
-                    audioConfig.configSize = audio->configSize;
-                    
-                    ok = MP4Muxer_WriteFileWithAudio(state->savePath, 
-                                                     videoSamples, videoCount, &videoConfig,
-                                                     audioCopy, audioCount, &audioConfig);
-                } else {
-                    /* Video only */
-                    ReplayLog("  Starting save (video-only path)...\n");
-                    ok = MP4Muxer_WriteFile(state->savePath, videoSamples, videoCount, &videoConfig);
-                }
-                
-                /* Free video samples */
-                for (int i = 0; i < videoCount; i++) {
-                    if (videoSamples[i].data) free(videoSamples[i].data);
-                }
-                free(videoSamples);
-            } else {
-                ReplayLog("  SampleBuffer_GetSamplesForMuxing failed\n");
-            }
-            
-            /* Free audio copy */
-            if (audioCopy) {
-                for (int i = 0; i < audioCount; i++) {
-                    if (audioCopy[i].data) free(audioCopy[i].data);
-                }
-                free(audioCopy);
-            }
-            
-            ReplayLog("SAVE %s\n", ok ? "OK" : "FAILED");
-            
-            state->saveSuccess = ok;
+            /* Use helper function for save operation */
+            state->saveSuccess = HandleSaveRequest(state, video, audio);
             SetEvent(state->hSaveCompleteEvent);
             continue;  /* Skip frame capture this iteration */
         }
@@ -998,34 +1156,11 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     /* Restore timer resolution */
     timeEndPeriod(1);
     
-    /* Shutdown GPU converter */
-    GPUConverter_Shutdown(&gpuConverter);
-    
-    /* Stop audio capture */
+    /* Shutdown pipelines using helper functions */
     if (audioActive) {
-        if (audio->capture) {
-            AudioCapture_Stop(audio->capture);
-            AudioCapture_Destroy(audio->capture);
-            audio->capture = NULL;
-        }
-        if (audio->encoder) {
-            AACEncoder_Destroy(audio->encoder);
-            audio->encoder = NULL;
-        }
-        ReplayLog("Audio capture stopped\n");
+        ShutdownAudioPipeline(audio);
     }
-    
-    /* Flush encoder */
-    if (video->encoder) {
-        EncodedFrame flushed = {0};
-        while (NVENCEncoder_Flush(video->encoder, &flushed)) {
-            SampleBuffer_Add(&video->sampleBuffer, &flushed);
-        }
-        
-        NVENCEncoder_Destroy(video->encoder);
-        video->encoder = NULL;
-    }
-    SampleBuffer_Shutdown(&video->sampleBuffer);
+    ShutdownVideoPipeline(video, &gpuConverter);
     
     ReplayLog("BufferThread exit\n");
     return 0;

@@ -1796,6 +1796,177 @@ static int g_hoveredButton = 0;
 static HFONT g_uiFont = NULL;
 static HFONT g_iconFont = NULL;
 
+/* ============================================================================
+ * CONTROL PANEL WM_DRAWITEM HELPERS
+ * ============================================================================
+ * These functions extract the owner-draw button painting logic from the
+ * large WM_DRAWITEM handler for better readability and maintainability.
+ */
+
+/**
+ * Draw a mode button (Capture Area, Capture Window, etc.) with selection state.
+ */
+static void DrawModeButton(LPDRAWITEMSTRUCT dis, BOOL isSelected, BOOL isHovered) {
+    COLORREF bgColor, borderColor;
+    
+    if (isSelected) {
+        bgColor = RGB(0, 95, 184);     /* Windows blue for selected */
+        borderColor = RGB(0, 120, 215);
+    } else if (isHovered || (dis->itemState & ODS_SELECTED)) {
+        bgColor = RGB(55, 55, 55);     /* Hover color */
+        borderColor = RGB(80, 80, 80);
+    } else {
+        bgColor = RGB(32, 32, 32);     /* Normal background */
+        borderColor = RGB(80, 80, 80);
+    }
+    
+    DrawRoundedRectAA(dis->hDC, &dis->rcItem, 6, bgColor, borderColor);
+    
+    /* Draw text */
+    SelectObject(dis->hDC, g_uiFont);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, RGB(255, 255, 255));
+    
+    WCHAR text[64];
+    GetWindowTextW(dis->hwndItem, text, 64);
+    RECT textRect = dis->rcItem;
+    DrawTextW(dis->hDC, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+}
+
+/**
+ * Draw the record button (red circle when idle, white square when recording).
+ */
+static void DrawRecordButton(LPDRAWITEMSTRUCT dis, BOOL isRecording) {
+    int cx = (dis->rcItem.left + dis->rcItem.right) / 2;
+    int cy = (dis->rcItem.top + dis->rcItem.bottom) / 2;
+    
+    if (isRecording) {
+        /* White square (stop icon) */
+        HBRUSH iconBrush = CreateSolidBrush(RGB(255, 255, 255));
+        RECT stopRect = { cx - 4, cy - 4, cx + 4, cy + 4 };
+        FillRect(dis->hDC, &stopRect, iconBrush);
+        DeleteObject(iconBrush);
+    } else {
+        /* Red filled circle (record icon) */
+        DrawCircleAA(dis->hDC, cx, cy, 6, RGB(220, 50, 50));
+    }
+}
+
+/**
+ * Draw an icon button using Segoe MDL2 Assets font.
+ * @param dis     Draw item struct
+ * @param icon    Unicode character for the icon (e.g., L"\uE713" for gear)
+ * @param size    Font size
+ */
+static void DrawMDL2IconButton(LPDRAWITEMSTRUCT dis, LPCWSTR icon, int size) {
+    HFONT mdl2Font = CreateFontW(size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe MDL2 Assets");
+    HFONT oldFont = (HFONT)SelectObject(dis->hDC, mdl2Font);
+    SetBkMode(dis->hDC, TRANSPARENT);
+    SetTextColor(dis->hDC, RGB(150, 150, 150));
+    DrawTextW(dis->hDC, icon, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(dis->hDC, oldFont);
+    DeleteObject(mdl2Font);
+}
+
+/**
+ * Draw the recording panel with timer and stop button.
+ * Contains red dot + elapsed time on left, stop button on right.
+ */
+static void DrawRecordingPanel(LPDRAWITEMSTRUCT dis, const char* timerText) {
+    RECT rect = dis->rcItem;
+    int width = rect.right - rect.left;
+    int centerX = width / 2;
+    
+    /* Check hover state */
+    POINT pt;
+    GetCursorPos(&pt);
+    ScreenToClient(dis->hwndItem, &pt);
+    BOOL isHover = PtInRect(&rect, pt);
+    
+    /* Background - slightly lighter on hover */
+    COLORREF btnBgColor = isHover ? RGB(48, 48, 48) : RGB(32, 32, 32);
+    HBRUSH bgBrush = CreateSolidBrush(btnBgColor);
+    FillRect(dis->hDC, &rect, bgBrush);
+    DeleteObject(bgBrush);
+    
+    /* Draw rounded border */
+    HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(80, 80, 80));
+    HPEN oldPen = (HPEN)SelectObject(dis->hDC, borderPen);
+    HBRUSH oldBrush = (HBRUSH)SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
+    RoundRect(dis->hDC, rect.left, rect.top, rect.right, rect.bottom, 6, 6);
+    SelectObject(dis->hDC, oldPen);
+    SelectObject(dis->hDC, oldBrush);
+    DeleteObject(borderPen);
+    
+    /* Measure timer text width */
+    SelectObject(dis->hDC, g_uiFont);
+    SIZE timerSize;
+    GetTextExtentPoint32A(dis->hDC, timerText, (int)strlen(timerText), &timerSize);
+    int dotSize = 8;
+    int dotGap = 6;
+    int leftContentWidth = dotSize + dotGap + timerSize.cx;
+    int leftStartX = rect.left + (centerX - leftContentWidth) / 2;
+    
+    /* Draw anti-aliased red recording dot using GDI+ */
+    if (g_gdip.CreateFromHDC && g_gdip.SetSmoothingMode && g_gdip.CreateSolidFill && 
+        g_gdip.FillEllipse && g_gdip.BrushDelete && g_gdip.DeleteGraphics) {
+        GpGraphics* graphics = NULL;
+        g_gdip.CreateFromHDC(dis->hDC, &graphics);
+        if (graphics) {
+            g_gdip.SetSmoothingMode(graphics, 4);
+            GpBrush* redBrush = NULL;
+            g_gdip.CreateSolidFill(0xFFEA4335, &redBrush);
+            if (redBrush) {
+                int dotY = (rect.top + rect.bottom - dotSize) / 2;
+                g_gdip.FillEllipse(graphics, redBrush, (float)leftStartX, (float)dotY, 
+                                   (float)dotSize, (float)dotSize);
+                g_gdip.BrushDelete(redBrush);
+            }
+            g_gdip.DeleteGraphics(graphics);
+        }
+    }
+    
+    /* Draw timer text */
+    SetBkMode(dis->hDC, TRANSPARENT);
+    COLORREF textColor = isHover ? RGB(230, 230, 230) : RGB(200, 200, 200);
+    SetTextColor(dis->hDC, textColor);
+    
+    RECT timerRect = rect;
+    timerRect.left = leftStartX + dotSize + dotGap;
+    timerRect.right = rect.left + centerX;
+    DrawTextA(dis->hDC, timerText, -1, &timerRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+    
+    /* Draw vertical divider at center */
+    HPEN dividerPen = CreatePen(PS_SOLID, 1, RGB(80, 80, 80));
+    SelectObject(dis->hDC, dividerPen);
+    MoveToEx(dis->hDC, rect.left + centerX, rect.top + 6, NULL);
+    LineTo(dis->hDC, rect.left + centerX, rect.bottom - 6);
+    DeleteObject(dividerPen);
+    
+    /* Right half: red stop square + "Stop" (centered) */
+    SIZE stopSize;
+    GetTextExtentPoint32A(dis->hDC, "Stop", 4, &stopSize);
+    int stopSquareSize = 8;
+    int stopGap = 6;
+    int rightContentWidth = stopSquareSize + stopGap + stopSize.cx;
+    int rightStartX = rect.left + centerX + (centerX - rightContentWidth) / 2;
+    
+    /* Draw red stop square */
+    int stopSquareY = (rect.top + rect.bottom - stopSquareSize) / 2;
+    HBRUSH stopBrush = CreateSolidBrush(RGB(234, 67, 53));
+    RECT stopSquareRect = { rightStartX, stopSquareY, rightStartX + stopSquareSize, stopSquareY + stopSquareSize };
+    FillRect(dis->hDC, &stopSquareRect, stopBrush);
+    DeleteObject(stopBrush);
+    
+    /* Draw "Stop" text */
+    RECT stopTextRect = rect;
+    stopTextRect.left = rightStartX + stopSquareSize + stopGap;
+    stopTextRect.right = rect.right - 4;
+    DrawTextA(dis->hDC, "Stop", -1, &stopTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
+}
+
 // Control panel window procedure
 static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
@@ -2182,181 +2353,38 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             
             // Draw text for mode buttons (no icon, just centered text)
             if (isModeButton) {
-                SelectObject(dis->hDC, g_uiFont);
-                SetBkMode(dis->hDC, TRANSPARENT);
-                SetTextColor(dis->hDC, RGB(255, 255, 255));
-                
-                // Get button text
-                WCHAR text[64];
-                GetWindowTextW(dis->hwndItem, text, 64);
-                
-                // Draw centered text
-                RECT textRect = dis->rcItem;
-                DrawTextW(dis->hDC, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                
+                DrawModeButton(dis, isSelected, isHovered);
                 return TRUE;
             }
             
             // Record button
             if (ctlId == ID_BTN_RECORD) {
-                int cx = (dis->rcItem.left + dis->rcItem.right) / 2;
-                int cy = (dis->rcItem.top + dis->rcItem.bottom) / 2;
-                
-                // Thread-safe check for recording state
-                if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
-                    // White square (stop icon)
-                    HBRUSH iconBrush = CreateSolidBrush(RGB(255, 255, 255));
-                    RECT stopRect = { cx - 4, cy - 4, cx + 4, cy + 4 };
-                    FillRect(dis->hDC, &stopRect, iconBrush);
-                    DeleteObject(iconBrush);
-                } else {
-                    // Red filled circle (record icon) - use anti-aliased circle
-                    DrawCircleAA(dis->hDC, cx, cy, 6, RGB(220, 50, 50));
-                }
+                BOOL isRecording = InterlockedCompareExchange(&g_isRecording, 0, 0) != 0;
+                DrawRecordButton(dis, isRecording);
                 return TRUE;
             }
             
-            // Minimize button - use Segoe MDL2 Assets icon font (Windows 10/11 style)
+            // Minimize button - use Segoe MDL2 Assets icon font
             if (ctlId == ID_BTN_MINIMIZE) {
-                // Create MDL2 font for Windows icons
-                HFONT mdl2Font = CreateFontW(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                    CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe MDL2 Assets");
-                HFONT oldFont = (HFONT)SelectObject(dis->hDC, mdl2Font);
-                SetBkMode(dis->hDC, TRANSPARENT);
-                SetTextColor(dis->hDC, RGB(150, 150, 150));
-                // U+E921 = ChromeMinimize icon in Segoe MDL2 Assets
-                DrawTextW(dis->hDC, L"\uE921", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                SelectObject(dis->hDC, oldFont);
-                DeleteObject(mdl2Font);
+                DrawMDL2IconButton(dis, L"\uE921", 12);  /* ChromeMinimize */
                 return TRUE;
             }
             
-            // Settings button - use Segoe MDL2 Assets gear icon (Windows 10/11 style)
+            // Settings button - use Segoe MDL2 Assets gear icon
             if (ctlId == ID_BTN_SETTINGS) {
-                // Create MDL2 font for Windows icons
-                HFONT mdl2Font = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                    CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe MDL2 Assets");
-                HFONT oldFont = (HFONT)SelectObject(dis->hDC, mdl2Font);
-                SetBkMode(dis->hDC, TRANSPARENT);
-                SetTextColor(dis->hDC, RGB(150, 150, 150));
-                // U+E713 = Settings gear icon in Segoe MDL2 Assets
-                DrawTextW(dis->hDC, L"\uE713", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                SelectObject(dis->hDC, oldFont);
-                DeleteObject(mdl2Font);
+                DrawMDL2IconButton(dis, L"\uE713", 14);  /* Settings gear */
                 return TRUE;
             }
             
             // Recording panel (inline timer + stop button)
             if (ctlId == ID_RECORDING_PANEL) {
-                RECT rect = dis->rcItem;
-                int width = rect.right - rect.left;
-                int centerX = width / 2;  // Divider at center (50/50 split)
-                
-                // Check hover state
-                POINT pt;
-                GetCursorPos(&pt);
-                ScreenToClient(dis->hwndItem, &pt);
-                BOOL isHover = PtInRect(&rect, pt);
-                
-                // Background - slightly lighter on hover
-                COLORREF btnBgColor = isHover ? RGB(48, 48, 48) : RGB(32, 32, 32);
-                HBRUSH bgBrush = CreateSolidBrush(btnBgColor);
-                FillRect(dis->hDC, &rect, bgBrush);
-                DeleteObject(bgBrush);
-                
-                // Draw rounded border
-                HPEN borderPen = CreatePen(PS_SOLID, 1, RGB(80, 80, 80));
-                HPEN oldPen = (HPEN)SelectObject(dis->hDC, borderPen);
-                HBRUSH oldBrush = (HBRUSH)SelectObject(dis->hDC, GetStockObject(NULL_BRUSH));
-                RoundRect(dis->hDC, rect.left, rect.top, rect.right, rect.bottom, 6, 6);
-                SelectObject(dis->hDC, oldPen);
-                SelectObject(dis->hDC, oldBrush);
-                DeleteObject(borderPen);
-                
-                // Left half: red dot + timer (centered)
-                // Measure timer text width
-                SelectObject(dis->hDC, g_uiFont);
-                SIZE timerSize;
-                GetTextExtentPoint32A(dis->hDC, g_timerText, (int)strlen(g_timerText), &timerSize);
-                int dotSize = 8;
-                int dotGap = 6;  // Gap between dot and text
-                int leftContentWidth = dotSize + dotGap + timerSize.cx;
-                int leftStartX = rect.left + (centerX - leftContentWidth) / 2;
-                
-                // Draw anti-aliased red recording dot using GDI+
-                if (g_gdip.CreateFromHDC && g_gdip.SetSmoothingMode && g_gdip.CreateSolidFill && 
-                    g_gdip.FillEllipse && g_gdip.BrushDelete && g_gdip.DeleteGraphics) {
-                    GpGraphics* graphics = NULL;
-                    g_gdip.CreateFromHDC(dis->hDC, &graphics);
-                    if (graphics) {
-                        g_gdip.SetSmoothingMode(graphics, 4); // SmoothingModeAntiAlias
-                        GpBrush* redBrush = NULL;
-                        g_gdip.CreateSolidFill(0xFFEA4335, &redBrush);
-                        if (redBrush) {
-                            int dotY = (rect.top + rect.bottom - dotSize) / 2;
-                            g_gdip.FillEllipse(graphics, redBrush, (float)leftStartX, (float)dotY, (float)dotSize, (float)dotSize);
-                            g_gdip.BrushDelete(redBrush);
-                        }
-                        g_gdip.DeleteGraphics(graphics);
-                    }
-                }
-                
-                // Draw timer text
-                SetBkMode(dis->hDC, TRANSPARENT);
-                COLORREF textColor = isHover ? RGB(230, 230, 230) : RGB(200, 200, 200);
-                SetTextColor(dis->hDC, textColor);
-                
-                RECT timerRect = rect;
-                timerRect.left = leftStartX + dotSize + dotGap;
-                timerRect.right = rect.left + centerX;
-                DrawTextA(dis->hDC, g_timerText, -1, &timerRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-                
-                // Draw vertical divider at center
-                HPEN dividerPen = CreatePen(PS_SOLID, 1, RGB(80, 80, 80));
-                SelectObject(dis->hDC, dividerPen);
-                MoveToEx(dis->hDC, rect.left + centerX, rect.top + 6, NULL);
-                LineTo(dis->hDC, rect.left + centerX, rect.bottom - 6);
-                DeleteObject(dividerPen);
-                
-                // Right half: red stop square + "Stop" (centered)
-                SIZE stopSize;
-                GetTextExtentPoint32A(dis->hDC, "Stop", 4, &stopSize);
-                int stopSquareSize = 8;
-                int stopGap = 6;  // Gap between square and text
-                int rightContentWidth = stopSquareSize + stopGap + stopSize.cx;
-                int rightStartX = rect.left + centerX + (centerX - rightContentWidth) / 2;
-                
-                // Draw red stop square
-                int stopSquareY = (rect.top + rect.bottom - stopSquareSize) / 2;
-                HBRUSH stopBrush = CreateSolidBrush(RGB(234, 67, 53));
-                RECT stopSquareRect = { rightStartX, stopSquareY, rightStartX + stopSquareSize, stopSquareY + stopSquareSize };
-                FillRect(dis->hDC, &stopSquareRect, stopBrush);
-                DeleteObject(stopBrush);
-                
-                // Draw "Stop" text
-                RECT stopTextRect = rect;
-                stopTextRect.left = rightStartX + stopSquareSize + stopGap;
-                stopTextRect.right = rect.right - 4;
-                DrawTextA(dis->hDC, "Stop", -1, &stopTextRect, DT_LEFT | DT_VCENTER | DT_SINGLELINE);
-                
+                DrawRecordingPanel(dis, g_timerText);
                 return TRUE;
             }
             
-            // Close button - use Segoe MDL2 Assets icon font (Windows 10/11 style)
+            // Close button - use Segoe MDL2 Assets icon font
             if (ctlId == ID_BTN_CLOSE) {
-                // Create MDL2 font for Windows icons
-                HFONT mdl2Font = CreateFontW(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                    DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                    CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe MDL2 Assets");
-                HFONT oldFont = (HFONT)SelectObject(dis->hDC, mdl2Font);
-                SetBkMode(dis->hDC, TRANSPARENT);
-                SetTextColor(dis->hDC, RGB(150, 150, 150));
-                // U+E8BB = ChromeClose icon in Segoe MDL2 Assets
-                DrawTextW(dis->hDC, L"\uE8BB", -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-                SelectObject(dis->hDC, oldFont);
-                DeleteObject(mdl2Font);
+                DrawMDL2IconButton(dis, L"\uE8BB", 12);  /* ChromeClose */
                 return TRUE;
             }
             
@@ -2816,6 +2844,186 @@ static void SaveAreaSelectorPosition(void) {
     if (AreaSelector_IsVisible()) {
         AreaSelector_GetRect(&g_config.replayAreaRect);
     }
+}
+
+/* ============================================================================
+ * SETTINGS WINDOW CREATION HELPERS
+ * ============================================================================
+ * These functions break up the large WM_CREATE handler into smaller,
+ * more manageable sections for each settings category.
+ */
+
+/* Settings layout parameters */
+typedef struct {
+    int y;              /* Current Y position */
+    int labelX;         /* X position for labels */
+    int labelW;         /* Label width */
+    int controlX;       /* X position for controls */
+    int controlW;       /* Control width */
+    int rowH;           /* Row height */
+    int contentW;       /* Total content width */
+    HFONT font;         /* Standard font */
+    HFONT smallFont;    /* Small font */
+} SettingsLayout;
+
+/**
+ * Create the output format and quality settings controls.
+ * Creates dropdowns for format (MP4/AVI/WMV) and quality preset.
+ */
+static void CreateOutputSettings(HWND hwnd, SettingsLayout* layout) {
+    /* Format dropdown */
+    HWND lblFormat = CreateWindowW(L"STATIC", L"Output Format", 
+        WS_CHILD | WS_VISIBLE,
+        layout->labelX, layout->y + 5, layout->labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
+    SendMessage(lblFormat, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    
+    HWND cmbFormat = CreateWindowW(L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+        layout->controlX, layout->y, layout->controlW, 120, hwnd, (HMENU)ID_CMB_FORMAT, g_windows.hInstance, NULL);
+    SendMessage(cmbFormat, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    
+    SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.264) - Best compatibility");
+    SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"AVI - Legacy format");
+    SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"WMV - Windows Media");
+    SendMessage(cmbFormat, CB_SETCURSEL, g_config.outputFormat, 0);
+    layout->y += layout->rowH;
+    
+    /* Quality dropdown */
+    HWND lblQuality = CreateWindowW(L"STATIC", L"Quality",
+        WS_CHILD | WS_VISIBLE,
+        layout->labelX, layout->y + 5, layout->labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
+    SendMessage(lblQuality, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    
+    HWND cmbQuality = CreateWindowW(L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
+        layout->controlX, layout->y, layout->controlW, 120, hwnd, (HMENU)ID_CMB_QUALITY, g_windows.hInstance, NULL);
+    SendMessage(cmbQuality, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    
+    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Low - Small file, lower clarity");
+    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Medium - Balanced quality/size");
+    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"High - Sharp video, larger file");
+    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Lossless - Perfect quality, huge file");
+    SendMessage(cmbQuality, CB_SETCURSEL, g_config.quality, 0);
+    layout->y += layout->rowH + 8;
+}
+
+/**
+ * Create checkbox settings for capture options.
+ * Creates checkboxes for mouse cursor and recording border.
+ */
+static void CreateCaptureCheckboxes(HWND hwnd, SettingsLayout* layout) {
+    /* Separator line */
+    CreateWindowW(L"STATIC", L"",
+        WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
+        layout->labelX, layout->y, layout->contentW, 2, hwnd, NULL, g_windows.hInstance, NULL);
+    layout->y += 14;
+    
+    /* Checkboxes side by side */
+    HWND chkMouse = CreateWindowW(L"BUTTON", L"Capture mouse cursor",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        layout->labelX, layout->y, 200, 24, hwnd, (HMENU)ID_CHK_MOUSE, g_windows.hInstance, NULL);
+    SendMessage(chkMouse, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    CheckDlgButton(hwnd, ID_CHK_MOUSE, g_config.captureMouse ? BST_CHECKED : BST_UNCHECKED);
+    
+    HWND chkBorder = CreateWindowW(L"BUTTON", L"Show recording border",
+        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
+        layout->labelX + 280, layout->y, 200, 24, hwnd, (HMENU)ID_CHK_BORDER, g_windows.hInstance, NULL);
+    SendMessage(chkBorder, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    CheckDlgButton(hwnd, ID_CHK_BORDER, g_config.showRecordingBorder ? BST_CHECKED : BST_UNCHECKED);
+    layout->y += 38;
+}
+
+/**
+ * Create time limit controls with hours/minutes/seconds dropdowns.
+ */
+static void CreateTimeLimitControls(HWND hwnd, SettingsLayout* layout) {
+    HWND lblTime = CreateWindowW(L"STATIC", L"Time limit",
+        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+        layout->labelX, layout->y, layout->labelW, 26, hwnd, NULL, g_windows.hInstance, NULL);
+    SendMessage(lblTime, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    
+    /* Calculate time from seconds */
+    int totalSecs = g_config.maxRecordingSeconds;
+    if (totalSecs < 1) totalSecs = 60;
+    int hours = totalSecs / 3600;
+    int mins = (totalSecs % 3600) / 60;
+    int secs = totalSecs % 60;
+    
+    /* Hours dropdown */
+    HWND cmbHours = CreateWindowW(L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+        layout->controlX, layout->y, 55, 300, hwnd, (HMENU)ID_CMB_HOURS, g_windows.hInstance, NULL);
+    SendMessage(cmbHours, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    SendMessage(cmbHours, CB_SETITEMHEIGHT, (WPARAM)-1, 18);
+    for (int i = 0; i <= 24; i++) {
+        WCHAR buf[8]; wsprintfW(buf, L"%d", i);
+        SendMessageW(cmbHours, CB_ADDSTRING, 0, (LPARAM)buf);
+    }
+    SendMessage(cmbHours, CB_SETCURSEL, hours, 0);
+    
+    HWND lblH = CreateWindowW(L"STATIC", L"h",
+        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+        layout->controlX + 58, layout->y, 15, 26, hwnd, NULL, g_windows.hInstance, NULL);
+    SendMessage(lblH, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    
+    /* Minutes dropdown */
+    HWND cmbMins = CreateWindowW(L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+        layout->controlX + 78, layout->y, 55, 300, hwnd, (HMENU)ID_CMB_MINUTES, g_windows.hInstance, NULL);
+    SendMessage(cmbMins, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    SendMessage(cmbMins, CB_SETITEMHEIGHT, (WPARAM)-1, 18);
+    for (int i = 0; i <= 59; i++) {
+        WCHAR buf[8]; wsprintfW(buf, L"%d", i);
+        SendMessageW(cmbMins, CB_ADDSTRING, 0, (LPARAM)buf);
+    }
+    SendMessage(cmbMins, CB_SETCURSEL, mins, 0);
+    
+    HWND lblM = CreateWindowW(L"STATIC", L"m",
+        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+        layout->controlX + 136, layout->y, 18, 26, hwnd, NULL, g_windows.hInstance, NULL);
+    SendMessage(lblM, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    
+    /* Seconds dropdown */
+    HWND cmbSecs = CreateWindowW(L"COMBOBOX", L"",
+        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
+        layout->controlX + 158, layout->y, 55, 300, hwnd, (HMENU)ID_CMB_SECONDS, g_windows.hInstance, NULL);
+    SendMessage(cmbSecs, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    SendMessage(cmbSecs, CB_SETITEMHEIGHT, (WPARAM)-1, 18);
+    for (int i = 0; i <= 59; i++) {
+        WCHAR buf[8]; wsprintfW(buf, L"%d", i);
+        SendMessageW(cmbSecs, CB_ADDSTRING, 0, (LPARAM)buf);
+    }
+    SendMessage(cmbSecs, CB_SETCURSEL, secs, 0);
+    
+    HWND lblS = CreateWindowW(L"STATIC", L"s",
+        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+        layout->controlX + 216, layout->y, 15, 26, hwnd, NULL, g_windows.hInstance, NULL);
+    SendMessage(lblS, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    
+    layout->y += layout->rowH;
+}
+
+/**
+ * Create save path controls with text field and browse button.
+ */
+static void CreateSavePathControls(HWND hwnd, SettingsLayout* layout) {
+    HWND lblPath = CreateWindowW(L"STATIC", L"Save to",
+        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
+        layout->labelX, layout->y + 1, layout->labelW, 22, hwnd, NULL, g_windows.hInstance, NULL);
+    SendMessage(lblPath, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    
+    HWND edtPath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
+        layout->controlX, layout->y, layout->controlW - 80, 22, hwnd, (HMENU)ID_EDT_PATH, g_windows.hInstance, NULL);
+    SendMessage(edtPath, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    SetWindowTextA(edtPath, g_config.savePath);
+    
+    HWND btnBrowse = CreateWindowW(L"BUTTON", L"Browse",
+        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
+        layout->controlX + layout->controlW - 72, layout->y, 72, 22, hwnd, (HMENU)ID_BTN_BROWSE, g_windows.hInstance, NULL);
+    SendMessage(btnBrowse, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    
+    layout->y += layout->rowH + 12;
 }
 
 static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {

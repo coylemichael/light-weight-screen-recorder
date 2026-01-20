@@ -1,5 +1,41 @@
 # Changelog
 
+## [1.2.12] - 2026-01-20
+
+### Improved
+- **Refactored long functions for better maintainability**
+  - Extracted helper functions from functions exceeding 100 lines
+  - Each helper has single responsibility with descriptive names and doc comments
+  - No functional changes - same behavior, better code organization
+
+### Technical Details
+
+**overlay.c - Settings Window Helpers:**
+- `CreateOutputSettings()` - Format & quality dropdown creation
+- `CreateCaptureCheckboxes()` - Mouse cursor & border checkbox creation
+- `CreateTimeLimitControls()` - Hour/minute/second dropdown creation
+- `CreateSavePathControls()` - Save path edit box and browse button
+- `SettingsLayout` struct - Consolidated layout parameters for UI creation
+
+**overlay.c - Control Panel WM_DRAWITEM Helpers:**
+- `DrawModeButton()` - Renders capture mode buttons with selection/hover state
+- `DrawRecordButton()` - Renders record button (red circle) / stop button (white square)
+- `DrawMDL2IconButton()` - Draws Windows 11-style Segoe MDL2 Assets icon buttons
+- `DrawRecordingPanel()` - Renders timer+stop panel with anti-aliased GDI+ graphics
+- WM_DRAWITEM handler reduced from ~200 lines to ~50 lines
+
+**replay_buffer.c - BufferThreadProc Helpers (previous session):**
+- `InitCaptureRegion()` - Sets up monitor bounds for capture
+- `ApplyAspectRatioAdjustment()` - Crops capture region for target aspect ratio
+- `InitVideoPipeline()` - GPU converter + NVENC encoder initialization
+- `InitAudioPipeline()` - WASAPI + AAC encoder setup
+- `ShutdownAudioPipeline()` / `ShutdownVideoPipeline()` - Cleanup helpers
+- `CopyAudioSamplesForMuxing()` / `FreeAudioSampleCopies()` - Audio sample management
+- `HandleSaveRequest()` - Complete save operation handler
+- BufferThreadProc main loop reduced from ~500 lines to ~150 lines
+
+---
+
 ## [1.2.11] - 2026-01-20
 
 ### Improved
