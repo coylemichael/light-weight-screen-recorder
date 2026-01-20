@@ -1,5 +1,31 @@
 # Changelog
 
+## [1.2.14] - 2026-01-20
+
+### Security
+- **Comprehensive null pointer check audit at public API boundaries**
+  - Added defensive runtime null guards to all public functions that had only debug assertions
+  - Ensures release builds don't crash from null pointer dereferences when LWSR_ASSERT is disabled
+  - Pattern: `LWSR_ASSERT(ptr != NULL)` for debug + `if (!ptr) return FALSE/NULL/0;` for production
+
+### Technical Details
+
+**Files modified with new null guards:**
+- `capture.c` - 11 functions: Init, SetRegion, SetMonitor, SetAllMonitors, GetRefreshRate, ReinitDuplication, GetMonitorBoundsByIndex, GetMonitorFromPoint, GetAllMonitorsBounds, GetWindowRect, EnumMonitors
+- `encoder.c` - 2 functions: Encoder_Init, Encoder_WriteFrame
+- `border.c` - 3 functions: Border_Init, PreviewBorder_Init, AreaSelector_Init (HINSTANCE parameter)
+- `action_toolbar.c` - 1 function: ActionToolbar_Init (HINSTANCE parameter)
+- `logger.c` - 1 function: Logger_Init (filename/mode parameters)
+- `overlay.c` - 2 functions: Overlay_Create (HINSTANCE), Overlay_GetSelectedRegion (RECT* region)
+- `config.c` - 3 functions: Config_GetPath, Config_Load, Config_Save
+- `util.c` - 1 function: Util_GetAspectRatioDimensions (ratioW/ratioH parameters)
+
+**Already protected (no changes needed):**
+- All `*_Destroy`, `*_Shutdown`, `*_Stop` functions
+- AudioCapture_*, SampleBuffer_*, NVENCEncoder_*, AACEncoder_*, ReplayBuffer_*, GPUConverter_*, Mp4Muxer_* modules
+
+---
+
 ## [1.2.13] - 2026-01-20
 
 ### Improved

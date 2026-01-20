@@ -38,6 +38,8 @@ static LRESULT CALLBACK BorderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 static void UpdateBorderBitmap(int width, int height);
 
 BOOL Border_Init(HINSTANCE hInstance) {
+    if (!hInstance) return FALSE;
+    
     g_recording.hInstance = hInstance;
     
     // Register window class
@@ -274,6 +276,8 @@ static void UpdatePreviewBorderBitmap(int width, int height) {
 }
 
 BOOL PreviewBorder_Init(HINSTANCE hInstance) {
+    if (!hInstance) return FALSE;
+    
     WNDCLASSEXA wc = {0};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;
@@ -510,6 +514,8 @@ static LRESULT CALLBACK AreaSelectorWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
 }
 
 BOOL AreaSelector_Init(HINSTANCE hInstance) {
+    if (!hInstance) return FALSE;
+    
     WNDCLASSEXA wc = {0};
     wc.cbSize = sizeof(wc);
     wc.style = CS_HREDRAW | CS_VREDRAW;

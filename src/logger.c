@@ -221,6 +221,8 @@ void Logger_Init(const char* filename, const char* mode) {
     assert(filename != NULL && "Logger_Init: filename cannot be NULL");
     assert(mode != NULL && "Logger_Init: mode cannot be NULL");
     
+    if (!filename || !mode) return;
+    
     // Thread-safe check
     if (InterlockedCompareExchange(&g_log.initialized, 0, 0)) return;
     

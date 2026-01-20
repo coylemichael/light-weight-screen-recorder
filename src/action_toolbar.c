@@ -338,6 +338,7 @@ static LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 // Public API
 BOOL ActionToolbar_Init(HINSTANCE hInstance) {
+    if (!hInstance) return FALSE;
     if (g_ui.initialized) return TRUE;
     
     g_ui.hInstance = hInstance;

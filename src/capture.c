@@ -80,6 +80,8 @@ void Capture_EnumMonitors(MonitorEnumProc callback, void* userData) {
     // Precondition
     LWSR_ASSERT(callback != NULL);
     
+    if (!callback) return;
+    
     EnumCallbackData data;
     data.callback = callback;
     data.userData = userData;
@@ -91,6 +93,8 @@ BOOL Capture_GetMonitorBoundsByIndex(int monitorIndex, RECT* bounds) {
     // Preconditions
     LWSR_ASSERT(monitorIndex >= 0);
     LWSR_ASSERT(bounds != NULL);
+    
+    if (!bounds) return FALSE;
     
     MonitorSearchData data;
     data.targetIndex = monitorIndex;
@@ -112,6 +116,8 @@ BOOL Capture_GetMonitorFromPoint(POINT pt, RECT* monitorRect, int* monitorIndex)
     LWSR_ASSERT(monitorRect != NULL);
     LWSR_ASSERT(monitorIndex != NULL);
     
+    if (!monitorRect || !monitorIndex) return FALSE;
+    
     HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONEAREST);
     if (!hMon) return FALSE;
     
@@ -132,6 +138,8 @@ BOOL Capture_GetAllMonitorsBounds(RECT* bounds) {
     // Precondition
     LWSR_ASSERT(bounds != NULL);
     
+    if (!bounds) return FALSE;
+    
     SetRectEmpty(bounds);
     EnumDisplayMonitors(NULL, NULL, MonitorEnumProcAll, (LPARAM)bounds);
     return !IsRectEmpty(bounds);
@@ -141,6 +149,7 @@ BOOL Capture_GetWindowRect(HWND hwnd, RECT* rect) {
     // Preconditions
     LWSR_ASSERT(rect != NULL);
     
+    if (!rect) return FALSE;
     if (!IsWindow(hwnd)) return FALSE;
     
     // Use DwmGetWindowAttribute for accurate bounds if available
@@ -260,6 +269,8 @@ BOOL Capture_Init(CaptureState* state) {
     // Precondition
     LWSR_ASSERT(state != NULL);
     
+    if (!state) return FALSE;
+    
     BOOL result = FALSE;
     IDXGIDevice* dxgiDevice = NULL;
     
@@ -316,6 +327,7 @@ BOOL Capture_SetRegion(CaptureState* state, RECT region) {
     LWSR_ASSERT(region.right > region.left);
     LWSR_ASSERT(region.bottom > region.top);
     
+    if (!state) return FALSE;
     if (!state->initialized) return FALSE;
     
     // Check if region is on a different monitor than current
@@ -368,6 +380,8 @@ BOOL Capture_SetMonitor(CaptureState* state, int monitorIndex) {
     LWSR_ASSERT(state != NULL);
     LWSR_ASSERT(monitorIndex >= 0);
     
+    if (!state) return FALSE;
+    
     MonitorSearchData search = {0};
     search.targetIndex = monitorIndex;
     search.currentIndex = 0;
@@ -385,6 +399,8 @@ BOOL Capture_SetMonitor(CaptureState* state, int monitorIndex) {
 BOOL Capture_SetAllMonitors(CaptureState* state) {
     // Precondition
     LWSR_ASSERT(state != NULL);
+    
+    if (!state) return FALSE;
     
     RECT bounds;
     if (Capture_GetAllMonitorsBounds(&bounds)) {
@@ -616,6 +632,8 @@ int Capture_GetRefreshRate(CaptureState* state) {
     // Precondition
     LWSR_ASSERT(state != NULL);
     
+    if (!state) return 60;  // Safe default
+    
     return state->monitorRefreshRate;
 }
 
@@ -637,6 +655,7 @@ BOOL Capture_ReinitDuplication(CaptureState* state) {
     // Precondition
     LWSR_ASSERT(state != NULL);
     
+    if (!state) return FALSE;
     if (!state->initialized || !state->adapter) return FALSE;
     
     // Release old duplication and GPU texture (has stale frames)

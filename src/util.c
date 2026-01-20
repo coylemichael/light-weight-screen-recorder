@@ -84,6 +84,8 @@ void Util_GetAspectRatioDimensions(int aspectIndex, int* ratioW, int* ratioH) {
     LWSR_ASSERT(ratioW != NULL);
     LWSR_ASSERT(ratioH != NULL);
     
+    if (!ratioW || !ratioH) return;
+    
     // 0=Native, 1=16:9, 2=9:16, 3=1:1, 4=4:5, 5=16:10, 6=4:3, 7=21:9, 8=32:9
     switch (aspectIndex) {
         case 1: *ratioW = 16; *ratioH = 9;  break;  // 16:9 (YouTube, Standard)

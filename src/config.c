@@ -27,6 +27,8 @@ void Config_GetPath(char* buffer, size_t size) {
     LWSR_ASSERT(buffer != NULL);
     LWSR_ASSERT(size > 0);
     
+    if (!buffer || size == 0) return;
+    
     // Store config next to executable
     GetModuleFileNameA(NULL, buffer, (DWORD)size);
     char* lastSlash = strrchr(buffer, '\\');
@@ -40,6 +42,8 @@ void Config_GetPath(char* buffer, size_t size) {
 void Config_Load(AppConfig* config) {
     // Precondition
     LWSR_ASSERT(config != NULL);
+    
+    if (!config) return;
     
     char configPath[MAX_PATH];
     Config_GetPath(configPath, MAX_PATH);
@@ -168,6 +172,8 @@ void Config_Load(AppConfig* config) {
 void Config_Save(const AppConfig* config) {
     // Precondition
     LWSR_ASSERT(config != NULL);
+    
+    if (!config) return;
     
     char configPath[MAX_PATH];
     Config_GetPath(configPath, MAX_PATH);

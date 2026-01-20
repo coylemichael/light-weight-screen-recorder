@@ -1037,6 +1037,8 @@ static void UpdateTimerDisplay(void) {
 }
 
 BOOL Overlay_Create(HINSTANCE hInstance) {
+    if (!hInstance) return FALSE;
+    
     g_windows.hInstance = hInstance;
     
     // GDI+ is now initialized globally via g_gdip in main.c
@@ -1246,6 +1248,7 @@ void Overlay_SetMode(CaptureMode mode) {
 }
 
 BOOL Overlay_GetSelectedRegion(RECT* region) {
+    if (!region) return FALSE;
     if (IsRectEmpty(&g_selection.selectedRect)) return FALSE;
     *region = g_selection.selectedRect;
     return TRUE;

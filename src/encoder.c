@@ -54,6 +54,9 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     LWSR_ASSERT(height > 0);
     LWSR_ASSERT(fps > 0);
     
+    if (!state || !outputPath) return FALSE;
+    if (width <= 0 || height <= 0 || fps <= 0) return FALSE;
+    
     BOOL result = FALSE;
     IMFAttributes* attributes = NULL;
     IMFMediaType* outputType = NULL;
@@ -179,6 +182,8 @@ BOOL Encoder_WriteFrame(EncoderState* state, const BYTE* frameData, UINT64 times
     // Preconditions
     LWSR_ASSERT(state != NULL);
     LWSR_ASSERT(frameData != NULL);
+    
+    if (!state || !frameData) return FALSE;
     
     (void)timestamp;
     BOOL result = FALSE;
