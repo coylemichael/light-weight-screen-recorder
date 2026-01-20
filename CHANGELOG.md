@@ -25,6 +25,13 @@
 - `WriteMixedToBuffer()` - Writes mixed audio to context's output ring buffer
 - `MixCaptureThread` reduced from ~250 lines to ~140 lines
 
+**Codebase Review Complete:**
+All source files reviewed for functions over 100 lines. Remaining long functions not refactored due to:
+- Goto-cleanup patterns where extraction would hurt error handling clarity (aac_encoder.c, nvenc_encoder.c)
+- Step-based comments already providing good readability (nvenc_encoder.c, capture.c)
+- Flat repetitive operations without complex logic (config.c)
+- Standard entry point patterns (main.c WinMain)
+
 ---
 
 ## [1.2.12] - 2026-01-20
