@@ -31,6 +31,162 @@ static const GUID MFVideoFormat_HEVC_Local =
 /* Alias for logging */
 #define MuxLog Logger_Log
 
+/* ============================================================================
+ * MUXER HELPER FUNCTIONS
+ * ============================================================================
+ * These extract common operations to reduce duplication and improve readability.
+ */
+
+/**
+ * Create an MF video media type configured for HEVC passthrough.
+ * Caller must Release() the returned type.
+ */
+static IMFMediaType* CreateHEVCMediaType(const MuxerConfig* config) {
+    IMFMediaType* videoType = NULL;
+    HRESULT hr = MFCreateMediaType(&videoType);
+    if (FAILED(hr)) return NULL;
+    
+    UINT32 bitrate = Util_CalculateBitrate(config->width, config->height, 
+                                           config->fps, config->quality);
+    
+    videoType->lpVtbl->SetGUID(videoType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
+    videoType->lpVtbl->SetGUID(videoType, &MF_MT_SUBTYPE, &MFVideoFormat_HEVC_Local);
+    videoType->lpVtbl->SetUINT32(videoType, &MF_MT_AVG_BITRATE, bitrate);
+    videoType->lpVtbl->SetUINT32(videoType, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    
+    UINT64 frameSize = ((UINT64)config->width << 32) | config->height;
+    videoType->lpVtbl->SetUINT64(videoType, &MF_MT_FRAME_SIZE, frameSize);
+    
+    UINT64 frameRate = ((UINT64)config->fps << 32) | 1;
+    videoType->lpVtbl->SetUINT64(videoType, &MF_MT_FRAME_RATE, frameRate);
+    
+    UINT64 pixelAspect = ((UINT64)1 << 32) | 1;
+    videoType->lpVtbl->SetUINT64(videoType, &MF_MT_PIXEL_ASPECT_RATIO, pixelAspect);
+    
+    /* Set HEVC sequence header (VPS/SPS/PPS) if provided */
+    if (config->seqHeader && config->seqHeaderSize > 0) {
+        hr = videoType->lpVtbl->SetBlob(videoType, &MF_MT_MPEG_SEQUENCE_HEADER, 
+                                        config->seqHeader, config->seqHeaderSize);
+        if (SUCCEEDED(hr)) {
+            MuxLog("MP4Muxer: Set video sequence header (%u bytes)\n", config->seqHeaderSize);
+        }
+    }
+    
+    return videoType;
+}
+
+/**
+ * Create an MF audio media type configured for AAC.
+ * Caller must Release() the returned type.
+ */
+static IMFMediaType* CreateAACMediaType(const MuxerAudioConfig* config) {
+    IMFMediaType* audioType = NULL;
+    HRESULT hr = MFCreateMediaType(&audioType);
+    if (FAILED(hr)) return NULL;
+    
+    audioType->lpVtbl->SetGUID(audioType, &MF_MT_MAJOR_TYPE, &MFMediaType_Audio);
+    audioType->lpVtbl->SetGUID(audioType, &MF_MT_SUBTYPE, &MFAudioFormat_AAC);
+    audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_SAMPLES_PER_SECOND, config->sampleRate);
+    audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_NUM_CHANNELS, config->channels);
+    audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+    audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_AVG_BYTES_PER_SECOND, config->bitrate / 8);
+    audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AAC_PAYLOAD_TYPE, 0);  /* Raw AAC */
+    
+    /* Set AudioSpecificConfig if available */
+    if (config->configData && config->configSize > 0) {
+        audioType->lpVtbl->SetBlob(audioType, &MF_MT_USER_DATA, 
+            config->configData, config->configSize);
+    }
+    
+    return audioType;
+}
+
+/**
+ * Write a single video sample to the sink writer.
+ * Returns TRUE on success, FALSE on failure (non-fatal, caller continues).
+ */
+static BOOL WriteVideoSampleToWriter(IMFSinkWriter* writer, DWORD streamIndex,
+                                      const MuxerSample* sample) {
+    if (!sample->data || sample->size == 0) return FALSE;
+    
+    IMFMediaBuffer* mfBuffer = NULL;
+    HRESULT hr = MFCreateMemoryBuffer(sample->size, &mfBuffer);
+    if (FAILED(hr)) return FALSE;
+    
+    BYTE* bufData = NULL;
+    hr = mfBuffer->lpVtbl->Lock(mfBuffer, &bufData, NULL, NULL);
+    if (FAILED(hr)) {
+        mfBuffer->lpVtbl->Release(mfBuffer);
+        return FALSE;
+    }
+    
+    memcpy(bufData, sample->data, sample->size);
+    mfBuffer->lpVtbl->Unlock(mfBuffer);
+    mfBuffer->lpVtbl->SetCurrentLength(mfBuffer, sample->size);
+    
+    IMFSample* mfSample = NULL;
+    hr = MFCreateSample(&mfSample);
+    if (FAILED(hr)) {
+        mfBuffer->lpVtbl->Release(mfBuffer);
+        return FALSE;
+    }
+    
+    mfSample->lpVtbl->AddBuffer(mfSample, mfBuffer);
+    mfSample->lpVtbl->SetSampleTime(mfSample, sample->timestamp);
+    mfSample->lpVtbl->SetSampleDuration(mfSample, sample->duration);
+    
+    if (sample->isKeyframe) {
+        mfSample->lpVtbl->SetUINT32(mfSample, &MFSampleExtension_CleanPoint, TRUE);
+    }
+    
+    hr = writer->lpVtbl->WriteSample(writer, streamIndex, mfSample);
+    mfSample->lpVtbl->Release(mfSample);
+    mfBuffer->lpVtbl->Release(mfBuffer);
+    
+    return SUCCEEDED(hr);
+}
+
+/**
+ * Write a single audio sample to the sink writer.
+ * Returns TRUE on success, FALSE on failure (non-fatal, caller continues).
+ */
+static BOOL WriteAudioSampleToWriter(IMFSinkWriter* writer, DWORD streamIndex,
+                                      const MuxerAudioSample* sample) {
+    if (!sample->data || sample->size == 0) return FALSE;
+    
+    IMFMediaBuffer* mfBuffer = NULL;
+    HRESULT hr = MFCreateMemoryBuffer(sample->size, &mfBuffer);
+    if (FAILED(hr)) return FALSE;
+    
+    BYTE* bufData = NULL;
+    hr = mfBuffer->lpVtbl->Lock(mfBuffer, &bufData, NULL, NULL);
+    if (FAILED(hr)) {
+        mfBuffer->lpVtbl->Release(mfBuffer);
+        return FALSE;
+    }
+    
+    memcpy(bufData, sample->data, sample->size);
+    mfBuffer->lpVtbl->Unlock(mfBuffer);
+    mfBuffer->lpVtbl->SetCurrentLength(mfBuffer, sample->size);
+    
+    IMFSample* mfSample = NULL;
+    hr = MFCreateSample(&mfSample);
+    if (FAILED(hr)) {
+        mfBuffer->lpVtbl->Release(mfBuffer);
+        return FALSE;
+    }
+    
+    mfSample->lpVtbl->AddBuffer(mfSample, mfBuffer);
+    mfSample->lpVtbl->SetSampleTime(mfSample, sample->timestamp);
+    mfSample->lpVtbl->SetSampleDuration(mfSample, sample->duration);
+    
+    hr = writer->lpVtbl->WriteSample(writer, streamIndex, mfSample);
+    mfSample->lpVtbl->Release(mfSample);
+    mfBuffer->lpVtbl->Release(mfBuffer);
+    
+    return SUCCEEDED(hr);
+}
+
 BOOL MP4Muxer_WriteFile(
     const char* outputPath,
     const MuxerSample* samples,
@@ -77,42 +233,11 @@ BOOL MP4Muxer_WriteFile(
         goto cleanup;
     }
     
-    // Configure output type (H.264)
-    hr = MFCreateMediaType(&outputType);
-    if (FAILED(hr)) goto cleanup;
+    // Create HEVC media type using helper
+    outputType = CreateHEVCMediaType(config);
+    if (!outputType) goto cleanup;
     
-    // Calculate bitrate using shared utility
-    UINT32 bitrate = Util_CalculateBitrate(config->width, config->height, config->fps, config->quality);
-    
-    outputType->lpVtbl->SetGUID(outputType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
-    outputType->lpVtbl->SetGUID(outputType, &MF_MT_SUBTYPE, &MFVideoFormat_HEVC_Local);
-    outputType->lpVtbl->SetUINT32(outputType, &MF_MT_AVG_BITRATE, bitrate);
-    outputType->lpVtbl->SetUINT32(outputType, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    // Note: MF_MT_MPEG2_PROFILE is technically for H.264, but MF accepts it for HEVC passthrough
-    // HEVC Main Profile = 1 in this context (eAVEncH265VProfile_Main_420_8)
-    
-    UINT64 frameSize = ((UINT64)config->width << 32) | config->height;
-    outputType->lpVtbl->SetUINT64(outputType, &MF_MT_FRAME_SIZE, frameSize);
-    
-    UINT64 frameRate = ((UINT64)config->fps << 32) | 1;
-    outputType->lpVtbl->SetUINT64(outputType, &MF_MT_FRAME_RATE, frameRate);
-    
-    UINT64 pixelAspect = ((UINT64)1 << 32) | 1;  // Square pixels
-    outputType->lpVtbl->SetUINT64(outputType, &MF_MT_PIXEL_ASPECT_RATIO, pixelAspect);
-    
-    // Set HEVC sequence header (VPS/SPS/PPS) if provided
-    if (config->seqHeader && config->seqHeaderSize > 0) {
-        hr = outputType->lpVtbl->SetBlob(outputType, &MF_MT_MPEG_SEQUENCE_HEADER, 
-                                         config->seqHeader, config->seqHeaderSize);
-        if (SUCCEEDED(hr)) {
-            MuxLog("MP4Muxer: Set sequence header (%u bytes)\n", config->seqHeaderSize);
-        } else {
-            MuxLog("MP4Muxer: SetBlob sequence header failed 0x%08X\n", hr);
-        }
-    }
-    
-    MuxLog("MP4Muxer: %dx%d @ %d fps, bitrate=%u\n", 
-           config->width, config->height, config->fps, bitrate);
+    MuxLog("MP4Muxer: %dx%d @ %d fps\n", config->width, config->height, config->fps);
     
     // Add stream
     hr = writer->lpVtbl->AddStream(writer, outputType, &streamIndex);
@@ -121,7 +246,7 @@ BOOL MP4Muxer_WriteFile(
         goto cleanup;
     }
     
-    // For H.264 passthrough, use the SAME type for input as output
+    // For HEVC passthrough, use the SAME type for input as output
     // This triggers passthrough mode - no transcoding
     hr = writer->lpVtbl->SetInputMediaType(writer, streamIndex, outputType, NULL);
     if (FAILED(hr)) {
@@ -137,62 +262,16 @@ BOOL MP4Muxer_WriteFile(
     }
     beginWritingCalled = TRUE;
     
-    // Write all samples with precise sequential timestamps
+    // Write all samples using helper function
     int samplesWritten = 0;
     int keyframeCount = 0;
     
     for (int i = 0; i < sampleCount; i++) {
         const MuxerSample* sample = &samples[i];
         
-        if (!sample->data || sample->size == 0) {
-            continue;
-        }
-        
-        // Create MF buffer
-        IMFMediaBuffer* mfBuffer = NULL;
-        hr = MFCreateMemoryBuffer(sample->size, &mfBuffer);
-        if (FAILED(hr)) continue;
-        
-        BYTE* bufData = NULL;
-        hr = mfBuffer->lpVtbl->Lock(mfBuffer, &bufData, NULL, NULL);
-        if (FAILED(hr)) {
-            mfBuffer->lpVtbl->Release(mfBuffer);
-            continue;
-        }
-        
-        memcpy(bufData, sample->data, sample->size);
-        mfBuffer->lpVtbl->Unlock(mfBuffer);
-        mfBuffer->lpVtbl->SetCurrentLength(mfBuffer, sample->size);
-        
-        // Create MF sample with REAL wall-clock timestamp from capture
-        IMFSample* mfSample = NULL;
-        hr = MFCreateSample(&mfSample);
-        if (FAILED(hr)) {
-            mfBuffer->lpVtbl->Release(mfBuffer);
-            continue;
-        }
-        
-        // Use the actual timestamp from capture (already normalized to start at 0)
-        LONGLONG sampleTime = sample->timestamp;
-        LONGLONG sampleDuration = sample->duration;
-        
-        mfSample->lpVtbl->AddBuffer(mfSample, mfBuffer);
-        mfSample->lpVtbl->SetSampleTime(mfSample, sampleTime);
-        mfSample->lpVtbl->SetSampleDuration(mfSample, sampleDuration);
-        
-        if (sample->isKeyframe) {
-            mfSample->lpVtbl->SetUINT32(mfSample, &MFSampleExtension_CleanPoint, TRUE);
-            keyframeCount++;
-        }
-        
-        hr = writer->lpVtbl->WriteSample(writer, streamIndex, mfSample);
-        mfSample->lpVtbl->Release(mfSample);
-        mfBuffer->lpVtbl->Release(mfBuffer);
-        
-        if (SUCCEEDED(hr)) {
+        if (WriteVideoSampleToWriter(writer, streamIndex, sample)) {
             samplesWritten++;
-        } else {
-            MuxLog("MP4Muxer: WriteSample failed at %d: 0x%08X\n", i, hr);
+            if (sample->isKeyframe) keyframeCount++;
         }
     }
     
@@ -275,36 +354,9 @@ BOOL MP4Muxer_WriteFileWithAudio(
         goto cleanup;
     }
     
-    // === VIDEO STREAM ===
-    hr = MFCreateMediaType(&videoType);
-    if (FAILED(hr)) goto cleanup;
-    
-    UINT32 bitrate = Util_CalculateBitrate(videoConfig->width, videoConfig->height, 
-                                           videoConfig->fps, videoConfig->quality);
-    
-    videoType->lpVtbl->SetGUID(videoType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
-    videoType->lpVtbl->SetGUID(videoType, &MF_MT_SUBTYPE, &MFVideoFormat_HEVC_Local);
-    videoType->lpVtbl->SetUINT32(videoType, &MF_MT_AVG_BITRATE, bitrate);
-    videoType->lpVtbl->SetUINT32(videoType, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
-    // Note: For HEVC passthrough, profile is embedded in VPS/SPS from encoder
-    
-    UINT64 frameSize = ((UINT64)videoConfig->width << 32) | videoConfig->height;
-    videoType->lpVtbl->SetUINT64(videoType, &MF_MT_FRAME_SIZE, frameSize);
-    
-    UINT64 frameRate = ((UINT64)videoConfig->fps << 32) | 1;
-    videoType->lpVtbl->SetUINT64(videoType, &MF_MT_FRAME_RATE, frameRate);
-    
-    UINT64 pixelAspect = ((UINT64)1 << 32) | 1;
-    videoType->lpVtbl->SetUINT64(videoType, &MF_MT_PIXEL_ASPECT_RATIO, pixelAspect);
-    
-    // Set HEVC sequence header (VPS/SPS/PPS) if provided
-    if (videoConfig->seqHeader && videoConfig->seqHeaderSize > 0) {
-        hr = videoType->lpVtbl->SetBlob(videoType, &MF_MT_MPEG_SEQUENCE_HEADER, 
-                                        videoConfig->seqHeader, videoConfig->seqHeaderSize);
-        if (SUCCEEDED(hr)) {
-            MuxLog("MP4Muxer: Set video sequence header (%u bytes)\n", videoConfig->seqHeaderSize);
-        }
-    }
+    // === VIDEO STREAM (using helper) ===
+    videoType = CreateHEVCMediaType(videoConfig);
+    if (!videoType) goto cleanup;
     
     hr = writer->lpVtbl->AddStream(writer, videoType, &videoStreamIndex);
     if (FAILED(hr)) {
@@ -318,23 +370,9 @@ BOOL MP4Muxer_WriteFileWithAudio(
         goto cleanup;
     }
     
-    // === AUDIO STREAM ===
-    hr = MFCreateMediaType(&audioType);
-    if (FAILED(hr)) goto cleanup;
-    
-    audioType->lpVtbl->SetGUID(audioType, &MF_MT_MAJOR_TYPE, &MFMediaType_Audio);
-    audioType->lpVtbl->SetGUID(audioType, &MF_MT_SUBTYPE, &MFAudioFormat_AAC);
-    audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_SAMPLES_PER_SECOND, audioConfig->sampleRate);
-    audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_NUM_CHANNELS, audioConfig->channels);
-    audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-    audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_AVG_BYTES_PER_SECOND, audioConfig->bitrate / 8);
-    audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AAC_PAYLOAD_TYPE, 0);  // Raw AAC
-    
-    // Set AudioSpecificConfig if available
-    if (audioConfig->configData && audioConfig->configSize > 0) {
-        audioType->lpVtbl->SetBlob(audioType, &MF_MT_USER_DATA, 
-            audioConfig->configData, audioConfig->configSize);
-    }
+    // === AUDIO STREAM (using helper) ===
+    audioType = CreateAACMediaType(audioConfig);
+    if (!audioType) goto cleanup;
     
     hr = writer->lpVtbl->AddStream(writer, audioType, &audioStreamIndex);
     if (FAILED(hr)) {
@@ -391,72 +429,16 @@ BOOL MP4Muxer_WriteFileWithAudio(
             const MuxerSample* sample = &videoSamples[videoIdx++];
             if (!sample->data || sample->size == 0) continue;
             
-            IMFMediaBuffer* mfBuffer = NULL;
-            hr = MFCreateMemoryBuffer(sample->size, &mfBuffer);
-            if (FAILED(hr)) continue;
-            
-            BYTE* bufData = NULL;
-            hr = mfBuffer->lpVtbl->Lock(mfBuffer, &bufData, NULL, NULL);
-            if (FAILED(hr)) {
-                mfBuffer->lpVtbl->Release(mfBuffer);
-                continue;
+            if (WriteVideoSampleToWriter(writer, videoStreamIndex, sample)) {
+                videoWritten++;
             }
-            memcpy(bufData, sample->data, sample->size);
-            mfBuffer->lpVtbl->Unlock(mfBuffer);
-            mfBuffer->lpVtbl->SetCurrentLength(mfBuffer, sample->size);
-            
-            IMFSample* mfSample = NULL;
-            hr = MFCreateSample(&mfSample);
-            if (FAILED(hr)) {
-                mfBuffer->lpVtbl->Release(mfBuffer);
-                continue;
-            }
-            mfSample->lpVtbl->AddBuffer(mfSample, mfBuffer);
-            mfSample->lpVtbl->SetSampleTime(mfSample, sample->timestamp);
-            mfSample->lpVtbl->SetSampleDuration(mfSample, sample->duration);
-            
-            if (sample->isKeyframe) {
-                mfSample->lpVtbl->SetUINT32(mfSample, &MFSampleExtension_CleanPoint, TRUE);
-            }
-            
-            hr = writer->lpVtbl->WriteSample(writer, videoStreamIndex, mfSample);
-            mfSample->lpVtbl->Release(mfSample);
-            mfBuffer->lpVtbl->Release(mfBuffer);
-            
-            if (SUCCEEDED(hr)) videoWritten++;
         } else if (audioIdx < audioSampleCount) {
             const MuxerAudioSample* sample = &audioSamples[audioIdx++];
             if (!sample->data || sample->size == 0) continue;
             
-            IMFMediaBuffer* mfBuffer = NULL;
-            hr = MFCreateMemoryBuffer(sample->size, &mfBuffer);
-            if (FAILED(hr)) continue;
-            
-            BYTE* bufData = NULL;
-            hr = mfBuffer->lpVtbl->Lock(mfBuffer, &bufData, NULL, NULL);
-            if (FAILED(hr)) {
-                mfBuffer->lpVtbl->Release(mfBuffer);
-                continue;
+            if (WriteAudioSampleToWriter(writer, audioStreamIndex, sample)) {
+                audioWritten++;
             }
-            memcpy(bufData, sample->data, sample->size);
-            mfBuffer->lpVtbl->Unlock(mfBuffer);
-            mfBuffer->lpVtbl->SetCurrentLength(mfBuffer, sample->size);
-            
-            IMFSample* mfSample = NULL;
-            hr = MFCreateSample(&mfSample);
-            if (FAILED(hr)) {
-                mfBuffer->lpVtbl->Release(mfBuffer);
-                continue;
-            }
-            mfSample->lpVtbl->AddBuffer(mfSample, mfBuffer);
-            mfSample->lpVtbl->SetSampleTime(mfSample, sample->timestamp);
-            mfSample->lpVtbl->SetSampleDuration(mfSample, sample->duration);
-            
-            hr = writer->lpVtbl->WriteSample(writer, audioStreamIndex, mfSample);
-            mfSample->lpVtbl->Release(mfSample);
-            mfBuffer->lpVtbl->Release(mfBuffer);
-            
-            if (SUCCEEDED(hr)) audioWritten++;
         }
     }
     

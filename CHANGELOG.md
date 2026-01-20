@@ -1,5 +1,32 @@
 # Changelog
 
+## [1.2.13] - 2026-01-20
+
+### Improved
+- **Continued function refactoring for mp4_muxer.c and audio_capture.c**
+  - Extended the refactoring effort to remaining long functions
+  - Each helper has single responsibility with descriptive names and doc comments
+  - No functional changes - same behavior, better code organization
+
+### Technical Details
+
+**mp4_muxer.c - Muxer Helpers:**
+- `CreateHEVCMediaType()` - Creates IMFMediaType for HEVC video stream with sequence header
+- `CreateAACMediaType()` - Creates IMFMediaType for AAC audio stream with AudioSpecificConfig
+- `WriteVideoSampleToWriter()` - Writes single video sample to sink writer
+- `WriteAudioSampleToWriter()` - Writes single audio sample to sink writer
+- Both `MP4Muxer_WriteFile` and `MP4Muxer_WriteFileWithAudio` now share these helpers
+- `MP4Muxer_WriteFileWithAudio` reduced from ~260 lines to ~120 lines
+
+**audio_capture.c - Mix Thread Helpers:**
+- `IsSourceDormant()` - Checks if audio source is dormant (no recent packets from virtual devices)
+- `ReadFromSourceBuffer()` - Reads audio data from source's ring buffer
+- `MixAudioSamples()` - Mixes multiple audio sources with volume and peak tracking
+- `WriteMixedToBuffer()` - Writes mixed audio to context's output ring buffer
+- `MixCaptureThread` reduced from ~250 lines to ~140 lines
+
+---
+
 ## [1.2.12] - 2026-01-20
 
 ### Improved

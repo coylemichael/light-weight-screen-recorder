@@ -549,6 +549,120 @@ void AudioCapture_Destroy(AudioCaptureContext* ctx) {
     free(ctx);
 }
 
+// ============================================================================
+// Mix Thread Helper Functions
+// ============================================================================
+
+/*
+ * Check if an audio source is dormant (event-driven virtual device with no recent packets).
+ * A source is dormant if it has received packets before but hasn't recently.
+ * Dormant sources contribute silence rather than blocking the mixer.
+ */
+static BOOL IsSourceDormant(AudioCaptureSource* src, LARGE_INTEGER now, double dormantThresholdMs) {
+    if (!src->hasReceivedPacket) return FALSE;
+    
+    double msSincePacket = (double)(now.QuadPart - src->lastPacketTime.QuadPart) * 1000.0 / src->perfFreq.QuadPart;
+    return (msSincePacket > dormantThresholdMs);
+}
+
+/*
+ * Read audio data from a source's ring buffer into the provided buffer.
+ * Returns the number of bytes read.
+ */
+static int ReadFromSourceBuffer(AudioCaptureSource* src, BYTE* destBuffer, int maxBytes) {
+    int toRead = src->bufferAvailable;
+    if (toRead > maxBytes) toRead = maxBytes;
+    
+    if (toRead > 0) {
+        int readPos = (src->bufferWritePos - src->bufferAvailable + src->bufferSize) % src->bufferSize;
+        int toEnd = src->bufferSize - readPos;
+        
+        if (toRead <= toEnd) {
+            memcpy(destBuffer, src->buffer + readPos, toRead);
+        } else {
+            memcpy(destBuffer, src->buffer + readPos, toEnd);
+            memcpy(destBuffer + toEnd, src->buffer, toRead - toEnd);
+        }
+        
+        src->bufferAvailable -= toRead;
+    }
+    
+    return toRead;
+}
+
+/*
+ * Mix multiple audio source buffers into a single output buffer.
+ * Applies per-source volume, tracks peak levels, and clamps to prevent clipping.
+ */
+static void MixAudioSamples(
+    BYTE** srcBuffers, int* srcBytes, int* volumes,
+    int sourceCount, int numSamples,
+    BYTE* outBuffer, int* peakLeft, int* peakRight)
+{
+    for (int s = 0; s < numSamples; s++) {
+        int leftSum = 0, rightSum = 0;
+        
+        for (int i = 0; i < sourceCount; i++) {
+            // Check if this source has data for this sample
+            if (srcBytes[i] > s * AUDIO_BLOCK_ALIGN) {
+                short* samples = (short*)(srcBuffers[i] + s * AUDIO_BLOCK_ALIGN);
+                // Apply per-source volume (0-100)
+                int vol = volumes[i];
+                leftSum += (samples[0] * vol) / 100;
+                rightSum += (samples[1] * vol) / 100;
+            }
+            // Sources without data for this sample contribute silence (0) implicitly
+        }
+        
+        // Track peaks
+        int absL = leftSum < 0 ? -leftSum : leftSum;
+        int absR = rightSum < 0 ? -rightSum : rightSum;
+        if (absL > *peakLeft) *peakLeft = absL;
+        if (absR > *peakRight) *peakRight = absR;
+        
+        // Clamp to prevent clipping
+        if (leftSum > 32767) leftSum = 32767;
+        if (leftSum < -32768) leftSum = -32768;
+        if (rightSum > 32767) rightSum = 32767;
+        if (rightSum < -32768) rightSum = -32768;
+        
+        short* outSamples = (short*)(outBuffer + s * AUDIO_BLOCK_ALIGN);
+        outSamples[0] = (short)leftSum;
+        outSamples[1] = (short)rightSum;
+    }
+}
+
+/*
+ * Write mixed audio chunk to the context's ring buffer.
+ * Drops oldest data if buffer is full.
+ */
+static void WriteMixedToBuffer(AudioCaptureContext* ctx, BYTE* mixChunk, int bytesToMix) {
+    EnterCriticalSection(&ctx->mixLock);
+    
+    int spaceAvailable = ctx->mixBufferSize - ctx->mixBufferAvailable;
+    if (bytesToMix > spaceAvailable) {
+        // Drop oldest
+        int toDrop = bytesToMix - spaceAvailable;
+        ctx->mixBufferAvailable -= toDrop;
+        ctx->mixBufferReadPos = (ctx->mixBufferReadPos + toDrop) % ctx->mixBufferSize;
+    }
+    
+    int writePos = ctx->mixBufferWritePos;
+    int toEnd = ctx->mixBufferSize - writePos;
+    
+    if (bytesToMix <= toEnd) {
+        memcpy(ctx->mixBuffer + writePos, mixChunk, bytesToMix);
+    } else {
+        memcpy(ctx->mixBuffer + writePos, mixChunk, toEnd);
+        memcpy(ctx->mixBuffer, mixChunk + toEnd, bytesToMix - toEnd);
+    }
+    
+    ctx->mixBufferWritePos = (writePos + bytesToMix) % ctx->mixBufferSize;
+    ctx->mixBufferAvailable += bytesToMix;
+    
+    LeaveCriticalSection(&ctx->mixLock);
+}
+
 // Mix capture thread - reads from all sources and mixes
 static DWORD WINAPI MixCaptureThread(LPVOID param) {
     AudioCaptureContext* ctx = (AudioCaptureContext*)param;
@@ -604,17 +718,10 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
             EnterCriticalSection(&src->lock);
             availableBytes[i] = src->bufferAvailable;
             
-            // Check if this source is dormant (event-driven virtual device with no recent packets)
-            // A source is dormant if:
-            // 1. It has received at least one packet (so we know it works)
-            // 2. It hasn't received a packet recently (> dormantThresholdMs)
-            // 3. Its buffer is empty
+            // Check if source is dormant (uses helper function)
             srcDormant[i] = FALSE;
-            if (src->hasReceivedPacket && availableBytes[i] == 0) {
-                double msSincePacket = (double)(now.QuadPart - src->lastPacketTime.QuadPart) * 1000.0 / src->perfFreq.QuadPart;
-                if (msSincePacket > dormantThresholdMs) {
-                    srcDormant[i] = TRUE;
-                }
+            if (availableBytes[i] == 0) {
+                srcDormant[i] = IsSourceDormant(src, now, dormantThresholdMs);
             }
             
             LeaveCriticalSection(&src->lock);
@@ -668,29 +775,7 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
             }
             
             EnterCriticalSection(&src->lock);
-            
-            // Read whatever is available up to processBytes
-            int toRead = src->bufferAvailable;
-            if (toRead > processBytes) toRead = processBytes;
-            
-            if (toRead > 0) {
-                int readPos = (src->bufferWritePos - src->bufferAvailable + src->bufferSize) % src->bufferSize;
-                int toEnd = src->bufferSize - readPos;
-                
-                if (toRead <= toEnd) {
-                    memcpy(srcBuffers[i], src->buffer + readPos, toRead);
-                } else {
-                    memcpy(srcBuffers[i], src->buffer + readPos, toEnd);
-                    memcpy(srcBuffers[i] + toEnd, src->buffer, toRead - toEnd);
-                }
-                
-                src->bufferAvailable -= toRead;
-                srcBytes[i] = toRead;
-            } else {
-                // Source has no data - will contribute silence
-                srcBytes[i] = 0;
-            }
-            
+            srcBytes[i] = ReadFromSourceBuffer(src, srcBuffers[i], processBytes);
             LeaveCriticalSection(&src->lock);
         }
         
@@ -700,50 +785,16 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
             if (srcBytes[i] > bytesToMix) bytesToMix = srcBytes[i];
         }
         
-        // Mix sources - each source contributes what it has, silence for the rest
+        // Mix sources using helper function
         if (bytesToMix > 0) {
             BYTE* mixChunk = (BYTE*)malloc(bytesToMix);
             if (mixChunk) {
-                // Zero-initialize to ensure silence for any unwritten portions
                 memset(mixChunk, 0, bytesToMix);
                 int numSamples = bytesToMix / AUDIO_BLOCK_ALIGN;
                 
-                for (int s = 0; s < numSamples; s++) {
-                    int leftSum = 0, rightSum = 0;
-                    int srcCount = 0;
-                    
-                    for (int i = 0; i < ctx->sourceCount; i++) {
-                        // Check if this source has data for this sample
-                        if (srcBytes[i] > s * AUDIO_BLOCK_ALIGN) {
-                            short* samples = (short*)(srcBuffers[i] + s * AUDIO_BLOCK_ALIGN);
-                            // Apply per-source volume (0-100)
-                            int vol = ctx->volumes[i];
-                            leftSum += (samples[0] * vol) / 100;
-                            rightSum += (samples[1] * vol) / 100;
-                            srcCount++;
-                        }
-                        // Sources without data for this sample contribute silence (0) implicitly
-                    }
-                    
-                    // Don't divide by srcCount - just sum the sources that have data
-                    // This prevents volume drops when one source is silent
-                    
-                    // Track peaks
-                    int absL = leftSum < 0 ? -leftSum : leftSum;
-                    int absR = rightSum < 0 ? -rightSum : rightSum;
-                    if (absL > peakLeft) peakLeft = absL;
-                    if (absR > peakRight) peakRight = absR;
-                    
-                    // Clamp to prevent clipping
-                    if (leftSum > 32767) leftSum = 32767;
-                    if (leftSum < -32768) leftSum = -32768;
-                    if (rightSum > 32767) rightSum = 32767;
-                    if (rightSum < -32768) rightSum = -32768;
-                    
-                    short* outSamples = (short*)(mixChunk + s * AUDIO_BLOCK_ALIGN);
-                    outSamples[0] = (short)leftSum;
-                    outSamples[1] = (short)rightSum;
-                }
+                MixAudioSamples(srcBuffers, srcBytes, ctx->volumes, 
+                               ctx->sourceCount, numSamples, 
+                               mixChunk, &peakLeft, &peakRight);
                 
                 // Log peak levels periodically
                 logCounter++;
@@ -762,31 +813,8 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
                     peakRight = 0;
                 }
                 
-                // Write to mix buffer
-                EnterCriticalSection(&ctx->mixLock);
-                
-                int spaceAvailable = ctx->mixBufferSize - ctx->mixBufferAvailable;
-                if (bytesToMix > spaceAvailable) {
-                    // Drop oldest
-                    int toDrop = bytesToMix - spaceAvailable;
-                    ctx->mixBufferAvailable -= toDrop;
-                    ctx->mixBufferReadPos = (ctx->mixBufferReadPos + toDrop) % ctx->mixBufferSize;
-                }
-                
-                int writePos = ctx->mixBufferWritePos;
-                int toEnd = ctx->mixBufferSize - writePos;
-                
-                if (bytesToMix <= toEnd) {
-                    memcpy(ctx->mixBuffer + writePos, mixChunk, bytesToMix);
-                } else {
-                    memcpy(ctx->mixBuffer + writePos, mixChunk, toEnd);
-                    memcpy(ctx->mixBuffer, mixChunk + toEnd, bytesToMix - toEnd);
-                }
-                
-                ctx->mixBufferWritePos = (writePos + bytesToMix) % ctx->mixBufferSize;
-                ctx->mixBufferAvailable += bytesToMix;
-                
-                LeaveCriticalSection(&ctx->mixLock);
+                // Write mixed audio to output buffer (using helper)
+                WriteMixedToBuffer(ctx, mixChunk, bytesToMix);
                 
                 // Track total output for rate limiting
                 totalBytesOutput += bytesToMix;
