@@ -74,27 +74,87 @@
 #include "replay_buffer.h"
 #include "logger.h"
 #include "crash_handler.h"
+#include "gdiplus_api.h"
 #include "constants.h"
 
-// Global state
+/* ============================================================================
+ * GLOBAL STATE
+ * ============================================================================
+ * Thread access patterns documented for each variable.
+ * See app_context.h for architectural overview and migration path.
+ */
+
+/*
+ * Application configuration loaded from INI file.
+ * Thread Access: [Main writes during init/settings, Any thread reads]
+ * Lifetime: Program duration
+ */
 AppConfig g_config;
+
+/*
+ * DXGI desktop duplication capture state.
+ * Thread Access: [Main thread and Recording thread]
+ * Lifetime: Program duration (init at start, shutdown at exit)
+ */
 CaptureState g_capture;
+
+/*
+ * Instant replay circular buffer state.
+ * Thread Access: [Main thread for control, Buffer thread for capture]
+ * Synchronization: Uses events (hReadyEvent, hSaveRequestEvent, etc.)
+ * Lifetime: Program duration
+ */
 ReplayBufferState g_replayBuffer;
-volatile LONG g_isRecording = FALSE;  // Thread-safe: use InterlockedExchange
-volatile LONG g_isSelecting = FALSE;  // Thread-safe: use InterlockedExchange
+
+/*
+ * Recording active flag.
+ * Thread Access: [Any thread - atomic operations only]
+ * Use InterlockedExchange/InterlockedCompareExchange to modify.
+ */
+volatile LONG g_isRecording = FALSE;
+
+/*
+ * Area selection mode flag.
+ * Thread Access: [Any thread - atomic operations only]
+ * Use InterlockedExchange/InterlockedCompareExchange to modify.
+ */
+volatile LONG g_isSelecting = FALSE;
+
+/*
+ * Main overlay window handle.
+ * Thread Access: [Main thread only]
+ * Lifetime: Created in Overlay_Create, destroyed at shutdown
+ */
 HWND g_overlayWnd = NULL;
+
+/*
+ * Control panel window handle.
+ * Thread Access: [Main thread only]
+ * Lifetime: Created in Overlay_Create, destroyed at shutdown
+ */
 HWND g_controlWnd = NULL;
 
-// Hotkey ID for replay save
+/* Hotkey ID for replay save */
 #define HOTKEY_REPLAY_SAVE 1
 
-// Debug mode flag (enabled via --debug CLI argument)
+/*
+ * Debug mode flag (enabled via --debug CLI argument).
+ * Thread Access: [ReadOnly after ParseCommandLine]
+ */
 static BOOL g_debugMode = FALSE;
 
-// Mutex for single instance detection
+/*
+ * Single instance mutex handle.
+ * Thread Access: [Main thread only]
+ * Lifetime: Created at startup, closed at shutdown
+ */
 HANDLE g_mutex = NULL;
-const char* MUTEX_NAME = "LightweightScreenRecorderMutex";
-const char* WINDOW_CLASS = "LWSROverlay";
+
+/*
+ * String constants - read-only after compile time.
+ */
+static const char* const MUTEX_NAME = "LightweightScreenRecorderMutex";
+static const char* const WINDOW_CLASS = "LWSROverlay";
 
 // Parse command line for --debug flag
 static void ParseCommandLine(LPSTR lpCmdLine) {
@@ -103,8 +163,8 @@ static void ParseCommandLine(LPSTR lpCmdLine) {
     }
 }
 
-int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance, 
-                   LPSTR lpCmdLine, int nCmdShow) {
+int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
+                   _In_ LPSTR lpCmdLine, _In_ int nCmdShow) {
     (void)hPrevInstance;
     (void)nCmdShow;
     
@@ -150,6 +210,14 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     // Load configuration
     Config_Load(&g_config);
     
+    // Initialize shared GDI+ (used by overlay and action_toolbar)
+    if (!GdiplusAPI_Init(&g_gdip)) {
+        MessageBoxA(NULL, "Failed to initialize GDI+", "Error", MB_OK | MB_ICONERROR);
+        MFShutdown();
+        CoUninitialize();
+        return 1;
+    }
+    
     // Initialize capture system
     if (!Capture_Init(&g_capture)) {
         MessageBoxA(NULL, "Failed to initialize screen capture", "Error", MB_OK | MB_ICONERROR);
@@ -187,7 +255,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
             SYSTEMTIME st;
             GetLocalTime(&st);
             snprintf(logFilename, sizeof(logFilename), "%s\\lwsr_log_%04d%02d%02d_%02d%02d%02d.txt",
-                    debugFolder, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+                    debugFolder, (int)st.wYear, (int)st.wMonth, (int)st.wDay, (int)st.wHour, (int)st.wMinute, (int)st.wSecond);
             Logger_Init(logFilename, "w");
             Logger_Log("Debug logging enabled\n");
             Logger_Log("Debug mode: %s\n", g_debugMode ? "YES" : "NO");
@@ -246,6 +314,7 @@ int WINAPI WinMain(HINSTANCE hInstance, HINSTANCE hPrevInstance,
     Logger_Flush();
     Logger_Shutdown();
     Config_Save(&g_config);
+    GdiplusAPI_Shutdown(&g_gdip);
     Capture_Shutdown(&g_capture);
     MFShutdown();
     CoUninitialize();

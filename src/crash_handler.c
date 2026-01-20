@@ -50,31 +50,86 @@
 #define STATUS_HEAP_CORRUPTION 0xC0000374
 #endif
 
-// ============================================================================
-// Global State
-// ============================================================================
+/* ============================================================================
+ * CRASH HANDLER STATE
+ * ============================================================================
+ * These globals manage crash detection, handling, and minidump generation.
+ * Most are accessed only during a crash (from the crashing thread) or by
+ * the watchdog thread.
+ *
+ * DESIGN NOTES:
+ * - Uses minimal dependencies to survive corrupted state
+ * - Atomic operations for thread-safe flag checks
+ * - Dedicated dump thread avoids deadlock during MiniDumpWriteDump
+ */
 
+/*
+ * Previous unhandled exception filter (for chaining).
+ * Thread Access: [Main thread sets during init]
+ */
 static LPTOP_LEVEL_EXCEPTION_FILTER g_previousFilter = NULL;
+
+/*
+ * Vectored exception handler handle.
+ * Thread Access: [Main thread sets during init]
+ */
 static PVOID g_vectoredHandler = NULL;
+
+/*
+ * Lock to prevent concurrent crash handling.
+ * Thread Access: [Any crashing thread]
+ */
 static CRITICAL_SECTION g_crashLock;
-static volatile LONG g_crashInProgress = FALSE;  // Thread-safe: InterlockedCompareExchange
+
+/*
+ * Flag indicating crash handling is in progress.
+ * Thread Access: [Any thread - atomic operations]
+ * Prevents re-entrant crash handling.
+ */
+static volatile LONG g_crashInProgress = FALSE;
+
+/*
+ * Heartbeat counter for hang detection.
+ * Thread Access: [Main thread increments, Watchdog reads - atomic]
+ */
 static volatile LONG g_heartbeatCounter = 0;
+
+/*
+ * Watchdog thread handle.
+ * Thread Access: [Main thread for create/destroy]
+ */
 static HANDLE g_watchdogThread = NULL;
-static volatile LONG g_watchdogRunning = FALSE;  // Thread-safe: use InterlockedExchange
+
+/*
+ * Watchdog running flag.
+ * Thread Access: [Any thread - atomic operations]
+ */
+static volatile LONG g_watchdogRunning = FALSE;
+
+/*
+ * Crash handler initialized flag.
+ * Thread Access: [Main thread writes, Any thread reads]
+ */
 static BOOL g_crashHandlerInitialized = FALSE;
 
-// Stack overflow handling - reserve memory for guard page restoration
+/*
+ * Reserved memory for stack overflow handling.
+ * Thread Access: [Crashing thread only]
+ */
 static LPVOID g_stackOverflowGuard = NULL;
 
-// Stored exception info for dump thread
+/*
+ * Exception info stored for dump thread.
+ * Thread Access: [Crashing thread writes, Dump thread reads]
+ */
 static EXCEPTION_POINTERS* g_storedExceptionInfo = NULL;
 static DWORD g_crashingThreadId = 0;
 static HANDLE g_dumpCompleteEvent = NULL;
 static const char* g_crashReason = NULL;
 
-// ============================================================================
-// Utility Functions
-// ============================================================================
+/* ============================================================================
+ * UTILITY FUNCTIONS
+ * ============================================================================ */
 
 static void GetExeDirectory(char* buffer, size_t size) {
     GetModuleFileNameA(NULL, buffer, (DWORD)size);
@@ -268,7 +323,9 @@ static void HandleCrash(EXCEPTION_POINTERS* exInfo, const char* reason) {
     HANDLE dumpThread = CreateThread(NULL, 0, DumpWriterThread, NULL, 0, NULL);
     if (dumpThread) {
         // Wait for dump to complete (with timeout to prevent infinite wait)
-        WaitForSingleObject(g_dumpCompleteEvent, 30000);
+        if (g_dumpCompleteEvent) {
+            WaitForSingleObject(g_dumpCompleteEvent, 30000);
+        }
         CloseHandle(dumpThread);
     }
     
@@ -434,7 +491,8 @@ static void SignalHandler(int signum) {
 static DWORD WINAPI WatchdogThread(LPVOID param) {
     (void)param;
     
-    LONG lastHeartbeat = g_heartbeatCounter;
+    // Use atomic read for initial heartbeat value
+    LONG lastHeartbeat = InterlockedCompareExchange(&g_heartbeatCounter, 0, 0);
     DWORD missedCount = 0;
     
     Logger_Log("Watchdog thread started (timeout=%dms)\n", WATCHDOG_TIMEOUT_MS);
@@ -567,6 +625,11 @@ void CrashHandler_Shutdown(void) {
 
 // Force crash for testing (debug only)
 void CrashHandler_ForceCrash(void) {
-    int* p = NULL;
+    // Intentional NULL dereference to trigger crash handler
+    // This is debug-only test code - suppress C6011 warning
+    #pragma warning(push)
+    #pragma warning(disable: 6011)  // Intentional NULL dereference for testing
+    volatile int* p = NULL;
     *p = 42;  // Access violation
+    #pragma warning(pop)
 }

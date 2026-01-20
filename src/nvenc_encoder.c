@@ -155,6 +155,12 @@ BOOL NVENCEncoder_IsAvailable(void) {
 }
 
 NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height, int fps, QualityPreset quality) {
+    // Preconditions
+    LWSR_ASSERT(d3dDevice != NULL);
+    LWSR_ASSERT(width > 0);
+    LWSR_ASSERT(height > 0);
+    LWSR_ASSERT(fps > 0);
+    
     if (!d3dDevice || width <= 0 || height <= 0 || fps <= 0) {
         NvLog("NVENCEncoder: Invalid parameters\n");
         return NULL;
@@ -422,6 +428,9 @@ fail:
 }
 
 void NVENCEncoder_SetCallback(NVENCEncoder* enc, EncodedFrameCallback callback, void* userData) {
+    // Precondition
+    LWSR_ASSERT(enc != NULL);
+    
     if (!enc) return;
     enc->frameCallback = callback;
     enc->callbackUserData = userData;
@@ -429,6 +438,10 @@ void NVENCEncoder_SetCallback(NVENCEncoder* enc, EncodedFrameCallback callback, 
 
 // Returns: 1 = success, 0 = transient failure (retry), -1 = device lost (must recreate)
 int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, LONGLONG timestamp) {
+    // Preconditions
+    LWSR_ASSERT(enc != NULL);
+    LWSR_ASSERT(nv12Source != NULL);
+    
     if (!enc || !enc->initialized || !nv12Source) return 0;
     
     // Check if device was previously marked as lost
@@ -465,7 +478,8 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
         return -1;
     }
     
-    if (hr == WAIT_TIMEOUT || FAILED(hr)) {
+    // Note: AcquireSync returns WAIT_TIMEOUT (DWORD) not HRESULT on timeout
+    if (hr == (HRESULT)WAIT_TIMEOUT || FAILED(hr)) {
         LeaveCriticalSection(&enc->submitLock);
         enc->mutexTimeoutCount++;
         if ((enc->mutexTimeoutCount % LOG_RATE_LIMIT) == 1) {
@@ -515,7 +529,8 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, L
         return -1;
     }
     
-    if (hr == WAIT_TIMEOUT || FAILED(hr)) {
+    // Note: AcquireSync returns WAIT_TIMEOUT (DWORD) not HRESULT on timeout
+    if (hr == (HRESULT)WAIT_TIMEOUT || FAILED(hr)) {
         // Try to recover by releasing back to state 0
         enc->srcMutex[idx]->lpVtbl->ReleaseSync(enc->srcMutex[idx], 0);
         LeaveCriticalSection(&enc->submitLock);
@@ -651,6 +666,12 @@ BOOL NVENCEncoder_Flush(NVENCEncoder* enc, EncodedFrame* out) {
 }
 
 BOOL NVENCEncoder_GetSequenceHeader(NVENCEncoder* enc, BYTE* buffer, DWORD bufferSize, DWORD* outSize) {
+    // Preconditions
+    LWSR_ASSERT(enc != NULL);
+    LWSR_ASSERT(buffer != NULL);
+    LWSR_ASSERT(bufferSize > 0);
+    LWSR_ASSERT(outSize != NULL);
+    
     if (!enc || !enc->initialized || !buffer || !outSize) return FALSE;
     
     uint32_t payloadSize = 0;

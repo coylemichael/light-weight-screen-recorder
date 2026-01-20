@@ -13,14 +13,17 @@
 #include "aac_encoder.h"
 #include "constants.h"
 #include "mem_utils.h"
+#include "logger.h"
 #include <mfapi.h>
 #include <mftransform.h>
 #include <mferror.h>
 #include <wmcodecdsp.h>
 #include <stdio.h>
 
-// AAC encoder CLSID
-// {93AF0C51-2275-45d2-A35B-F2BA21CAED00}
+/*
+ * AAC encoder CLSID: {93AF0C51-2275-45d2-A35B-F2BA21CAED00}
+ * Thread Access: [ReadOnly - constant initialized at compile time]
+ */
 static const GUID CLSID_AACEncoder = {
     0x93AF0C51, 0x2275, 0x45d2, {0xA3, 0x5B, 0xF2, 0xBA, 0x21, 0xCA, 0xED, 0x00}
 };
@@ -321,12 +324,19 @@ void AACEncoder_Destroy(AACEncoder* encoder) {
 }
 
 void AACEncoder_SetCallback(AACEncoder* encoder, AACEncoderCallback callback, void* userData) {
+    // Precondition
+    LWSR_ASSERT(encoder != NULL);
+    
     if (!encoder) return;
     encoder->callback = callback;
     encoder->userData = userData;
 }
 
 BOOL AACEncoder_Feed(AACEncoder* encoder, const BYTE* pcmData, int pcmSize, LONGLONG timestamp) {
+    // Preconditions (pcmData can be NULL to trigger buffer processing)
+    LWSR_ASSERT(encoder != NULL);
+    LWSR_ASSERT(pcmSize >= 0);
+    
     if (!encoder || !encoder->transform || !pcmData || pcmSize <= 0) return FALSE;
     
     // Set initial timestamp if not set
@@ -415,6 +425,11 @@ void AACEncoder_Flush(AACEncoder* encoder) {
 }
 
 BOOL AACEncoder_GetConfig(AACEncoder* encoder, BYTE** configData, int* configSize) {
+    // Preconditions
+    LWSR_ASSERT(encoder != NULL);
+    LWSR_ASSERT(configData != NULL);
+    LWSR_ASSERT(configSize != NULL);
+    
     if (!encoder || !configData || !configSize) return FALSE;
     
     if (encoder->configData && encoder->configSize > 0) {

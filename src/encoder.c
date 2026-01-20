@@ -13,6 +13,7 @@
 #include "util.h"
 #include "constants.h"
 #include "mem_utils.h"
+#include "logger.h"
 #include <mferror.h>
 #include <stdio.h>
 #include <time.h>
@@ -28,6 +29,11 @@ static GUID GetVideoFormat(OutputFormat format) {
 
 void Encoder_GenerateFilename(char* buffer, size_t size, 
                                const char* basePath, OutputFormat format) {
+    // Preconditions
+    LWSR_ASSERT(buffer != NULL);
+    LWSR_ASSERT(size > 0);
+    LWSR_ASSERT(basePath != NULL);
+    
     time_t now = time(NULL);
     struct tm* tm_info = localtime(&now);
     
@@ -41,6 +47,13 @@ void Encoder_GenerateFilename(char* buffer, size_t size,
 BOOL Encoder_Init(EncoderState* state, const char* outputPath,
                   int width, int height, int fps,
                   OutputFormat format, QualityPreset quality) {
+    // Preconditions
+    LWSR_ASSERT(state != NULL);
+    LWSR_ASSERT(outputPath != NULL);
+    LWSR_ASSERT(width > 0);
+    LWSR_ASSERT(height > 0);
+    LWSR_ASSERT(fps > 0);
+    
     BOOL result = FALSE;
     IMFAttributes* attributes = NULL;
     IMFMediaType* outputType = NULL;
@@ -163,6 +176,10 @@ cleanup:
 }
 
 BOOL Encoder_WriteFrame(EncoderState* state, const BYTE* frameData, UINT64 timestamp) {
+    // Preconditions
+    LWSR_ASSERT(state != NULL);
+    LWSR_ASSERT(frameData != NULL);
+    
     (void)timestamp;
     BOOL result = FALSE;
     IMFMediaBuffer* buffer = NULL;
@@ -228,6 +245,9 @@ cleanup:
 }
 
 void Encoder_Finalize(EncoderState* state) {
+    // Allow NULL for convenience in cleanup code
+    if (!state) return;
+    
     // Thread-safe state check
     if (!InterlockedCompareExchange(&state->initialized, 0, 0)) return;
     
@@ -245,5 +265,8 @@ void Encoder_Finalize(EncoderState* state) {
 }
 
 const char* Encoder_GetOutputPath(EncoderState* state) {
+    // Precondition
+    LWSR_ASSERT(state != NULL);
+    
     return state->outputPath;
 }

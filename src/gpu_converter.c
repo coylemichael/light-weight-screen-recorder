@@ -11,11 +11,18 @@
 
 #include "gpu_converter.h"
 #include "logger.h"
+#include "constants.h"
 #include <dxgi.h>
 
 #define GPULog Logger_Log
 
 BOOL GPUConverter_Init(GPUConverter* conv, ID3D11Device* device, int width, int height) {
+    // Preconditions
+    LWSR_ASSERT(conv != NULL);
+    LWSR_ASSERT(device != NULL);
+    LWSR_ASSERT(width > 0);
+    LWSR_ASSERT(height > 0);
+    
     if (!conv || !device) return FALSE;
     
     ZeroMemory(conv, sizeof(GPUConverter));
@@ -112,6 +119,10 @@ fail:
 }
 
 ID3D11Texture2D* GPUConverter_Convert(GPUConverter* conv, ID3D11Texture2D* bgraTexture) {
+    // Preconditions
+    LWSR_ASSERT(conv != NULL);
+    LWSR_ASSERT(bgraTexture != NULL);
+    
     if (!conv->initialized || !bgraTexture) return NULL;
     
     HRESULT hr;

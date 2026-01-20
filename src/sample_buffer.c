@@ -23,6 +23,7 @@
 
 // Free a single sample
 static void FreeSample(BufferedSample* sample) {
+    LWSR_ASSERT(sample != NULL);
     if (sample->data) {
         free(sample->data);
         sample->data = NULL;
@@ -79,6 +80,13 @@ static void EvictOldSamples(SampleBuffer* buf, LONGLONG newTimestamp) {
 
 BOOL SampleBuffer_Init(SampleBuffer* buf, int durationSeconds, int fps,
                         int width, int height, QualityPreset quality) {
+    // Preconditions
+    LWSR_ASSERT(buf != NULL);
+    LWSR_ASSERT(durationSeconds > 0);
+    LWSR_ASSERT(fps > 0);
+    LWSR_ASSERT(width > 0);
+    LWSR_ASSERT(height > 0);
+    
     if (!buf) return FALSE;
     if (durationSeconds <= 0 || fps <= 0 || width <= 0 || height <= 0) return FALSE;
     
@@ -154,7 +162,17 @@ void SampleBuffer_Shutdown(SampleBuffer* buf) {
 }
 
 BOOL SampleBuffer_Add(SampleBuffer* buf, EncodedFrame* frame) {
+    // Preconditions
+    LWSR_ASSERT(buf != NULL);
+    LWSR_ASSERT(frame != NULL);
+    
     if (!buf || !buf->initialized || !frame || !frame->data) return FALSE;
+    
+    // Invariant checks
+    LWSR_ASSERT(buf->count >= 0);
+    LWSR_ASSERT(buf->count <= buf->capacity);
+    LWSR_ASSERT(buf->head >= 0 && buf->head < buf->capacity);
+    LWSR_ASSERT(buf->tail >= 0 && buf->tail < buf->capacity);
     
     EnterCriticalSection(&buf->lock);
     
@@ -188,6 +206,9 @@ BOOL SampleBuffer_Add(SampleBuffer* buf, EncodedFrame* frame) {
 }
 
 double SampleBuffer_GetDuration(SampleBuffer* buf) {
+    // Precondition
+    LWSR_ASSERT(buf != NULL);
+    
     if (!buf || !buf->initialized || buf->count == 0) return 0.0;
     
     EnterCriticalSection(&buf->lock);
@@ -205,6 +226,9 @@ double SampleBuffer_GetDuration(SampleBuffer* buf) {
 }
 
 int SampleBuffer_GetCount(SampleBuffer* buf) {
+    // Precondition
+    LWSR_ASSERT(buf != NULL);
+    
     if (!buf || !buf->initialized) return 0;
     
     EnterCriticalSection(&buf->lock);
@@ -215,6 +239,9 @@ int SampleBuffer_GetCount(SampleBuffer* buf) {
 }
 
 size_t SampleBuffer_GetMemoryUsage(SampleBuffer* buf) {
+    // Precondition
+    LWSR_ASSERT(buf != NULL);
+    
     if (!buf || !buf->initialized) return 0;
     
     EnterCriticalSection(&buf->lock);
@@ -251,6 +278,10 @@ void SampleBuffer_Clear(SampleBuffer* buf) {
 // Deep copies all data under lock to prevent use-after-free from eviction,
 // then releases lock before muxing (which can be slow)
 BOOL SampleBuffer_WriteToFile(SampleBuffer* buf, const char* outputPath) {
+    // Preconditions
+    LWSR_ASSERT(buf != NULL);
+    LWSR_ASSERT(outputPath != NULL);
+    
     if (!buf || !buf->initialized || !outputPath) return FALSE;
     
     BufLog("WriteToFile: entering, getting lock...\n");
@@ -286,6 +317,8 @@ BOOL SampleBuffer_WriteToFile(SampleBuffer* buf, const char* outputPath) {
         BufLog("WriteToFile: failed to allocate samples array\n");
         return FALSE;
     }
+    // Zero-initialize to prevent uninitialized memory access in cleanup
+    memset(samples, 0, allocSize);
     
     // Find first timestamp for normalization
     LONGLONG firstTimestamp = 0;
@@ -357,6 +390,11 @@ BOOL SampleBuffer_WriteToFile(SampleBuffer* buf, const char* outputPath) {
 // Get copies of samples for external muxing (caller must free)
 // Deep copies all data under lock to prevent use-after-free from eviction
 BOOL SampleBuffer_GetSamplesForMuxing(SampleBuffer* buf, MuxerSample** outSamples, int* outCount) {
+    // Preconditions
+    LWSR_ASSERT(buf != NULL);
+    LWSR_ASSERT(outSamples != NULL);
+    LWSR_ASSERT(outCount != NULL);
+    
     if (!buf || !buf->initialized || !outSamples || !outCount) return FALSE;
     
     *outSamples = NULL;
@@ -423,6 +461,12 @@ BOOL SampleBuffer_GetSamplesForMuxing(SampleBuffer* buf, MuxerSample** outSample
 }
 
 void SampleBuffer_SetSequenceHeader(SampleBuffer* buf, const BYTE* header, DWORD size) {
+    // Preconditions
+    LWSR_ASSERT(buf != NULL);
+    LWSR_ASSERT(header != NULL);
+    LWSR_ASSERT(size > 0);
+    LWSR_ASSERT(size <= sizeof(buf->seqHeader));
+    
     if (!buf || !header || size == 0 || size > sizeof(buf->seqHeader)) return;
     
     EnterCriticalSection(&buf->lock);

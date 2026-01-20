@@ -10,7 +10,7 @@
  */
 
 #define COBJMACROS
-#define DEFINE_AUDIO_GUIDS  // This file defines the shared audio GUIDs
+#define DEFINE_AUDIO_GUIDS  /* This file defines the shared audio GUIDs */
 #include "audio_device.h"
 #include "audio_guids.h"
 #include "util.h"
@@ -19,7 +19,12 @@
 #include <functiondiscoverykeys_devpkey.h>
 #include <stdio.h>
 
-// COM interfaces
+/*
+ * Global MMDevice enumerator for device listing.
+ * Thread Access: [Main thread only - used for settings UI]
+ * Lifetime: Init to Shutdown
+ * Note: Separate from g_audioEnumerator in audio_capture.c
+ */
 static IMMDeviceEnumerator* g_deviceEnumerator = NULL;
 
 BOOL AudioDevice_Init(void) {

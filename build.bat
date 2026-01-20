@@ -1,15 +1,17 @@
 @echo off
 REM Ultra Lightweight Screen Recorder - Build Script
-REM Usage: build.bat [debug|release]
-REM   build.bat        - Release build (optimized)
-REM   build.bat debug  - Debug build (symbols, no optimization)
+REM Usage: build.bat [debug|release|analyze]
+REM   build.bat         - Release build (optimized)
+REM   build.bat debug   - Debug build (symbols, no optimization)
 REM   build.bat release - Release build (explicit)
+REM   build.bat analyze - Static analysis build (requires VS Enterprise or additional tools)
 
 setlocal enabledelayedexpansion
 
-REM Check for debug flag
+REM Check for build type flag
 set BUILD_TYPE=release
 if /i "%1"=="debug" set BUILD_TYPE=debug
+if /i "%1"=="analyze" set BUILD_TYPE=analyze
 
 REM Check if MSVC is already in PATH (e.g., from GitHub Actions ilammy/msvc-dev-cmd)
 where cl.exe >nul 2>&1
@@ -64,7 +66,7 @@ REM Compile resource file (icon)
 rc.exe /nologo /fo "bin\lwsr.res" "src\lwsr.rc"
 
 REM Source files (single source of truth)
-set SOURCES=src\main.c src\config.c src\capture.c src\encoder.c src\overlay.c src\action_toolbar.c src\border.c src\replay_buffer.c src\nvenc_encoder.c src\sample_buffer.c src\mp4_muxer.c src\util.c src\logger.c src\audio_device.c src\audio_capture.c src\aac_encoder.c src\gpu_converter.c src\crash_handler.c
+set SOURCES=src\main.c src\config.c src\capture.c src\encoder.c src\overlay.c src\action_toolbar.c src\border.c src\replay_buffer.c src\nvenc_encoder.c src\sample_buffer.c src\mp4_muxer.c src\util.c src\logger.c src\audio_device.c src\audio_capture.c src\aac_encoder.c src\gpu_converter.c src\crash_handler.c src\gdiplus_api.c
 
 REM Resource file
 set RESOURCES=bin\lwsr.res
@@ -72,10 +74,41 @@ set RESOURCES=bin\lwsr.res
 REM Libraries
 set LIBS=user32.lib gdi32.lib d3d11.lib dxgi.lib mfplat.lib mfreadwrite.lib mfuuid.lib ole32.lib shell32.lib comdlg32.lib comctl32.lib dwmapi.lib winmm.lib propsys.lib oleaut32.lib strmiids.lib
 
+REM ============================================================================
+REM WARNING FLAGS DOCUMENTATION
+REM ============================================================================
+REM   /W4   - Maximum warning level (all actionable warnings)
+REM   /WX   - Treat warnings as errors (zero tolerance for warnings)
+REM
+REM INTENTIONAL SUPPRESSIONS:
+REM   /wd4201 - "nonstandard extension used: nameless struct/union"
+REM             Reason: Windows SDK headers (dxgi.h, d3d11.h, etc.) use nameless
+REM             structs extensively in DXGI_OUTPUT_DESC, DXGI_ADAPTER_DESC, etc.
+REM             This is a Microsoft extension widely used in Win32 programming.
+REM             Suppressing this is standard practice for Windows GUI/graphics apps.
+REM
+REM STATIC ANALYSIS (/analyze):
+REM   The 'analyze' build target runs MSVC static analysis which reports deeper
+REM   issues like potential null dereferences, uninitialized memory, and thread
+REM   safety concerns. These are not treated as errors (/analyze:WX-) since some
+REM   findings may be false positives or require extensive refactoring to fix.
+REM ============================================================================
+
 if "%BUILD_TYPE%"=="debug" (
     echo Building Lightweight Screen Recorder [DEBUG]...
     cl.exe /nologo /Od /Zi /MDd ^
-        /W4 /wd4201 ^
+        /W4 /WX /wd4201 ^
+        /D "DEBUG" /D "_DEBUG" /D "WIN32" /D "_WINDOWS" /D "_CRT_SECURE_NO_WARNINGS" /D "NVENCAPI=__stdcall" ^
+        /Fe"bin\lwsr.exe" ^
+        /Fd"bin\lwsr.pdb" ^
+        %SOURCES% ^
+        /link /DEBUG /SUBSYSTEM:WINDOWS ^
+        %LIBS% %RESOURCES%
+) else if "%BUILD_TYPE%"=="analyze" (
+    echo Building Lightweight Screen Recorder [STATIC ANALYSIS]...
+    echo NOTE: /analyze requires VS Enterprise or additional tooling. This build may fail if unavailable.
+    cl.exe /nologo /Od /Zi /MDd ^
+        /W4 /WX /wd4201 /analyze /analyze:WX- ^
         /D "DEBUG" /D "_DEBUG" /D "WIN32" /D "_WINDOWS" /D "_CRT_SECURE_NO_WARNINGS" /D "NVENCAPI=__stdcall" ^
         /Fe"bin\lwsr.exe" ^
         /Fd"bin\lwsr.pdb" ^
@@ -85,7 +118,7 @@ if "%BUILD_TYPE%"=="debug" (
 ) else (
     echo Building Lightweight Screen Recorder [RELEASE]...
     cl.exe /nologo /O2 /GL /GS- /MD ^
-        /W3 /wd4201 ^
+        /W4 /WX /wd4201 ^
         /D "NDEBUG" /D "WIN32" /D "_WINDOWS" /D "_CRT_SECURE_NO_WARNINGS" /D "NVENCAPI=__stdcall" ^
         /Fe"bin\lwsr.exe" ^
         %SOURCES% ^
@@ -101,6 +134,7 @@ if %ERRORLEVEL% neq 0 (
 REM Clean up intermediate files
 del *.obj >nul 2>&1
 del bin\lwsr.res >nul 2>&1
+del *.nativecodeanalysis.xml >nul 2>&1
 
 echo.
 echo Build successful! Output: bin\lwsr.exe [%BUILD_TYPE%]

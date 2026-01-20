@@ -25,7 +25,7 @@
 #include <math.h>
 #include <limits.h>
 
-// Individual audio source capture
+/* Individual audio source capture */
 struct AudioCaptureSource {
     char deviceId[256];
     AudioDeviceType type;
@@ -38,32 +38,36 @@ struct AudioCaptureSource {
     WAVEFORMATEX* deviceFormat;
     WAVEFORMATEX targetFormat;
     
-    // Per-source buffer
+    /* Per-source buffer */
     BYTE* buffer;
     int bufferSize;
     int bufferWritePos;
     int bufferAvailable;
     CRITICAL_SECTION lock;
     
-    HANDLE captureThread;  // Thread handle for proper cleanup
-    volatile LONG active;  // Thread-safe: use InterlockedExchange
+    HANDLE captureThread;  /* Thread handle for proper cleanup */
+    volatile LONG active;  /* Thread-safe: use InterlockedExchange */
     
-    // Timing for event-driven sources (virtual devices that don't send continuous packets)
-    LARGE_INTEGER lastPacketTime;   // Last time we received a packet from this source
-    LARGE_INTEGER perfFreq;         // Performance counter frequency
-    BOOL hasReceivedPacket;         // TRUE once we've received at least one packet
+    /* Timing for event-driven sources */
+    LARGE_INTEGER lastPacketTime;
+    LARGE_INTEGER perfFreq;
+    BOOL hasReceivedPacket;
     
-    // Device invalidation tracking
-    volatile LONG deviceInvalidated; // Thread-safe: TRUE if device was yanked
-    DWORD consecutiveErrors;         // Count of consecutive errors
+    /* Device invalidation tracking */
+    volatile LONG deviceInvalidated;
+    DWORD consecutiveErrors;
 };
 
-// Global enumerator
+/*
+ * Global MMDevice enumerator for audio capture.
+ * Thread Access: [Main thread creates, audio threads use via COM]
+ * Lifetime: Init to Shutdown
+ */
 static IMMDeviceEnumerator* g_audioEnumerator = NULL;
 
-// Buffer sizes
-#define MIX_BUFFER_SIZE (AUDIO_BYTES_PER_SEC * 5)  // 5 seconds
-#define SOURCE_BUFFER_SIZE (AUDIO_BYTES_PER_SEC * 2)  // 2 seconds per source
+/* Buffer size constants */
+#define MIX_BUFFER_SIZE (AUDIO_BYTES_PER_SEC * 5)     /* 5 seconds */
+#define SOURCE_BUFFER_SIZE (AUDIO_BYTES_PER_SEC * 2)  /* 2 seconds per source */
 
 BOOL AudioCapture_Init(void) {
     if (g_audioEnumerator) return TRUE;
@@ -700,6 +704,8 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
         if (bytesToMix > 0) {
             BYTE* mixChunk = (BYTE*)malloc(bytesToMix);
             if (mixChunk) {
+                // Zero-initialize to ensure silence for any unwritten portions
+                memset(mixChunk, 0, bytesToMix);
                 int numSamples = bytesToMix / AUDIO_BLOCK_ALIGN;
                 
                 for (int s = 0; s < numSamples; s++) {
@@ -798,6 +804,9 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
 }
 
 BOOL AudioCapture_Start(AudioCaptureContext* ctx) {
+    // Precondition
+    LWSR_ASSERT(ctx != NULL);
+    
     // Thread-safe check
     if (!ctx || InterlockedCompareExchange(&ctx->running, 0, 0)) return FALSE;
     
@@ -873,6 +882,11 @@ void AudioCapture_Stop(AudioCaptureContext* ctx) {
 }
 
 int AudioCapture_Read(AudioCaptureContext* ctx, BYTE* buffer, int maxBytes, LONGLONG* timestamp) {
+    // Preconditions
+    LWSR_ASSERT(ctx != NULL);
+    LWSR_ASSERT(buffer != NULL);
+    LWSR_ASSERT(maxBytes > 0);
+    
     if (!ctx || !buffer) return 0;
     
     EnterCriticalSection(&ctx->mixLock);
@@ -906,6 +920,9 @@ int AudioCapture_Read(AudioCaptureContext* ctx, BYTE* buffer, int maxBytes, LONG
 }
 
 LONGLONG AudioCapture_GetTimestamp(AudioCaptureContext* ctx) {
+    // Precondition
+    LWSR_ASSERT(ctx != NULL);
+    
     if (!ctx) return 0;
     
     LARGE_INTEGER now;
@@ -917,6 +934,9 @@ LONGLONG AudioCapture_GetTimestamp(AudioCaptureContext* ctx) {
 }
 
 BOOL AudioCapture_HasData(AudioCaptureContext* ctx) {
+    // Precondition
+    LWSR_ASSERT(ctx != NULL);
+    
     if (!ctx) return FALSE;
     
     EnterCriticalSection(&ctx->mixLock);

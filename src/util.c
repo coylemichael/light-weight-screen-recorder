@@ -9,10 +9,16 @@
  */
 
 #include "util.h"
+#include "logger.h"
 
 // Calculate video bitrate based on quality preset
 // Uses ShadowPlay-style scaling: base bitrate scales with resolution and FPS
 UINT32 Util_CalculateBitrate(int width, int height, int fps, QualityPreset quality) {
+    // Preconditions
+    LWSR_ASSERT(width > 0);
+    LWSR_ASSERT(height > 0);
+    LWSR_ASSERT(fps > 0);
+    
     // ShadowPlay-style fixed bitrates (in Mbps)
     // These are for 1440p - we scale for other resolutions
     float baseMbps;
@@ -51,6 +57,10 @@ UINT32 Util_CalculateBitrate(int width, int height, int fps, QualityPreset quali
 
 // Calculate precise timestamp for a frame (avoids cumulative rounding errors)
 LONGLONG Util_CalculateTimestamp(int frameNumber, int fps) {
+    // Preconditions
+    LWSR_ASSERT(frameNumber >= 0);
+    LWSR_ASSERT(fps > 0);
+    
     // Using exact division: (frame * 10000000) / fps
     // This avoids cumulative rounding errors that occur with additive timing
     return (LONGLONG)frameNumber * MF_UNITS_PER_SECOND / fps;
@@ -58,6 +68,10 @@ LONGLONG Util_CalculateTimestamp(int frameNumber, int fps) {
 
 // Calculate precise frame duration
 LONGLONG Util_CalculateFrameDuration(int frameNumber, int fps) {
+    // Preconditions
+    LWSR_ASSERT(frameNumber >= 0);
+    LWSR_ASSERT(fps > 0);
+    
     // Duration = next_timestamp - this_timestamp
     LONGLONG thisTime = Util_CalculateTimestamp(frameNumber, fps);
     LONGLONG nextTime = Util_CalculateTimestamp(frameNumber + 1, fps);
@@ -66,6 +80,10 @@ LONGLONG Util_CalculateFrameDuration(int frameNumber, int fps) {
 
 // Get aspect ratio dimensions from config index
 void Util_GetAspectRatioDimensions(int aspectIndex, int* ratioW, int* ratioH) {
+    // Preconditions
+    LWSR_ASSERT(ratioW != NULL);
+    LWSR_ASSERT(ratioH != NULL);
+    
     // 0=Native, 1=16:9, 2=9:16, 3=1:1, 4=4:5, 5=16:10, 6=4:3, 7=21:9, 8=32:9
     switch (aspectIndex) {
         case 1: *ratioW = 16; *ratioH = 9;  break;  // 16:9 (YouTube, Standard)
@@ -118,6 +136,11 @@ RECT Util_CalculateAspectRect(RECT sourceBounds, int ratioW, int ratioH) {
 
 // Convert wide string to UTF-8
 int Util_WideToUtf8(const WCHAR* wide, char* utf8, int maxLen) {
+    // Preconditions
+    LWSR_ASSERT(wide != NULL);
+    LWSR_ASSERT(utf8 != NULL);
+    LWSR_ASSERT(maxLen > 0);
+    
     if (!wide || !utf8 || maxLen <= 0) return 0;
     int result = WideCharToMultiByte(CP_UTF8, 0, wide, -1, utf8, maxLen, NULL, NULL);
     if (result > 0) result--;  // Exclude null terminator from count
@@ -126,6 +149,11 @@ int Util_WideToUtf8(const WCHAR* wide, char* utf8, int maxLen) {
 
 // Convert UTF-8 string to wide string
 int Util_Utf8ToWide(const char* utf8, WCHAR* wide, int maxLen) {
+    // Preconditions
+    LWSR_ASSERT(utf8 != NULL);
+    LWSR_ASSERT(wide != NULL);
+    LWSR_ASSERT(maxLen > 0);
+    
     if (!utf8 || !wide || maxLen <= 0) return 0;
     int result = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, maxLen);
     if (result > 0) result--;  // Exclude null terminator from count

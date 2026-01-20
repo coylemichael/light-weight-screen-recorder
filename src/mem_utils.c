@@ -44,6 +44,12 @@ typedef struct AllocEntry {
     struct AllocEntry* next;        /* Hash chain */
 } AllocEntry;
 
+/* ============================================================================
+ * MEMORY TRACKING STATE
+ * ============================================================================
+ * Protected by g_allocLock critical section.
+ * Thread Access: [Any thread - uses critical section]
+ */
 static AllocEntry* g_allocTable[ALLOC_TABLE_SIZE] = {0};
 static CRITICAL_SECTION g_allocLock;
 static BOOL g_initialized = FALSE;

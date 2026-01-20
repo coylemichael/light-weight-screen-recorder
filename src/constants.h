@@ -24,6 +24,55 @@
 #ifndef CONSTANTS_H
 #define CONSTANTS_H
 
+#include <assert.h>
+
+/* ============================================================================
+ * ASSERTION MACROS - Debug-time Sanity Checks
+ * ============================================================================
+ * 
+ * LWSR_ASSERT: Custom assertion macro that logs the failure before crashing.
+ * This provides better diagnostics than standard assert() because:
+ *   1. The failure message is written to our log file before abort
+ *   2. We can see what went wrong even if the debugger isn't attached
+ *   3. The log file persists after the crash for post-mortem analysis
+ * 
+ * LWSR_ASSERT_MSG: Like LWSR_ASSERT but with a custom message for context.
+ * 
+ * These macros are active in both debug and release builds by default.
+ * To disable assertions in release builds, define LWSR_DISABLE_ASSERTS.
+ * 
+ * Usage:
+ *   LWSR_ASSERT(ptr != NULL);
+ *   LWSR_ASSERT_MSG(index >= 0, "Buffer index underflow");
+ *   LWSR_ASSERT(count <= capacity);
+ */
+
+// Forward declaration of Logger_Log (to avoid circular include)
+void Logger_Log(const char* fmt, ...);
+
+#ifdef LWSR_DISABLE_ASSERTS
+    #define LWSR_ASSERT(expr)          ((void)0)
+    #define LWSR_ASSERT_MSG(expr, msg) ((void)0)
+#else
+    #define LWSR_ASSERT(expr) \
+        do { \
+            if (!(expr)) { \
+                Logger_Log("ASSERTION FAILED: %s at %s:%d in %s()\n", \
+                           #expr, __FILE__, __LINE__, __func__); \
+                assert(expr); \
+            } \
+        } while (0)
+    
+    #define LWSR_ASSERT_MSG(expr, msg) \
+        do { \
+            if (!(expr)) { \
+                Logger_Log("ASSERTION FAILED: %s - %s at %s:%d in %s()\n", \
+                           #expr, msg, __FILE__, __LINE__, __func__); \
+                assert(expr); \
+            } \
+        } while (0)
+#endif
+
 /* ============================================================================
  * TIME UNITS - Media Foundation and Windows Timing
  * ============================================================================

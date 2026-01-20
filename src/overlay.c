@@ -25,72 +25,12 @@
 #include "audio_device.h"
 #include "border.h"
 #include "capture.h"
+#include "gdiplus_api.h"
 
-// GDI+ Flat API for anti-aliased drawing
-#include <objbase.h>
+// Additional GDI+ type for image loading (not in shared API)
+typedef void* GpImage;
 
-// GDI+ types and functions (flat API)
-typedef struct GdiplusStartupInput {
-    UINT32 GdiplusVersion;
-    void* DebugEventCallback;
-    BOOL SuppressBackgroundThread;
-    BOOL SuppressExternalCodecs;
-} GdiplusStartupInput;
-
-typedef void* GpGraphics;
-typedef void* GpBrush;
-typedef void* GpSolidFill;
-typedef void* GpPen;
-typedef int GpStatus;
-
-// GDI+ function pointers
-typedef GpStatus (WINAPI *GdiplusStartupFunc)(ULONG_PTR*, const GdiplusStartupInput*, void*);
-typedef void (WINAPI *GdiplusShutdownFunc)(ULONG_PTR);
-typedef GpStatus (WINAPI *GdipCreateFromHDCFunc)(HDC, GpGraphics**);
-typedef GpStatus (WINAPI *GdipDeleteGraphicsFunc)(GpGraphics*);
-typedef GpStatus (WINAPI *GdipSetSmoothingModeFunc)(GpGraphics*, int);
-typedef GpStatus (WINAPI *GdipCreateSolidFillFunc)(DWORD, GpSolidFill**);
-typedef GpStatus (WINAPI *GdipDeleteBrushFunc)(GpBrush*);
-typedef GpStatus (WINAPI *GdipCreatePenFunc)(DWORD, float, int, GpPen**);
-typedef GpStatus (WINAPI *GdipDeletePenFunc)(GpPen*);
-typedef GpStatus (WINAPI *GdipFillRectangleFunc)(GpGraphics*, GpBrush*, float, float, float, float);
-typedef GpStatus (WINAPI *GdipFillEllipseFunc)(GpGraphics*, GpBrush*, float, float, float, float);
-typedef GpStatus (WINAPI *GdipDrawRectangleFunc)(GpGraphics*, GpPen*, float, float, float, float);
-typedef GpStatus (WINAPI *GdipFillPathFunc)(GpGraphics*, GpBrush*, void*);
-typedef GpStatus (WINAPI *GdipDrawPathFunc)(GpGraphics*, GpPen*, void*);
-typedef GpStatus (WINAPI *GdipCreatePathFunc)(int, void**);
-typedef GpStatus (WINAPI *GdipDeletePathFunc)(void*);
-typedef GpStatus (WINAPI *GdipAddPathArcFunc)(void*, float, float, float, float, float, float);
-typedef GpStatus (WINAPI *GdipAddPathLineFunc)(void*, float, float, float, float);
-typedef GpStatus (WINAPI *GdipClosePathFigureFunc)(void*);
-typedef GpStatus (WINAPI *GdipStartPathFigureFunc)(void*);
-
-static HMODULE g_gdiplus = NULL;
-static ULONG_PTR g_gdiplusToken = 0;
-static GdipCreateFromHDCFunc GdipCreateFromHDC = NULL;
-static GdipDeleteGraphicsFunc GdipDeleteGraphics = NULL;
-static GdipSetSmoothingModeFunc GdipSetSmoothingMode = NULL;
-static GdipCreateSolidFillFunc GdipCreateSolidFill = NULL;
-static GdipDeleteBrushFunc GdipDeleteBrush = NULL;
-static GdipCreatePenFunc GdipCreatePen1 = NULL;
-static GdipDeletePenFunc GdipDeletePen = NULL;
-static GdipFillRectangleFunc GdipFillRectangle = NULL;
-static GdipFillEllipseFunc GdipFillEllipse = NULL;
-static GdipFillPathFunc GdipFillPath = NULL;
-static GdipDrawPathFunc GdipDrawPath = NULL;
-static GdipCreatePathFunc GdipCreatePath = NULL;
-static GdipDeletePathFunc GdipDeletePath = NULL;
-static GdipAddPathArcFunc GdipAddPathArc = NULL;
-static GdipAddPathLineFunc GdipAddPathLine = NULL;
-static GdipClosePathFigureFunc GdipClosePathFigure = NULL;
-static GdipStartPathFigureFunc GdipStartPathFigure = NULL;
-
-// Smoothing mode constants
-#define SmoothingModeAntiAlias 4
-#define UnitPixel 2
-#define FillModeAlternate 0
-
-// DWM window corner preference (Windows 11+)
+/* DWM window corner preference (Windows 11+) */
 #ifndef DWMWA_WINDOW_CORNER_PREFERENCE
 #define DWMWA_WINDOW_CORNER_PREFERENCE 33
 #endif
@@ -212,45 +152,90 @@ typedef enum {
     HANDLE_BL, HANDLE_B, HANDLE_BR
 } HandlePosition;
 
-// Window state
-static HINSTANCE g_hInstance;
-static CaptureMode g_currentMode = MODE_NONE;
-static CaptureMode g_recordingMode = MODE_NONE;  // Mode that started recording
-static SelectionState g_selState = SEL_NONE;
-static HandlePosition g_activeHandle = HANDLE_NONE;
-static BOOL g_isDragging = FALSE;
-static POINT g_dragStart;
-static POINT g_dragEnd;
-static POINT g_moveStart;      // For moving selection
-static RECT g_selectedRect;
-static RECT g_originalRect;    // Original rect before resize/move
-static HWND g_settingsWnd = NULL;
-static HWND g_crosshairWnd = NULL;
-static HWND g_recordingPanel = NULL;  // Inline timer + stop in control bar
-static EncoderState g_encoder;
-static HANDLE g_recordThread = NULL;
-static volatile LONG g_stopRecording = FALSE;  // Thread-safe: use InterlockedExchange
-static DWORD g_recordStartTime = 0;
-static BOOL g_recordingPanelHovered = FALSE;  // Hover state for recording panel
-static BOOL g_waitingForHotkey = FALSE;       // Waiting for user to press hotkey
-static HWND g_lastHoveredIconBtn = NULL;      // Track which icon button was last hovered
-static HWND g_lastHoveredCaptureBtn = NULL;   // Track which capture button was last hovered
-static BOOL g_minimizedToTray = FALSE;        // Currently minimized to system tray
-static NOTIFYICONDATAA g_trayIcon = {0};      // System tray icon data
+/* ============================================================================
+ * OVERLAY UI STATE
+ * ============================================================================
+ * Consolidated state structs for the overlay window UI.
+ * Thread Access: [Main thread only unless otherwise noted]
+ */
 
-// Handle size
+/*
+ * SelectionUIState - Mouse-driven selection rectangle state
+ */
+typedef struct SelectionUIState {
+    SelectionState state;           /* Current selection state machine */
+    HandlePosition activeHandle;    /* Which resize handle is active */
+    BOOL isDragging;
+    POINT dragStart;
+    POINT dragEnd;
+    POINT moveStart;                /* For moving selection */
+    RECT selectedRect;
+    RECT originalRect;              /* Original rect before resize/move */
+} SelectionUIState;
+
+/*
+ * RecordingUIState - Recording thread and timing state
+ * Note: stopRecording is atomic for thread-safe access
+ */
+typedef struct RecordingUIState {
+    EncoderState encoder;           /* Traditional recording encoder */
+    HANDLE thread;                  /* Recording thread handle */
+    volatile LONG stopRecording;    /* Thread Access: [Any - atomic] */
+    ULONGLONG startTime;            /* Recording start time (64-bit) */
+    CaptureMode recordingMode;      /* Mode that started recording */
+} RecordingUIState;
+
+/*
+ * OverlayWindowState - Window handles for overlay UI
+ */
+typedef struct OverlayWindowState {
+    HINSTANCE hInstance;
+    HWND settingsWnd;
+    HWND crosshairWnd;
+    HWND recordingPanel;            /* Inline timer + stop in control bar */
+} OverlayWindowState;
+
+/*
+ * TrayIconState - System tray icon state
+ */
+typedef struct TrayIconState {
+    BOOL minimizedToTray;
+    NOTIFYICONDATAA iconData;
+} TrayIconState;
+
+/*
+ * InteractionState - UI interaction tracking
+ */
+typedef struct InteractionState {
+    BOOL recordingPanelHovered;
+    BOOL waitingForHotkey;
+    HWND lastHoveredIconBtn;
+    HWND lastHoveredCaptureBtn;
+} InteractionState;
+
+/* Static instances of consolidated state */
+static SelectionUIState g_selection = {0};
+static RecordingUIState g_recording = {0};
+static OverlayWindowState g_windows = {0};
+static TrayIconState g_tray = {0};
+static InteractionState g_interaction = {0};
+
+/* Current capture mode selection (simple enough to leave as scalar) */
+static CaptureMode g_currentMode = MODE_NONE;
+
+/* Handle size constant */
 #define HANDLE_SIZE 10
 
-// Recording thread
+/* Recording thread */
 static DWORD WINAPI RecordingThread(LPVOID param);
 
-// Window procedures
+/* Window procedures */
 static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 static LRESULT CALLBACK CrosshairWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
-// Helper functions
+/* Helper functions */
 static HandlePosition HitTestHandle(POINT pt);
 static void UpdateActionToolbar(void);
 static void UpdateTimerDisplay(void);
@@ -270,49 +255,6 @@ static void ActionToolbar_OnRecord(void);
 static void ActionToolbar_OnClose(void);
 static void ActionToolbar_OnSettings(void);
 
-// Initialize GDI+ for anti-aliased drawing
-static BOOL InitGdiPlus(void) {
-    g_gdiplus = LoadLibraryW(L"gdiplus.dll");
-    if (!g_gdiplus) return FALSE;
-    
-    GdiplusStartupFunc GdiplusStartup = (GdiplusStartupFunc)GetProcAddress(g_gdiplus, "GdiplusStartup");
-    if (!GdiplusStartup) return FALSE;
-    
-    GdiplusStartupInput input = { 1, NULL, FALSE, FALSE };
-    if (GdiplusStartup(&g_gdiplusToken, &input, NULL) != 0) return FALSE;
-    
-    // Load all needed functions
-    GdipCreateFromHDC = (GdipCreateFromHDCFunc)GetProcAddress(g_gdiplus, "GdipCreateFromHDC");
-    GdipDeleteGraphics = (GdipDeleteGraphicsFunc)GetProcAddress(g_gdiplus, "GdipDeleteGraphics");
-    GdipSetSmoothingMode = (GdipSetSmoothingModeFunc)GetProcAddress(g_gdiplus, "GdipSetSmoothingMode");
-    GdipCreateSolidFill = (GdipCreateSolidFillFunc)GetProcAddress(g_gdiplus, "GdipCreateSolidFill");
-    GdipDeleteBrush = (GdipDeleteBrushFunc)GetProcAddress(g_gdiplus, "GdipDeleteBrush");
-    GdipCreatePen1 = (GdipCreatePenFunc)GetProcAddress(g_gdiplus, "GdipCreatePen1");
-    GdipDeletePen = (GdipDeletePenFunc)GetProcAddress(g_gdiplus, "GdipDeletePen");
-    GdipFillRectangle = (GdipFillRectangleFunc)GetProcAddress(g_gdiplus, "GdipFillRectangle");
-    GdipFillEllipse = (GdipFillEllipseFunc)GetProcAddress(g_gdiplus, "GdipFillEllipse");
-    GdipFillPath = (GdipFillPathFunc)GetProcAddress(g_gdiplus, "GdipFillPath");
-    GdipDrawPath = (GdipDrawPathFunc)GetProcAddress(g_gdiplus, "GdipDrawPath");
-    GdipCreatePath = (GdipCreatePathFunc)GetProcAddress(g_gdiplus, "GdipCreatePath");
-    GdipDeletePath = (GdipDeletePathFunc)GetProcAddress(g_gdiplus, "GdipDeletePath");
-    GdipAddPathArc = (GdipAddPathArcFunc)GetProcAddress(g_gdiplus, "GdipAddPathArc");
-    GdipAddPathLine = (GdipAddPathLineFunc)GetProcAddress(g_gdiplus, "GdipAddPathLine");
-    GdipClosePathFigure = (GdipClosePathFigureFunc)GetProcAddress(g_gdiplus, "GdipClosePathFigure");
-    GdipStartPathFigure = (GdipStartPathFigureFunc)GetProcAddress(g_gdiplus, "GdipStartPathFigure");
-    
-    return TRUE;
-}
-
-static void ShutdownGdiPlus(void) {
-    if (g_gdiplusToken && g_gdiplus) {
-        GdiplusShutdownFunc GdiplusShutdown = (GdiplusShutdownFunc)GetProcAddress(g_gdiplus, "GdiplusShutdown");
-        if (GdiplusShutdown) GdiplusShutdown(g_gdiplusToken);
-    }
-    if (g_gdiplus) FreeLibrary(g_gdiplus);
-    g_gdiplus = NULL;
-    g_gdiplusToken = 0;
-}
-
 // Convert COLORREF to ARGB for GDI+
 static DWORD ColorRefToARGB(COLORREF cr, BYTE alpha) {
     return ((DWORD)alpha << 24) | 
@@ -323,12 +265,12 @@ static DWORD ColorRefToARGB(COLORREF cr, BYTE alpha) {
 
 // Draw anti-aliased filled rounded rectangle
 static void DrawRoundedRectAA(HDC hdc, RECT* rect, int radius, COLORREF fillColor, COLORREF borderColor) {
-    if (!GdipCreateFromHDC) return;
+    if (!g_gdip.CreateFromHDC) return;
     
     GpGraphics* graphics = NULL;
-    if (GdipCreateFromHDC(hdc, &graphics) != 0) return;
+    if (g_gdip.CreateFromHDC(hdc, &graphics) != 0) return;
     
-    GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
+    g_gdip.SetSmoothingMode(graphics, SmoothingModeAntiAlias);
     
     // Inset by 0.5 to ensure border is fully visible (GDI+ draws strokes centered on path)
     float x = (float)rect->left + 0.5f;
@@ -339,51 +281,51 @@ static void DrawRoundedRectAA(HDC hdc, RECT* rect, int radius, COLORREF fillColo
     float d = r * 2.0f;
     
     // Create rounded rectangle path
-    void* path = NULL;
-    GdipCreatePath(FillModeAlternate, &path);
+    GpPath* path = NULL;
+    g_gdip.CreatePath(FillModeAlternate, &path);
     
     // Top-left arc
-    GdipAddPathArc(path, x, y, d, d, 180.0f, 90.0f);
+    g_gdip.AddPathArc(path, x, y, d, d, 180.0f, 90.0f);
     // Top-right arc
-    GdipAddPathArc(path, x + w - d, y, d, d, 270.0f, 90.0f);
+    g_gdip.AddPathArc(path, x + w - d, y, d, d, 270.0f, 90.0f);
     // Bottom-right arc
-    GdipAddPathArc(path, x + w - d, y + h - d, d, d, 0.0f, 90.0f);
+    g_gdip.AddPathArc(path, x + w - d, y + h - d, d, d, 0.0f, 90.0f);
     // Bottom-left arc
-    GdipAddPathArc(path, x, y + h - d, d, d, 90.0f, 90.0f);
-    GdipClosePathFigure(path);
+    g_gdip.AddPathArc(path, x, y + h - d, d, d, 90.0f, 90.0f);
+    g_gdip.ClosePathFigure(path);
     
     // Fill
     GpSolidFill* brush = NULL;
-    GdipCreateSolidFill(ColorRefToARGB(fillColor, 255), &brush);
-    GdipFillPath(graphics, brush, path);
-    GdipDeleteBrush(brush);
+    g_gdip.CreateSolidFill(ColorRefToARGB(fillColor, 255), &brush);
+    g_gdip.FillPath(graphics, brush, path);
+    g_gdip.BrushDelete(brush);
     
     // Border
     GpPen* pen = NULL;
-    GdipCreatePen1(ColorRefToARGB(borderColor, 255), 1.0f, UnitPixel, &pen);
-    GdipDrawPath(graphics, pen, path);
-    GdipDeletePen(pen);
+    g_gdip.CreatePen1(ColorRefToARGB(borderColor, 255), 1.0f, UnitPixel, &pen);
+    g_gdip.DrawPath(graphics, pen, path);
+    g_gdip.PenDelete(pen);
     
-    GdipDeletePath(path);
-    GdipDeleteGraphics(graphics);
+    g_gdip.DeletePath(path);
+    g_gdip.DeleteGraphics(graphics);
 }
 
 // Draw anti-aliased filled circle
 static void DrawCircleAA(HDC hdc, int cx, int cy, int radius, COLORREF color) {
-    if (!GdipCreateFromHDC) return;
+    if (!g_gdip.CreateFromHDC) return;
     
     GpGraphics* graphics = NULL;
-    if (GdipCreateFromHDC(hdc, &graphics) != 0) return;
+    if (g_gdip.CreateFromHDC(hdc, &graphics) != 0) return;
     
-    GdipSetSmoothingMode(graphics, SmoothingModeAntiAlias);
+    g_gdip.SetSmoothingMode(graphics, SmoothingModeAntiAlias);
     
     GpSolidFill* brush = NULL;
-    GdipCreateSolidFill(ColorRefToARGB(color, 255), &brush);
-    GdipFillEllipse(graphics, brush, 
+    g_gdip.CreateSolidFill(ColorRefToARGB(color, 255), &brush);
+    g_gdip.FillEllipse(graphics, brush, 
                     (float)(cx - radius), (float)(cy - radius), 
                     (float)(radius * 2), (float)(radius * 2));
-    GdipDeleteBrush(brush);
-    GdipDeleteGraphics(graphics);
+    g_gdip.BrushDelete(brush);
+    g_gdip.DeleteGraphics(graphics);
 }
 
 // Apply smooth rounded corners using DWM (Windows 11+)
@@ -438,6 +380,11 @@ static void UpdateOverlayBitmap(void) {
     
     BYTE* pBits = NULL;
     HBITMAP hBitmap = CreateDIBSection(screenDC, &bmi, DIB_RGB_COLORS, (void**)&pBits, NULL, 0);
+    if (!hBitmap || !pBits) {
+        DeleteDC(memDC);
+        ReleaseDC(NULL, screenDC);
+        return;
+    }
     HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, hBitmap);
     
     // Fill entire overlay with semi-transparent dark (alpha ~100 out of 255)
@@ -453,16 +400,16 @@ static void UpdateOverlayBitmap(void) {
     }
     
     // If we have a selection (drawing or complete), punch a clear hole
-    BOOL hasSelection = !IsRectEmpty(&g_selectedRect) && 
-                        (g_selState == SEL_DRAWING || g_selState == SEL_COMPLETE || 
-                         g_selState == SEL_MOVING || g_selState == SEL_RESIZING);
+    BOOL hasSelection = !IsRectEmpty(&g_selection.selectedRect) && 
+                        (g_selection.state == SEL_DRAWING || g_selection.state == SEL_COMPLETE || 
+                         g_selection.state == SEL_MOVING || g_selection.state == SEL_RESIZING);
     
     if (hasSelection) {
         // Convert screen coords to window coords
-        int selLeft = g_selectedRect.left - wndRect.left;
-        int selTop = g_selectedRect.top - wndRect.top;
-        int selRight = g_selectedRect.right - wndRect.left;
-        int selBottom = g_selectedRect.bottom - wndRect.top;
+        int selLeft = g_selection.selectedRect.left - wndRect.left;
+        int selTop = g_selection.selectedRect.top - wndRect.top;
+        int selRight = g_selection.selectedRect.right - wndRect.left;
+        int selBottom = g_selection.selectedRect.bottom - wndRect.top;
         
         // Clamp to window bounds
         if (selLeft < 0) selLeft = 0;
@@ -486,7 +433,7 @@ static void UpdateOverlayBitmap(void) {
         DrawSelectionBorder(memDC, &borderRect);
         
         // Draw resize handles when selection is complete
-        if (g_selState == SEL_COMPLETE || g_selState == SEL_MOVING || g_selState == SEL_RESIZING) {
+        if (g_selection.state == SEL_COMPLETE || g_selection.state == SEL_MOVING || g_selection.state == SEL_RESIZING) {
             HBRUSH whiteBrush = CreateSolidBrush(RGB(255, 255, 255));
             HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, whiteBrush);
             HPEN whitePen = CreatePen(PS_SOLID, 1, RGB(200, 200, 200));
@@ -531,8 +478,8 @@ static void UpdateOverlayBitmap(void) {
 
 // Update crosshair position - positions the size indicator near cursor
 static void UpdateCrosshair(int x, int y) {
-    if (!g_crosshairWnd) return;
-    if (!IsWindowVisible(g_crosshairWnd)) return;
+    if (!g_windows.crosshairWnd) return;
+    if (!IsWindowVisible(g_windows.crosshairWnd)) return;
     
     // Get screen bounds to determine corner placement
     RECT screenRect;
@@ -555,57 +502,57 @@ static void UpdateCrosshair(int x, int y) {
         posY = y + offset;
     }
     
-    SetWindowPos(g_crosshairWnd, HWND_TOPMOST, posX, posY, 
+    SetWindowPos(g_windows.crosshairWnd, HWND_TOPMOST, posX, posY, 
                  crossSize, crossSize, SWP_NOACTIVATE);
-    InvalidateRect(g_crosshairWnd, NULL, FALSE);
+    InvalidateRect(g_windows.crosshairWnd, NULL, FALSE);
 }
 
 // Hit test for resize handles - returns which handle is under the point
 static HandlePosition HitTestHandle(POINT pt) {
-    if (IsRectEmpty(&g_selectedRect)) return HANDLE_NONE;
+    if (IsRectEmpty(&g_selection.selectedRect)) return HANDLE_NONE;
     
     int hs = HANDLE_SIZE;
-    int cx = (g_selectedRect.left + g_selectedRect.right) / 2;
-    int cy = (g_selectedRect.top + g_selectedRect.bottom) / 2;
+    int cx = (g_selection.selectedRect.left + g_selection.selectedRect.right) / 2;
+    int cy = (g_selection.selectedRect.top + g_selection.selectedRect.bottom) / 2;
     
     // Check corner handles first (higher priority)
     RECT handleRect;
     
     // Top-left
-    SetRect(&handleRect, g_selectedRect.left - hs, g_selectedRect.top - hs, 
-            g_selectedRect.left + hs, g_selectedRect.top + hs);
+    SetRect(&handleRect, g_selection.selectedRect.left - hs, g_selection.selectedRect.top - hs, 
+            g_selection.selectedRect.left + hs, g_selection.selectedRect.top + hs);
     if (PtInRect(&handleRect, pt)) return HANDLE_TL;
     
     // Top-right
-    SetRect(&handleRect, g_selectedRect.right - hs, g_selectedRect.top - hs,
-            g_selectedRect.right + hs, g_selectedRect.top + hs);
+    SetRect(&handleRect, g_selection.selectedRect.right - hs, g_selection.selectedRect.top - hs,
+            g_selection.selectedRect.right + hs, g_selection.selectedRect.top + hs);
     if (PtInRect(&handleRect, pt)) return HANDLE_TR;
     
     // Bottom-left
-    SetRect(&handleRect, g_selectedRect.left - hs, g_selectedRect.bottom - hs,
-            g_selectedRect.left + hs, g_selectedRect.bottom + hs);
+    SetRect(&handleRect, g_selection.selectedRect.left - hs, g_selection.selectedRect.bottom - hs,
+            g_selection.selectedRect.left + hs, g_selection.selectedRect.bottom + hs);
     if (PtInRect(&handleRect, pt)) return HANDLE_BL;
     
     // Bottom-right
-    SetRect(&handleRect, g_selectedRect.right - hs, g_selectedRect.bottom - hs,
-            g_selectedRect.right + hs, g_selectedRect.bottom + hs);
+    SetRect(&handleRect, g_selection.selectedRect.right - hs, g_selection.selectedRect.bottom - hs,
+            g_selection.selectedRect.right + hs, g_selection.selectedRect.bottom + hs);
     if (PtInRect(&handleRect, pt)) return HANDLE_BR;
     
     // Edge handles
     // Top
-    SetRect(&handleRect, cx - hs, g_selectedRect.top - hs, cx + hs, g_selectedRect.top + hs);
+    SetRect(&handleRect, cx - hs, g_selection.selectedRect.top - hs, cx + hs, g_selection.selectedRect.top + hs);
     if (PtInRect(&handleRect, pt)) return HANDLE_T;
     
     // Bottom
-    SetRect(&handleRect, cx - hs, g_selectedRect.bottom - hs, cx + hs, g_selectedRect.bottom + hs);
+    SetRect(&handleRect, cx - hs, g_selection.selectedRect.bottom - hs, cx + hs, g_selection.selectedRect.bottom + hs);
     if (PtInRect(&handleRect, pt)) return HANDLE_B;
     
     // Left
-    SetRect(&handleRect, g_selectedRect.left - hs, cy - hs, g_selectedRect.left + hs, cy + hs);
+    SetRect(&handleRect, g_selection.selectedRect.left - hs, cy - hs, g_selection.selectedRect.left + hs, cy + hs);
     if (PtInRect(&handleRect, pt)) return HANDLE_L;
     
     // Right
-    SetRect(&handleRect, g_selectedRect.right - hs, cy - hs, g_selectedRect.right + hs, cy + hs);
+    SetRect(&handleRect, g_selection.selectedRect.right - hs, cy - hs, g_selection.selectedRect.right + hs, cy + hs);
     if (PtInRect(&handleRect, pt)) return HANDLE_R;
     
     return HANDLE_NONE;
@@ -613,20 +560,20 @@ static HandlePosition HitTestHandle(POINT pt) {
 
 // Check if point is inside the selection (for moving)
 static BOOL PtInSelection(POINT pt) {
-    return PtInRect(&g_selectedRect, pt);
+    return PtInRect(&g_selection.selectedRect, pt);
 }
 
 // Check if point is on the selection border (for moving with border hover)
 static BOOL PtOnSelectionBorder(POINT pt) {
-    if (IsRectEmpty(&g_selectedRect)) return FALSE;
+    if (IsRectEmpty(&g_selection.selectedRect)) return FALSE;
     
     int borderWidth = 8; // Width of the border hit zone
     
     // Create outer and inner rects
-    RECT outer = g_selectedRect;
+    RECT outer = g_selection.selectedRect;
     InflateRect(&outer, borderWidth, borderWidth);
     
-    RECT inner = g_selectedRect;
+    RECT inner = g_selection.selectedRect;
     InflateRect(&inner, -borderWidth, -borderWidth);
     
     // Point must be in outer but not in inner
@@ -646,15 +593,15 @@ static HCURSOR GetHandleCursor(HandlePosition handle) {
 
 // Show/hide the action toolbar (uses new action_toolbar module)
 static void ShowActionToolbar(BOOL show) {
-    if (show && !IsRectEmpty(&g_selectedRect)) {
-        int cx = (g_selectedRect.left + g_selectedRect.right) / 2;
-        int posY = g_selectedRect.bottom + 10;
+    if (show && !IsRectEmpty(&g_selection.selectedRect)) {
+        int cx = (g_selection.selectedRect.left + g_selection.selectedRect.right) / 2;
+        int posY = g_selection.selectedRect.bottom + 10;
         
         // Check if it would go off screen
         RECT screenRect;
         Capture_GetAllMonitorsBounds(&screenRect);
         if (posY + 40 > screenRect.bottom - 20) {
-            posY = g_selectedRect.top - 40 - 10;
+            posY = g_selection.selectedRect.top - 40 - 10;
         }
         
         ActionToolbar_Show(cx, posY);
@@ -665,15 +612,15 @@ static void ShowActionToolbar(BOOL show) {
 
 // Update the action toolbar position
 static void UpdateActionToolbar(void) {
-    ShowActionToolbar(g_selState == SEL_COMPLETE);
+    ShowActionToolbar(g_selection.state == SEL_COMPLETE);
 }
 
 // Capture screen region to clipboard
 static void CaptureToClipboard(void) {
-    if (IsRectEmpty(&g_selectedRect)) return;
+    if (IsRectEmpty(&g_selection.selectedRect)) return;
     
-    int w = g_selectedRect.right - g_selectedRect.left;
-    int h = g_selectedRect.bottom - g_selectedRect.top;
+    int w = g_selection.selectedRect.right - g_selection.selectedRect.left;
+    int h = g_selection.selectedRect.bottom - g_selection.selectedRect.top;
     
     // Hide overlay temporarily
     ShowWindow(g_overlayWnd, SW_HIDE);
@@ -685,7 +632,7 @@ static void CaptureToClipboard(void) {
     HBITMAP hBitmap = CreateCompatibleBitmap(screenDC, w, h);
     HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, hBitmap);
     
-    BitBlt(memDC, 0, 0, w, h, screenDC, g_selectedRect.left, g_selectedRect.top, SRCCOPY);
+    BitBlt(memDC, 0, 0, w, h, screenDC, g_selection.selectedRect.left, g_selection.selectedRect.top, SRCCOPY);
     
     SelectObject(memDC, oldBitmap);
     DeleteDC(memDC);
@@ -701,18 +648,18 @@ static void CaptureToClipboard(void) {
     }
     
     // Clear selection state - overlay stays hidden, show control panel
-    g_selState = SEL_NONE;
-    SetRectEmpty(&g_selectedRect);
+    g_selection.state = SEL_NONE;
+    SetRectEmpty(&g_selection.selectedRect);
     InterlockedExchange(&g_isSelecting, FALSE);
     ShowWindow(g_controlWnd, SW_SHOW);
 }
 
 // Capture screen region to file (Save As dialog)
 static void CaptureToFile(void) {
-    if (IsRectEmpty(&g_selectedRect)) return;
+    if (IsRectEmpty(&g_selection.selectedRect)) return;
     
-    int w = g_selectedRect.right - g_selectedRect.left;
-    int h = g_selectedRect.bottom - g_selectedRect.top;
+    int w = g_selection.selectedRect.right - g_selection.selectedRect.left;
+    int h = g_selection.selectedRect.bottom - g_selection.selectedRect.top;
     
     // Hide overlay temporarily
     ShowWindow(g_overlayWnd, SW_HIDE);
@@ -724,7 +671,7 @@ static void CaptureToFile(void) {
     HBITMAP hBitmap = CreateCompatibleBitmap(screenDC, w, h);
     HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, hBitmap);
     
-    BitBlt(memDC, 0, 0, w, h, screenDC, g_selectedRect.left, g_selectedRect.top, SRCCOPY);
+    BitBlt(memDC, 0, 0, w, h, screenDC, g_selection.selectedRect.left, g_selection.selectedRect.top, SRCCOPY);
     
     SelectObject(memDC, oldBitmap);
     DeleteDC(memDC);
@@ -764,8 +711,8 @@ static void CaptureToFile(void) {
     }
     
     // Clear selection state - overlay stays hidden, show control panel
-    g_selState = SEL_NONE;
-    SetRectEmpty(&g_selectedRect);
+    g_selection.state = SEL_NONE;
+    SetRectEmpty(&g_selection.selectedRect);
     InterlockedExchange(&g_isSelecting, FALSE);
     ShowWindow(g_controlWnd, SW_SHOW);
 }
@@ -776,7 +723,7 @@ static void CaptureToFile(void) {
 
 // Load icon from PNG file using GDI+ and scale to proper tray icon size
 static HICON LoadIconFromPNG(const char* filename) {
-    if (!GdipCreateFromHDC) return NULL;  // GDI+ not loaded
+    if (!g_gdip.CreateFromHDC) return NULL;  // GDI+ not loaded
     
     // Convert filename to wide string
     WCHAR wFilename[MAX_PATH];
@@ -791,13 +738,13 @@ static HICON LoadIconFromPNG(const char* filename) {
     typedef int (WINAPI *GdipGetImageThumbnailFunc)(void*, UINT, UINT, void**, void*, void*);
     
     GdipLoadImageFromFileFunc pGdipLoadImageFromFile = 
-        (GdipLoadImageFromFileFunc)GetProcAddress(g_gdiplus, "GdipLoadImageFromFile");
+        (GdipLoadImageFromFileFunc)GetProcAddress(g_gdip.module, "GdipLoadImageFromFile");
     GdipCreateHBITMAPFromBitmapFunc pGdipCreateHBITMAPFromBitmap = 
-        (GdipCreateHBITMAPFromBitmapFunc)GetProcAddress(g_gdiplus, "GdipCreateHBITMAPFromBitmap");
+        (GdipCreateHBITMAPFromBitmapFunc)GetProcAddress(g_gdip.module, "GdipCreateHBITMAPFromBitmap");
     GdipDisposeImageFunc pGdipDisposeImage = 
-        (GdipDisposeImageFunc)GetProcAddress(g_gdiplus, "GdipDisposeImage");
+        (GdipDisposeImageFunc)GetProcAddress(g_gdip.module, "GdipDisposeImage");
     GdipGetImageThumbnailFunc pGdipGetImageThumbnail =
-        (GdipGetImageThumbnailFunc)GetProcAddress(g_gdiplus, "GdipGetImageThumbnail");
+        (GdipGetImageThumbnailFunc)GetProcAddress(g_gdip.module, "GdipGetImageThumbnail");
     
     // Suppress unused warnings for functions we may use later
     (void)pGdipGetImageThumbnail;
@@ -850,14 +797,14 @@ static void* g_settingsImage = NULL;  // GDI+ image for settings icon
 
 // Load PNG file as GDI+ image (returns void* that is a GpImage*)
 static void* LoadPNGImage(const char* filename) {
-    if (!g_gdiplus) return NULL;
+    if (!g_gdip.module) return NULL;
     
     WCHAR wFilename[MAX_PATH];
     MultiByteToWideChar(CP_ACP, 0, filename, -1, wFilename, MAX_PATH);
     
     typedef int (WINAPI *GdipLoadImageFromFileFunc)(const WCHAR*, void**);
     GdipLoadImageFromFileFunc pGdipLoadImageFromFile = 
-        (GdipLoadImageFromFileFunc)GetProcAddress(g_gdiplus, "GdipLoadImageFromFile");
+        (GdipLoadImageFromFileFunc)GetProcAddress(g_gdip.module, "GdipLoadImageFromFile");
     
     if (!pGdipLoadImageFromFile) return NULL;
     
@@ -870,7 +817,7 @@ static void* LoadPNGImage(const char* filename) {
 
 // Draw GDI+ image to HDC at specified rectangle with proper alpha blending
 static void DrawPNGImage(HDC hdc, void* image, int x, int y, int width, int height) {
-    if (!image || !GdipCreateFromHDC) return;
+    if (!image || !g_gdip.CreateFromHDC) return;
     
     typedef int (WINAPI *GdipDrawImageRectIFunc)(void*, void*, int, int, int, int);
     typedef int (WINAPI *GdipSetCompositingModeFunc)(void*, int);
@@ -879,20 +826,20 @@ static void DrawPNGImage(HDC hdc, void* image, int x, int y, int width, int heig
     typedef int (WINAPI *GdipSetPixelOffsetModeFunc)(void*, int);
     
     GdipDrawImageRectIFunc pGdipDrawImageRectI = 
-        (GdipDrawImageRectIFunc)GetProcAddress(g_gdiplus, "GdipDrawImageRectI");
+        (GdipDrawImageRectIFunc)GetProcAddress(g_gdip.module, "GdipDrawImageRectI");
     GdipSetCompositingModeFunc pGdipSetCompositingMode =
-        (GdipSetCompositingModeFunc)GetProcAddress(g_gdiplus, "GdipSetCompositingMode");
+        (GdipSetCompositingModeFunc)GetProcAddress(g_gdip.module, "GdipSetCompositingMode");
     GdipSetCompositingQualityFunc pGdipSetCompositingQuality =
-        (GdipSetCompositingQualityFunc)GetProcAddress(g_gdiplus, "GdipSetCompositingQuality");
+        (GdipSetCompositingQualityFunc)GetProcAddress(g_gdip.module, "GdipSetCompositingQuality");
     GdipSetInterpolationModeFunc pGdipSetInterpolationMode = 
-        (GdipSetInterpolationModeFunc)GetProcAddress(g_gdiplus, "GdipSetInterpolationMode");
+        (GdipSetInterpolationModeFunc)GetProcAddress(g_gdip.module, "GdipSetInterpolationMode");
     GdipSetPixelOffsetModeFunc pGdipSetPixelOffsetMode =
-        (GdipSetPixelOffsetModeFunc)GetProcAddress(g_gdiplus, "GdipSetPixelOffsetMode");
+        (GdipSetPixelOffsetModeFunc)GetProcAddress(g_gdip.module, "GdipSetPixelOffsetMode");
     
     if (!pGdipDrawImageRectI) return;
     
     GpGraphics* graphics = NULL;
-    if (GdipCreateFromHDC(hdc, &graphics) != 0 || !graphics) return;
+    if (g_gdip.CreateFromHDC(hdc, &graphics) != 0 || !graphics) return;
     
     // Set compositing mode to SourceOver for proper alpha blending
     if (pGdipSetCompositingMode) {
@@ -915,7 +862,7 @@ static void DrawPNGImage(HDC hdc, void* image, int x, int y, int width, int heig
     }
     
     pGdipDrawImageRectI(graphics, image, x, y, width, height);
-    GdipDeleteGraphics(graphics);
+    g_gdip.DeleteGraphics(graphics);
 }
 
 // Free GDI+ image
@@ -923,7 +870,7 @@ static void FreePNGImage(void* image) {
     if (!image) return;
     typedef int (WINAPI *GdipDisposeImageFunc)(void*);
     GdipDisposeImageFunc pGdipDisposeImage = 
-        (GdipDisposeImageFunc)GetProcAddress(g_gdiplus, "GdipDisposeImage");
+        (GdipDisposeImageFunc)GetProcAddress(g_gdip.module, "GdipDisposeImage");
     if (pGdipDisposeImage) pGdipDisposeImage(image);
 }
 
@@ -945,11 +892,11 @@ static void LoadSettingsIcon(void) {
 }
 
 static void AddTrayIcon(void) {
-    g_trayIcon.cbSize = sizeof(NOTIFYICONDATAA);
-    g_trayIcon.hWnd = g_controlWnd;
-    g_trayIcon.uID = 1;
-    g_trayIcon.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    g_trayIcon.uCallbackMessage = WM_TRAYICON;
+    g_tray.iconData.cbSize = sizeof(NOTIFYICONDATAA);
+    g_tray.iconData.hWnd = g_controlWnd;
+    g_tray.iconData.uID = 1;
+    g_tray.iconData.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
+    g_tray.iconData.uCallbackMessage = WM_TRAYICON;
     
     // Try to load custom icon from static folder
     g_trayHIcon = LoadIconFromPNG("static\\lwsr_icon.png");
@@ -966,14 +913,14 @@ static void AddTrayIcon(void) {
         }
     }
     
-    g_trayIcon.hIcon = g_trayHIcon ? g_trayHIcon : LoadIcon(NULL, IDI_APPLICATION);
-    strncpy(g_trayIcon.szTip, "LWSR - Screen Recorder", sizeof(g_trayIcon.szTip) - 1);
-    g_trayIcon.szTip[sizeof(g_trayIcon.szTip) - 1] = '\0';
-    Shell_NotifyIconA(NIM_ADD, &g_trayIcon);
+    g_tray.iconData.hIcon = g_trayHIcon ? g_trayHIcon : LoadIcon(NULL, IDI_APPLICATION);
+    strncpy(g_tray.iconData.szTip, "LWSR - Screen Recorder", sizeof(g_tray.iconData.szTip) - 1);
+    g_tray.iconData.szTip[sizeof(g_tray.iconData.szTip) - 1] = '\0';
+    Shell_NotifyIconA(NIM_ADD, &g_tray.iconData);
 }
 
 static void RemoveTrayIcon(void) {
-    Shell_NotifyIconA(NIM_DELETE, &g_trayIcon);
+    Shell_NotifyIconA(NIM_DELETE, &g_tray.iconData);
     if (g_trayHIcon) {
         DestroyIcon(g_trayHIcon);
         g_trayHIcon = NULL;
@@ -981,21 +928,21 @@ static void RemoveTrayIcon(void) {
 }
 
 static void MinimizeToTray(void) {
-    if (g_minimizedToTray) return;
+    if (g_tray.minimizedToTray) return;
     
     // Hide all windows
     ShowWindow(g_controlWnd, SW_HIDE);
     ShowWindow(g_overlayWnd, SW_HIDE);
     ActionToolbar_Hide();
-    if (g_settingsWnd) ShowWindow(g_settingsWnd, SW_HIDE);
+    if (g_windows.settingsWnd) ShowWindow(g_windows.settingsWnd, SW_HIDE);
     
     // Add tray icon
     AddTrayIcon();
-    g_minimizedToTray = TRUE;
+    g_tray.minimizedToTray = TRUE;
 }
 
 static void RestoreFromTray(void) {
-    if (!g_minimizedToTray) return;
+    if (!g_tray.minimizedToTray) return;
     
     // Remove tray icon
     RemoveTrayIcon();
@@ -1004,7 +951,7 @@ static void RestoreFromTray(void) {
     ShowWindow(g_controlWnd, SW_SHOW);
     SetForegroundWindow(g_controlWnd);
     
-    g_minimizedToTray = FALSE;
+    g_tray.minimizedToTray = FALSE;
 }
 
 // ============================================================================
@@ -1015,8 +962,8 @@ static void ActionToolbar_OnMinimize(void) {
     // Hide toolbar and selection, minimize to tray
     ActionToolbar_Hide();
     ShowWindow(g_overlayWnd, SW_HIDE);
-    g_selState = SEL_NONE;
-    SetRectEmpty(&g_selectedRect);
+    g_selection.state = SEL_NONE;
+    SetRectEmpty(&g_selection.selectedRect);
     InterlockedExchange(&g_isSelecting, FALSE);
     MinimizeToTray();
 }
@@ -1029,8 +976,8 @@ static void ActionToolbar_OnClose(void) {
     // Cancel selection and return to control panel
     ActionToolbar_Hide();
     ShowWindow(g_overlayWnd, SW_HIDE);
-    g_selState = SEL_NONE;
-    SetRectEmpty(&g_selectedRect);
+    g_selection.state = SEL_NONE;
+    SetRectEmpty(&g_selection.selectedRect);
     InterlockedExchange(&g_isSelecting, FALSE);
     ShowWindow(g_controlWnd, SW_SHOW);
 }
@@ -1039,13 +986,13 @@ static void ActionToolbar_OnSettings(void) {
     // Hide toolbar and selection, show settings
     ActionToolbar_Hide();
     ShowWindow(g_overlayWnd, SW_HIDE);
-    g_selState = SEL_NONE;
-    SetRectEmpty(&g_selectedRect);
+    g_selection.state = SEL_NONE;
+    SetRectEmpty(&g_selection.selectedRect);
     InterlockedExchange(&g_isSelecting, FALSE);
     
     // Open settings window centered on control panel
-    if (g_settingsWnd) {
-        SendMessage(g_settingsWnd, WM_CLOSE, 0, 0);
+    if (g_windows.settingsWnd) {
+        SendMessage(g_windows.settingsWnd, WM_CLOSE, 0, 0);
     }
     
     ShowWindow(g_controlWnd, SW_SHOW);
@@ -1054,14 +1001,14 @@ static void ActionToolbar_OnSettings(void) {
     GetWindowRect(g_controlWnd, &ctrlRect);
     int ctrlCenterX = (ctrlRect.left + ctrlRect.right) / 2;
     
-    g_settingsWnd = CreateWindowExA(
+    g_windows.settingsWnd = CreateWindowExA(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         "LWSRSettings",
         NULL,
         WS_POPUP | WS_VISIBLE | WS_BORDER,
         ctrlCenterX - SETTINGS_WIDTH / 2, ctrlRect.bottom + 5,
         SETTINGS_WIDTH, SETTINGS_HEIGHT,
-        g_controlWnd, NULL, g_hInstance, NULL
+        g_controlWnd, NULL, g_windows.hInstance, NULL
     );
 }
 
@@ -1071,13 +1018,13 @@ static char g_timerText[32] = "00:00";
 // Update timer display text
 static void UpdateTimerDisplay(void) {
     // Thread-safe check
-    if (!g_recordingPanel || !InterlockedCompareExchange(&g_isRecording, 0, 0)) return;
+    if (!g_windows.recordingPanel || !InterlockedCompareExchange(&g_isRecording, 0, 0)) return;
     
-    // Update timer text
-    DWORD elapsed = GetTickCount() - g_recordStartTime;
-    int secs = (elapsed / 1000) % 60;
-    int mins = (elapsed / 60000) % 60;
-    int hours = elapsed / 3600000;
+    // Update timer text - use GetTickCount64 to avoid overflow issues
+    ULONGLONG elapsed = GetTickCount64() - g_recording.startTime;
+    int secs = (int)((elapsed / 1000) % 60);
+    int mins = (int)((elapsed / 60000) % 60);
+    int hours = (int)(elapsed / 3600000);
     
     if (hours > 0) {
         snprintf(g_timerText, sizeof(g_timerText), "%d:%02d:%02d", hours, mins, secs);
@@ -1086,14 +1033,13 @@ static void UpdateTimerDisplay(void) {
     }
     
     // Trigger repaint of recording panel
-    InvalidateRect(g_recordingPanel, NULL, FALSE);
+    InvalidateRect(g_windows.recordingPanel, NULL, FALSE);
 }
 
 BOOL Overlay_Create(HINSTANCE hInstance) {
-    g_hInstance = hInstance;
+    g_windows.hInstance = hInstance;
     
-    // Initialize GDI+ for anti-aliased drawing
-    InitGdiPlus();
+    // GDI+ is now initialized globally via g_gdip in main.c
     
     // Load settings icon
     LoadSettingsIcon();
@@ -1205,7 +1151,7 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     ApplyRoundedCorners(g_controlWnd);
     
     // Create crosshair indicator window
-    g_crosshairWnd = CreateWindowExA(
+    g_windows.crosshairWnd = CreateWindowExA(
         WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW,
         "LWSRCrosshair",
         NULL,
@@ -1214,13 +1160,13 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
         NULL, NULL, hInstance, NULL
     );
     
-    SetLayeredWindowAttributes(g_crosshairWnd, RGB(0, 0, 0), 200, LWA_ALPHA);
+    SetLayeredWindowAttributes(g_windows.crosshairWnd, RGB(0, 0, 0), 200, LWA_ALPHA);
     
     // Action toolbar is now managed by action_toolbar module
     
     // Don't show overlay or crosshair initially - only when mode is selected
     InterlockedExchange(&g_isSelecting, FALSE);
-    g_selState = SEL_NONE;
+    g_selection.state = SEL_NONE;
     
     // Only show the control panel at startup
     UpdateWindow(g_controlWnd);
@@ -1234,31 +1180,30 @@ void Overlay_Destroy(void) {
         Recording_Stop();
     }
     
-    // Shutdown GDI+
-    // Free settings icon before shutting down GDI+
+    // Free settings icon (GDI+ shutdown handled by main.c)
     if (g_settingsImage) {
         FreePNGImage(g_settingsImage);
         g_settingsImage = NULL;
     }
     
-    ShutdownGdiPlus();
+    // GDI+ is now shut down globally via g_gdip in main.c
     
-    if (g_crosshairWnd) {
-        DestroyWindow(g_crosshairWnd);
-        g_crosshairWnd = NULL;
+    if (g_windows.crosshairWnd) {
+        DestroyWindow(g_windows.crosshairWnd);
+        g_windows.crosshairWnd = NULL;
     }
     
-    if (g_settingsWnd) {
-        DestroyWindow(g_settingsWnd);
-        g_settingsWnd = NULL;
+    if (g_windows.settingsWnd) {
+        DestroyWindow(g_windows.settingsWnd);
+        g_windows.settingsWnd = NULL;
     }
     
     // Shutdown action toolbar module
     ActionToolbar_Shutdown();
     
-    if (g_recordingPanel) {
-        DestroyWindow(g_recordingPanel);
-        g_recordingPanel = NULL;
+    if (g_windows.recordingPanel) {
+        DestroyWindow(g_windows.recordingPanel);
+        g_windows.recordingPanel = NULL;
     }
     
     // Shutdown border module
@@ -1278,8 +1223,8 @@ void Overlay_Destroy(void) {
 void Overlay_SetMode(CaptureMode mode) {
     g_currentMode = mode;
     InterlockedExchange(&g_isSelecting, TRUE);
-    g_selState = SEL_NONE;
-    SetRectEmpty(&g_selectedRect);
+    g_selection.state = SEL_NONE;
+    SetRectEmpty(&g_selection.selectedRect);
     ShowActionToolbar(FALSE);
     
     // Update overlay based on mode
@@ -1301,8 +1246,8 @@ void Overlay_SetMode(CaptureMode mode) {
 }
 
 BOOL Overlay_GetSelectedRegion(RECT* region) {
-    if (IsRectEmpty(&g_selectedRect)) return FALSE;
-    *region = g_selectedRect;
+    if (IsRectEmpty(&g_selection.selectedRect)) return FALSE;
+    *region = g_selection.selectedRect;
     return TRUE;
 }
 
@@ -1313,10 +1258,10 @@ HWND Overlay_GetWindow(void) {
 void Recording_Start(void) {
     // Thread-safe check: read g_isRecording atomically
     if (InterlockedCompareExchange(&g_isRecording, 0, 0)) return;
-    if (IsRectEmpty(&g_selectedRect)) return;
+    if (IsRectEmpty(&g_selection.selectedRect)) return;
     
     // Set capture region
-    if (!Capture_SetRegion(&g_capture, g_selectedRect)) {
+    if (!Capture_SetRegion(&g_capture, g_selection.selectedRect)) {
         MessageBoxA(NULL, "Failed to set capture region", "Error", MB_OK | MB_ICONERROR);
         return;
     }
@@ -1335,7 +1280,7 @@ void Recording_Start(void) {
     // Initialize encoder
     int fps = Capture_GetRefreshRate(&g_capture);
     if (fps > 60) fps = 60; // Cap at 60 FPS for encoder compatibility
-    if (!Encoder_Init(&g_encoder, outputPath, 
+    if (!Encoder_Init(&g_recording.encoder, outputPath, 
                       g_capture.captureWidth, g_capture.captureHeight,
                       fps, g_config.outputFormat, g_config.quality)) {
         char errMsg[512];
@@ -1348,28 +1293,28 @@ void Recording_Start(void) {
     
     // Hide selection UI (but keep control bar visible)
     ShowWindow(g_overlayWnd, SW_HIDE);
-    ShowWindow(g_crosshairWnd, SW_HIDE);
+    ShowWindow(g_windows.crosshairWnd, SW_HIDE);
     ActionToolbar_Hide();
     
     // Start recording - use atomic operations for thread safety
     InterlockedExchange(&g_isRecording, TRUE);
     InterlockedExchange(&g_isSelecting, FALSE);
-    InterlockedExchange(&g_stopRecording, FALSE);
-    g_recordStartTime = GetTickCount();
-    g_recordingMode = g_currentMode;  // Remember which mode started recording
+    InterlockedExchange(&g_recording.stopRecording, FALSE);
+    g_recording.startTime = GetTickCount64();
+    g_recording.recordingMode = g_currentMode;  // Remember which mode started recording
     strncpy(g_timerText, "00:00", sizeof(g_timerText) - 1);
     g_timerText[sizeof(g_timerText) - 1] = '\0';
     
     // Show recording border if enabled
     if (g_config.showRecordingBorder) {
-        Border_Show(g_selectedRect);
+        Border_Show(g_selection.selectedRect);
     }
     
     // Update control panel to show inline timer/stop
     Overlay_SetRecordingState(TRUE);
     
     // Start recording thread
-    g_recordThread = CreateThread(NULL, 0, RecordingThread, NULL, 0, NULL);
+    g_recording.thread = CreateThread(NULL, 0, RecordingThread, NULL, 0, NULL);
     
     // Start time limit timer if configured
     if (g_config.maxRecordingSeconds > 0) {
@@ -1383,17 +1328,17 @@ void Recording_Stop(void) {
     if (!InterlockedCompareExchange(&g_isRecording, 0, 0)) return;
     
     // Signal recording thread to stop (atomic write with memory barrier)
-    InterlockedExchange(&g_stopRecording, TRUE);
+    InterlockedExchange(&g_recording.stopRecording, TRUE);
     
     // Wait for recording thread
-    if (g_recordThread) {
-        WaitForSingleObject(g_recordThread, 5000);
-        CloseHandle(g_recordThread);
-        g_recordThread = NULL;
+    if (g_recording.thread) {
+        WaitForSingleObject(g_recording.thread, 5000);
+        CloseHandle(g_recording.thread);
+        g_recording.thread = NULL;
     }
     
     // Finalize encoder
-    Encoder_Finalize(&g_encoder);
+    Encoder_Finalize(&g_recording.encoder);
     
     // Thread-safe: signal recording stopped
     InterlockedExchange(&g_isRecording, FALSE);
@@ -1409,7 +1354,7 @@ void Recording_Stop(void) {
     Overlay_SetRecordingState(FALSE);
     
     // Save config with last capture rect
-    g_config.lastCaptureRect = g_selectedRect;
+    g_config.lastCaptureRect = g_selection.selectedRect;
     g_config.lastMode = g_currentMode;
     Config_Save(&g_config);
     
@@ -1436,7 +1381,7 @@ static DWORD WINAPI RecordingThread(LPVOID param) {
     double frameIntervalSec = 1.0 / fps;
     
     // Thread-safe loop: read stop flag atomically
-    while (!InterlockedCompareExchange(&g_stopRecording, 0, 0)) {
+    while (!InterlockedCompareExchange(&g_recording.stopRecording, 0, 0)) {
         QueryPerformanceCounter(&now);
         double elapsed = (double)(now.QuadPart - start.QuadPart) / freq.QuadPart;
         double targetTime = frameCount * frameIntervalSec;
@@ -1447,7 +1392,7 @@ static DWORD WINAPI RecordingThread(LPVOID param) {
             BYTE* frame = Capture_GetFrame(&g_capture, NULL); // Ignore DXGI timestamp
             
             if (frame) {
-                Encoder_WriteFrame(&g_encoder, frame, timestamp);
+                Encoder_WriteFrame(&g_recording.encoder, frame, timestamp);
             }
             
             frameCount++;
@@ -1479,7 +1424,7 @@ void Overlay_SetRecordingState(BOOL isRecording) {
         HWND modeBtn = NULL;
         RECT btnRect = {0};
         
-        switch (g_recordingMode) {
+        switch (g_recording.recordingMode) {
             case MODE_AREA:
                 modeBtn = GetDlgItem(g_controlWnd, ID_MODE_AREA);
                 break;
@@ -1523,19 +1468,19 @@ void Overlay_SetRecordingState(BOOL isRecording) {
         InvalidateRect(btnAll, NULL, TRUE);
         
         // Create recording panel in place of the mode button
-        if (!g_recordingPanel) {
-            g_recordingPanel = CreateWindowW(L"BUTTON", L"",
+        if (!g_windows.recordingPanel) {
+            g_windows.recordingPanel = CreateWindowW(L"BUTTON", L"",
                 WS_CHILD | BS_OWNERDRAW,
                 btnRect.left, btnRect.top, 
                 btnRect.right - btnRect.left, btnRect.bottom - btnRect.top,
-                g_controlWnd, (HMENU)ID_RECORDING_PANEL, g_hInstance, NULL);
+                g_controlWnd, (HMENU)ID_RECORDING_PANEL, g_windows.hInstance, NULL);
         } else {
-            SetWindowPos(g_recordingPanel, NULL,
+            SetWindowPos(g_windows.recordingPanel, NULL,
                 btnRect.left, btnRect.top, 
                 btnRect.right - btnRect.left, btnRect.bottom - btnRect.top,
                 SWP_NOZORDER);
         }
-        ShowWindow(g_recordingPanel, SW_SHOW);
+        ShowWindow(g_windows.recordingPanel, SW_SHOW);
         
         // Start timer for display updates
         SetTimer(g_controlWnd, ID_TIMER_DISPLAY, 1000, NULL);
@@ -1548,8 +1493,8 @@ void Overlay_SetRecordingState(BOOL isRecording) {
         KillTimer(g_controlWnd, ID_TIMER_DISPLAY);
         
         // Hide recording panel
-        if (g_recordingPanel) {
-            ShowWindow(g_recordingPanel, SW_HIDE);
+        if (g_windows.recordingPanel) {
+            ShowWindow(g_windows.recordingPanel, SW_HIDE);
         }
         
         // Re-enable and show all mode buttons
@@ -1573,7 +1518,7 @@ void Overlay_SetRecordingState(BOOL isRecording) {
         InvalidateRect(btnMonitor, NULL, TRUE);
         InvalidateRect(btnAll, NULL, TRUE);
         
-        g_recordingMode = MODE_NONE;
+        g_recording.recordingMode = MODE_NONE;
     }
 }
 
@@ -1593,7 +1538,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             POINT pt;
             GetCursorPos(&pt);
             
-            if (g_selState == SEL_COMPLETE) {
+            if (g_selection.state == SEL_COMPLETE) {
                 HandlePosition handle = HitTestHandle(pt);
                 if (handle != HANDLE_NONE) {
                     SetCursor(GetHandleCursor(handle));
@@ -1623,14 +1568,14 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             ClientToScreen(hwnd, &pt);
             
             if (g_currentMode == MODE_AREA) {
-                if (g_selState == SEL_COMPLETE) {
+                if (g_selection.state == SEL_COMPLETE) {
                     // Check if clicking on a handle
                     HandlePosition handle = HitTestHandle(pt);
                     if (handle != HANDLE_NONE) {
-                        g_selState = SEL_RESIZING;
-                        g_activeHandle = handle;
-                        g_originalRect = g_selectedRect;
-                        g_moveStart = pt;
+                        g_selection.state = SEL_RESIZING;
+                        g_selection.activeHandle = handle;
+                        g_selection.originalRect = g_selection.selectedRect;
+                        g_selection.moveStart = pt;
                         SetCapture(hwnd);
                         ShowActionToolbar(FALSE);
                         return 0;
@@ -1638,24 +1583,24 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     
                     // Check if clicking inside selection OR on border (move)
                     if (PtOnSelectionBorder(pt) || PtInSelection(pt)) {
-                        g_selState = SEL_MOVING;
-                        g_originalRect = g_selectedRect;
-                        g_moveStart = pt;
+                        g_selection.state = SEL_MOVING;
+                        g_selection.originalRect = g_selection.selectedRect;
+                        g_selection.moveStart = pt;
                         SetCapture(hwnd);
                         ShowActionToolbar(FALSE);
                         return 0;
                     }
                     
                     // Clicking outside - start new selection
-                    g_selState = SEL_NONE;
-                    SetRectEmpty(&g_selectedRect);
+                    g_selection.state = SEL_NONE;
+                    SetRectEmpty(&g_selection.selectedRect);
                     ShowActionToolbar(FALSE);
                 }
                 
                 // Start drawing new selection
-                g_selState = SEL_DRAWING;
-                g_dragStart = pt;
-                g_dragEnd = pt;
+                g_selection.state = SEL_DRAWING;
+                g_selection.dragStart = pt;
+                g_selection.dragEnd = pt;
                 SetCapture(hwnd);
             }
             return 0;
@@ -1666,80 +1611,80 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ClientToScreen(hwnd, &pt);
             
-            if (g_selState == SEL_DRAWING) {
-                g_dragEnd = pt;
+            if (g_selection.state == SEL_DRAWING) {
+                g_selection.dragEnd = pt;
                 
                 // Update selection rect
-                g_selectedRect.left = min(g_dragStart.x, g_dragEnd.x);
-                g_selectedRect.top = min(g_dragStart.y, g_dragEnd.y);
-                g_selectedRect.right = max(g_dragStart.x, g_dragEnd.x);
-                g_selectedRect.bottom = max(g_dragStart.y, g_dragEnd.y);
+                g_selection.selectedRect.left = min(g_selection.dragStart.x, g_selection.dragEnd.x);
+                g_selection.selectedRect.top = min(g_selection.dragStart.y, g_selection.dragEnd.y);
+                g_selection.selectedRect.right = max(g_selection.dragStart.x, g_selection.dragEnd.x);
+                g_selection.selectedRect.bottom = max(g_selection.dragStart.y, g_selection.dragEnd.y);
                 
                 UpdateOverlayBitmap();
-            } else if (g_selState == SEL_MOVING) {
-                int dx = pt.x - g_moveStart.x;
-                int dy = pt.y - g_moveStart.y;
+            } else if (g_selection.state == SEL_MOVING) {
+                int dx = pt.x - g_selection.moveStart.x;
+                int dy = pt.y - g_selection.moveStart.y;
                 
-                g_selectedRect.left = g_originalRect.left + dx;
-                g_selectedRect.top = g_originalRect.top + dy;
-                g_selectedRect.right = g_originalRect.right + dx;
-                g_selectedRect.bottom = g_originalRect.bottom + dy;
+                g_selection.selectedRect.left = g_selection.originalRect.left + dx;
+                g_selection.selectedRect.top = g_selection.originalRect.top + dy;
+                g_selection.selectedRect.right = g_selection.originalRect.right + dx;
+                g_selection.selectedRect.bottom = g_selection.originalRect.bottom + dy;
                 
                 UpdateOverlayBitmap();
-            } else if (g_selState == SEL_RESIZING) {
-                int dx = pt.x - g_moveStart.x;
-                int dy = pt.y - g_moveStart.y;
+            } else if (g_selection.state == SEL_RESIZING) {
+                int dx = pt.x - g_selection.moveStart.x;
+                int dy = pt.y - g_selection.moveStart.y;
                 
-                g_selectedRect = g_originalRect;
+                g_selection.selectedRect = g_selection.originalRect;
                 
                 // Apply resize based on active handle
-                switch (g_activeHandle) {
+                switch (g_selection.activeHandle) {
                     case HANDLE_TL:
-                        g_selectedRect.left += dx;
-                        g_selectedRect.top += dy;
+                        g_selection.selectedRect.left += dx;
+                        g_selection.selectedRect.top += dy;
                         break;
                     case HANDLE_T:
-                        g_selectedRect.top += dy;
+                        g_selection.selectedRect.top += dy;
                         break;
                     case HANDLE_TR:
-                        g_selectedRect.right += dx;
-                        g_selectedRect.top += dy;
+                        g_selection.selectedRect.right += dx;
+                        g_selection.selectedRect.top += dy;
                         break;
                     case HANDLE_L:
-                        g_selectedRect.left += dx;
+                        g_selection.selectedRect.left += dx;
                         break;
                     case HANDLE_R:
-                        g_selectedRect.right += dx;
+                        g_selection.selectedRect.right += dx;
                         break;
                     case HANDLE_BL:
-                        g_selectedRect.left += dx;
-                        g_selectedRect.bottom += dy;
+                        g_selection.selectedRect.left += dx;
+                        g_selection.selectedRect.bottom += dy;
                         break;
                     case HANDLE_B:
-                        g_selectedRect.bottom += dy;
+                        g_selection.selectedRect.bottom += dy;
                         break;
                     case HANDLE_BR:
-                        g_selectedRect.right += dx;
-                        g_selectedRect.bottom += dy;
+                        g_selection.selectedRect.right += dx;
+                        g_selection.selectedRect.bottom += dy;
                         break;
                     default:
                         break;
                 }
                 
                 // Normalize rect (ensure left < right, top < bottom)
-                if (g_selectedRect.left > g_selectedRect.right) {
-                    int tmp = g_selectedRect.left;
-                    g_selectedRect.left = g_selectedRect.right;
-                    g_selectedRect.right = tmp;
+                if (g_selection.selectedRect.left > g_selection.selectedRect.right) {
+                    int tmp = g_selection.selectedRect.left;
+                    g_selection.selectedRect.left = g_selection.selectedRect.right;
+                    g_selection.selectedRect.right = tmp;
                 }
-                if (g_selectedRect.top > g_selectedRect.bottom) {
-                    int tmp = g_selectedRect.top;
-                    g_selectedRect.top = g_selectedRect.bottom;
-                    g_selectedRect.bottom = tmp;
+                if (g_selection.selectedRect.top > g_selection.selectedRect.bottom) {
+                    int tmp = g_selection.selectedRect.top;
+                    g_selection.selectedRect.top = g_selection.selectedRect.bottom;
+                    g_selection.selectedRect.bottom = tmp;
                 }
                 
                 UpdateOverlayBitmap();
-            } else if (InterlockedCompareExchange(&g_isSelecting, 0, 0) && g_selState == SEL_NONE) {
+            } else if (InterlockedCompareExchange(&g_isSelecting, 0, 0) && g_selection.state == SEL_NONE) {
                 // Just moving mouse over overlay, cursor handles itself
             }
             return 0;
@@ -1750,27 +1695,27 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             POINT pt = { GET_X_LPARAM(lParam), GET_Y_LPARAM(lParam) };
             ClientToScreen(hwnd, &pt);
             
-            if (g_selState == SEL_DRAWING) {
+            if (g_selection.state == SEL_DRAWING) {
                 ReleaseCapture();
                 
-                int width = g_selectedRect.right - g_selectedRect.left;
-                int height = g_selectedRect.bottom - g_selectedRect.top;
+                int width = g_selection.selectedRect.right - g_selection.selectedRect.left;
+                int height = g_selection.selectedRect.bottom - g_selection.selectedRect.top;
                 
                 if (width >= 10 && height >= 10) {
                     // Selection complete - show handles and action toolbar
-                    g_selState = SEL_COMPLETE;
+                    g_selection.state = SEL_COMPLETE;
                     UpdateOverlayBitmap();
                     ShowActionToolbar(TRUE);
                 } else {
                     // Too small - reset
-                    g_selState = SEL_NONE;
-                    SetRectEmpty(&g_selectedRect);
+                    g_selection.state = SEL_NONE;
+                    SetRectEmpty(&g_selection.selectedRect);
                     UpdateOverlayBitmap();
                 }
-            } else if (g_selState == SEL_MOVING || g_selState == SEL_RESIZING) {
+            } else if (g_selection.state == SEL_MOVING || g_selection.state == SEL_RESIZING) {
                 ReleaseCapture();
-                g_selState = SEL_COMPLETE;
-                g_activeHandle = HANDLE_NONE;
+                g_selection.state = SEL_COMPLETE;
+                g_selection.activeHandle = HANDLE_NONE;
                 UpdateOverlayBitmap();
                 ShowActionToolbar(TRUE);
             } else if (InterlockedCompareExchange(&g_isSelecting, 0, 0) && g_currentMode != MODE_AREA) {
@@ -1780,8 +1725,8 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     if (targetWnd) {
                         HWND topLevel = GetAncestor(targetWnd, GA_ROOT);
                         if (topLevel) {
-                            Capture_GetWindowRect(topLevel, &g_selectedRect);
-                            g_selState = SEL_COMPLETE;
+                            Capture_GetWindowRect(topLevel, &g_selection.selectedRect);
+                            g_selection.state = SEL_COMPLETE;
                             UpdateOverlayBitmap();
                             ShowActionToolbar(TRUE);
                         }
@@ -1790,14 +1735,14 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     RECT monRect;
                     int monIndex;
                     if (Capture_GetMonitorFromPoint(pt, &monRect, &monIndex)) {
-                        g_selectedRect = monRect;
-                        g_selState = SEL_COMPLETE;
+                        g_selection.selectedRect = monRect;
+                        g_selection.state = SEL_COMPLETE;
                         UpdateOverlayBitmap();
                         ShowActionToolbar(TRUE);
                     }
                 } else if (g_currentMode == MODE_ALL_MONITORS) {
-                    Capture_GetAllMonitorsBounds(&g_selectedRect);
-                    g_selState = SEL_COMPLETE;
+                    Capture_GetAllMonitorsBounds(&g_selection.selectedRect);
+                    g_selection.state = SEL_COMPLETE;
                     UpdateOverlayBitmap();
                     ShowActionToolbar(TRUE);
                 }
@@ -1817,22 +1762,22 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             if (wParam == (WPARAM)g_config.cancelKey) {
                 if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
                     Recording_Stop();
-                } else if (g_selState == SEL_DRAWING || g_selState == SEL_MOVING || g_selState == SEL_RESIZING) {
+                } else if (g_selection.state == SEL_DRAWING || g_selection.state == SEL_MOVING || g_selection.state == SEL_RESIZING) {
                     ReleaseCapture();
-                    g_selState = SEL_NONE;
-                    SetRectEmpty(&g_selectedRect);
+                    g_selection.state = SEL_NONE;
+                    SetRectEmpty(&g_selection.selectedRect);
                     UpdateOverlayBitmap();
                     ShowActionToolbar(FALSE);
-                } else if (g_selState == SEL_COMPLETE) {
+                } else if (g_selection.state == SEL_COMPLETE) {
                     // Cancel selection
-                    g_selState = SEL_NONE;
-                    SetRectEmpty(&g_selectedRect);
+                    g_selection.state = SEL_NONE;
+                    SetRectEmpty(&g_selection.selectedRect);
                     UpdateOverlayBitmap();
                     ShowActionToolbar(FALSE);
                 } else {
                     PostQuitMessage(0);
                 }
-            } else if (wParam == VK_RETURN && g_selState == SEL_COMPLETE) {
+            } else if (wParam == VK_RETURN && g_selection.state == SEL_COMPLETE) {
                 // Enter key starts recording
                 Recording_Start();
             }
@@ -1872,22 +1817,22 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             
             CreateWindowW(L"BUTTON", L"Capture Area",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                btnX, 7, btnWidth, btnHeight, hwnd, (HMENU)ID_MODE_AREA, g_hInstance, NULL);
+                btnX, 7, btnWidth, btnHeight, hwnd, (HMENU)ID_MODE_AREA, g_windows.hInstance, NULL);
             btnX += btnWidth + btnGap;
             
             CreateWindowW(L"BUTTON", L"Capture Window",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                btnX, 7, btnWidth, btnHeight, hwnd, (HMENU)ID_MODE_WINDOW, g_hInstance, NULL);
+                btnX, 7, btnWidth, btnHeight, hwnd, (HMENU)ID_MODE_WINDOW, g_windows.hInstance, NULL);
             btnX += btnWidth + btnGap;
             
             CreateWindowW(L"BUTTON", L"Capture Monitor",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                btnX, 7, btnWidth, btnHeight, hwnd, (HMENU)ID_MODE_MONITOR, g_hInstance, NULL);
+                btnX, 7, btnWidth, btnHeight, hwnd, (HMENU)ID_MODE_MONITOR, g_windows.hInstance, NULL);
             btnX += btnWidth + btnGap;
             
             CreateWindowW(L"BUTTON", L"Capture All Monitors",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                btnX, 7, btnWidth + 20, btnHeight, hwnd, (HMENU)ID_MODE_ALL, g_hInstance, NULL);
+                btnX, 7, btnWidth + 20, btnHeight, hwnd, (HMENU)ID_MODE_ALL, g_windows.hInstance, NULL);
             
             // Small icon buttons on right side (square 28x28, vertically centered)
             int iconBtnSize = 28;
@@ -1897,25 +1842,25 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // Close button (X) - rightmost
             CreateWindowW(L"BUTTON", L"\u2715",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                rightX, iconBtnY, iconBtnSize, iconBtnSize, hwnd, (HMENU)ID_BTN_CLOSE, g_hInstance, NULL);
+                rightX, iconBtnY, iconBtnSize, iconBtnSize, hwnd, (HMENU)ID_BTN_CLOSE, g_windows.hInstance, NULL);
             rightX -= iconBtnSize + 4;
             
             // Record button (filled circle)
             CreateWindowW(L"BUTTON", L"",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                rightX, iconBtnY, iconBtnSize, iconBtnSize, hwnd, (HMENU)ID_BTN_RECORD, g_hInstance, NULL);
+                rightX, iconBtnY, iconBtnSize, iconBtnSize, hwnd, (HMENU)ID_BTN_RECORD, g_windows.hInstance, NULL);
             rightX -= iconBtnSize + 4;
             
             // Minimize button (-)
             CreateWindowW(L"BUTTON", L"-",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                rightX, iconBtnY, iconBtnSize, iconBtnSize, hwnd, (HMENU)ID_BTN_MINIMIZE, g_hInstance, NULL);
+                rightX, iconBtnY, iconBtnSize, iconBtnSize, hwnd, (HMENU)ID_BTN_MINIMIZE, g_windows.hInstance, NULL);
             rightX -= iconBtnSize + 4;
             
             // Settings button (gear icon) - left of minimize
             CreateWindowW(L"BUTTON", L"",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                rightX, iconBtnY, iconBtnSize, iconBtnSize, hwnd, (HMENU)ID_BTN_SETTINGS, g_hInstance, NULL);
+                rightX, iconBtnY, iconBtnSize, iconBtnSize, hwnd, (HMENU)ID_BTN_SETTINGS, g_windows.hInstance, NULL);
             
             // No mode selected by default
             g_currentMode = MODE_NONE;
@@ -1962,23 +1907,23 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     break;
                 case ID_BTN_SETTINGS:
                     // Toggle settings window
-                    if (g_settingsWnd) {
+                    if (g_windows.settingsWnd) {
                         // Close settings if already open (use WM_CLOSE to trigger cleanup)
-                        SendMessage(g_settingsWnd, WM_CLOSE, 0, 0);
+                        SendMessage(g_windows.settingsWnd, WM_CLOSE, 0, 0);
                     } else {
                         // Open settings below control panel, centered
                         RECT ctrlRect;
                         GetWindowRect(hwnd, &ctrlRect);
                         int ctrlCenterX = (ctrlRect.left + ctrlRect.right) / 2;
                         
-                        g_settingsWnd = CreateWindowExA(
+                        g_windows.settingsWnd = CreateWindowExA(
                             WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
                             "LWSRSettings",
                             NULL,
                             WS_POPUP | WS_VISIBLE | WS_BORDER,
                             ctrlCenterX - SETTINGS_WIDTH / 2, ctrlRect.bottom + 5,
                             SETTINGS_WIDTH, SETTINGS_HEIGHT,
-                            hwnd, NULL, g_hInstance, NULL
+                            hwnd, NULL, g_windows.hInstance, NULL
                         );
                         
                         // Refresh settings button to show highlight
@@ -1992,11 +1937,11 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                         Recording_Stop();
                     } else {
                         // If no selection, use full primary monitor
-                        if (IsRectEmpty(&g_selectedRect)) {
+                        if (IsRectEmpty(&g_selection.selectedRect)) {
                             HMONITOR hMon = MonitorFromPoint((POINT){0,0}, MONITOR_DEFAULTTOPRIMARY);
                             MONITORINFO mi = { sizeof(mi) };
                             GetMonitorInfo(hMon, &mi);
-                            g_selectedRect = mi.rcMonitor;
+                            g_selection.selectedRect = mi.rcMonitor;
                         }
                         Recording_Start();
                     }
@@ -2093,16 +2038,16 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 }
                 
                 // Only invalidate if hover state changed
-                if (currentHovered != g_lastHoveredIconBtn) {
+                if (currentHovered != g_interaction.lastHoveredIconBtn) {
                     // Invalidate old hovered button (to remove highlight)
-                    if (g_lastHoveredIconBtn) {
-                        InvalidateRect(g_lastHoveredIconBtn, NULL, FALSE);
+                    if (g_interaction.lastHoveredIconBtn) {
+                        InvalidateRect(g_interaction.lastHoveredIconBtn, NULL, FALSE);
                     }
                     // Invalidate new hovered button (to add highlight)
                     if (currentHovered) {
                         InvalidateRect(currentHovered, NULL, FALSE);
                     }
-                    g_lastHoveredIconBtn = currentHovered;
+                    g_interaction.lastHoveredIconBtn = currentHovered;
                 }
                 
                 // Also check capture buttons for hover
@@ -2126,14 +2071,14 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 }
                 
                 // Only invalidate if capture button hover state changed
-                if (currentHoveredCapture != g_lastHoveredCaptureBtn) {
-                    if (g_lastHoveredCaptureBtn) {
-                        InvalidateRect(g_lastHoveredCaptureBtn, NULL, FALSE);
+                if (currentHoveredCapture != g_interaction.lastHoveredCaptureBtn) {
+                    if (g_interaction.lastHoveredCaptureBtn) {
+                        InvalidateRect(g_interaction.lastHoveredCaptureBtn, NULL, FALSE);
                     }
                     if (currentHoveredCapture) {
                         InvalidateRect(currentHoveredCapture, NULL, FALSE);
                     }
-                    g_lastHoveredCaptureBtn = currentHoveredCapture;
+                    g_interaction.lastHoveredCaptureBtn = currentHoveredCapture;
                 }
             }
             return 0;
@@ -2184,7 +2129,7 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             }
             
             // For settings button, check if settings window is open
-            BOOL isSettingsActive = (ctlId == ID_BTN_SETTINGS && g_settingsWnd != NULL && IsWindowVisible(g_settingsWnd));
+            BOOL isSettingsActive = (ctlId == ID_BTN_SETTINGS && g_windows.settingsWnd != NULL && IsWindowVisible(g_windows.settingsWnd));
             
             if (isModeButton) {
                 // Check if this mode is selected
@@ -2341,20 +2286,20 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 int leftStartX = rect.left + (centerX - leftContentWidth) / 2;
                 
                 // Draw anti-aliased red recording dot using GDI+
-                if (GdipCreateFromHDC && GdipSetSmoothingMode && GdipCreateSolidFill && 
-                    GdipFillEllipse && GdipDeleteBrush && GdipDeleteGraphics) {
+                if (g_gdip.CreateFromHDC && g_gdip.SetSmoothingMode && g_gdip.CreateSolidFill && 
+                    g_gdip.FillEllipse && g_gdip.BrushDelete && g_gdip.DeleteGraphics) {
                     GpGraphics* graphics = NULL;
-                    GdipCreateFromHDC(dis->hDC, &graphics);
+                    g_gdip.CreateFromHDC(dis->hDC, &graphics);
                     if (graphics) {
-                        GdipSetSmoothingMode(graphics, 4); // SmoothingModeAntiAlias
+                        g_gdip.SetSmoothingMode(graphics, 4); // SmoothingModeAntiAlias
                         GpBrush* redBrush = NULL;
-                        GdipCreateSolidFill(0xFFEA4335, &redBrush);
+                        g_gdip.CreateSolidFill(0xFFEA4335, &redBrush);
                         if (redBrush) {
                             int dotY = (rect.top + rect.bottom - dotSize) / 2;
-                            GdipFillEllipse(graphics, redBrush, (float)leftStartX, (float)dotY, (float)dotSize, (float)dotSize);
-                            GdipDeleteBrush(redBrush);
+                            g_gdip.FillEllipse(graphics, redBrush, (float)leftStartX, (float)dotY, (float)dotSize, (float)dotSize);
+                            g_gdip.BrushDelete(redBrush);
                         }
-                        GdipDeleteGraphics(graphics);
+                        g_gdip.DeleteGraphics(graphics);
                     }
                 }
                 
@@ -2450,8 +2395,8 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 SYSTEMTIME st;
                 GetLocalTime(&st);
                 snprintf(filename, sizeof(filename), "%s\\Replay_%04d%02d%02d_%02d%02d%02d.mp4",
-                    g_config.savePath, st.wYear, st.wMonth, st.wDay,
-                    st.wHour, st.wMinute, st.wSecond);
+                    g_config.savePath, (int)st.wYear, (int)st.wMonth, (int)st.wDay,
+                    (int)st.wHour, (int)st.wMinute, (int)st.wSecond);
                 
                 Logger_Log("Generated filename: %s\n", filename);
                 Logger_Log("Calling ReplayBuffer_Save...\n");
@@ -2502,7 +2447,7 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         
         case WM_DESTROY:
             // Clean up tray icon if minimized
-            if (g_minimizedToTray) {
+            if (g_tray.minimizedToTray) {
                 RemoveTrayIcon();
             }
             if (g_uiFont) DeleteObject(g_uiFont);
@@ -2856,8 +2801,8 @@ static void UpdateReplayPreview(void) {
     }
     
     // Ensure settings window and control panel stay on top of the preview overlays
-    if (g_settingsWnd) {
-        SetWindowPos(g_settingsWnd, HWND_TOPMOST, 0, 0, 0, 0, 
+    if (g_windows.settingsWnd) {
+        SetWindowPos(g_windows.settingsWnd, HWND_TOPMOST, 0, 0, 0, 0, 
                      SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
     }
     if (g_controlWnd) {
@@ -2908,12 +2853,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Format dropdown
             HWND lblFormat = CreateWindowW(L"STATIC", L"Output Format", 
                 WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_hInstance, NULL);
+                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblFormat, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             HWND cmbFormat = CreateWindowW(L"COMBOBOX", L"",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-                controlX, y, controlW, 120, hwnd, (HMENU)ID_CMB_FORMAT, g_hInstance, NULL);
+                controlX, y, controlW, 120, hwnd, (HMENU)ID_CMB_FORMAT, g_windows.hInstance, NULL);
             SendMessage(cmbFormat, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.264) - Best compatibility");
@@ -2925,12 +2870,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Quality dropdown with descriptions
             HWND lblQuality = CreateWindowW(L"STATIC", L"Quality",
                 WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_hInstance, NULL);
+                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblQuality, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             HWND cmbQuality = CreateWindowW(L"COMBOBOX", L"",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-                controlX, y, controlW, 120, hwnd, (HMENU)ID_CMB_QUALITY, g_hInstance, NULL);
+                controlX, y, controlW, 120, hwnd, (HMENU)ID_CMB_QUALITY, g_windows.hInstance, NULL);
             SendMessage(cmbQuality, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Low - Small file, lower clarity");
@@ -2943,20 +2888,20 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Separator line
             CreateWindowW(L"STATIC", L"",
                 WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-                labelX, y, contentW, 2, hwnd, NULL, g_hInstance, NULL);
+                labelX, y, contentW, 2, hwnd, NULL, g_windows.hInstance, NULL);
             y += 14;
             
             // Checkboxes side by side
             HWND chkMouse = CreateWindowW(L"BUTTON", L"Capture mouse cursor",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                labelX, y, 200, 24, hwnd, (HMENU)ID_CHK_MOUSE, g_hInstance, NULL);
+                labelX, y, 200, 24, hwnd, (HMENU)ID_CHK_MOUSE, g_windows.hInstance, NULL);
             SendMessage(chkMouse, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             CheckDlgButton(hwnd, ID_CHK_MOUSE, g_config.captureMouse ? BST_CHECKED : BST_UNCHECKED);
             
             // Show border checkbox - on the right side
             HWND chkBorder = CreateWindowW(L"BUTTON", L"Show recording border",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                labelX + 280, y, 200, 24, hwnd, (HMENU)ID_CHK_BORDER, g_hInstance, NULL);
+                labelX + 280, y, 200, 24, hwnd, (HMENU)ID_CHK_BORDER, g_windows.hInstance, NULL);
             SendMessage(chkBorder, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             CheckDlgButton(hwnd, ID_CHK_BORDER, g_config.showRecordingBorder ? BST_CHECKED : BST_UNCHECKED);
             y += 38;
@@ -2964,7 +2909,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Time limit - three dropdowns for hours, minutes, seconds
             HWND lblTime = CreateWindowW(L"STATIC", L"Time limit",
                 WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                labelX, y, labelW, 26, hwnd, NULL, g_hInstance, NULL);
+                labelX, y, labelW, 26, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblTime, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Calculate time from seconds
@@ -2977,7 +2922,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Hours dropdown (CBS_DROPDOWNLIST for mouse wheel support)
             HWND cmbHours = CreateWindowW(L"COMBOBOX", L"",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, 55, 300, hwnd, (HMENU)ID_CMB_HOURS, g_hInstance, NULL);
+                controlX, y, 55, 300, hwnd, (HMENU)ID_CMB_HOURS, g_windows.hInstance, NULL);
             SendMessage(cmbHours, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             SendMessage(cmbHours, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
             for (int i = 0; i <= 24; i++) {
@@ -2988,13 +2933,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             
             HWND lblH = CreateWindowW(L"STATIC", L"h",
                 WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                controlX + 58, y, 15, 26, hwnd, NULL, g_hInstance, NULL);
+                controlX + 58, y, 15, 26, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblH, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Minutes dropdown
             HWND cmbMins = CreateWindowW(L"COMBOBOX", L"",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX + 78, y, 55, 300, hwnd, (HMENU)ID_CMB_MINUTES, g_hInstance, NULL);
+                controlX + 78, y, 55, 300, hwnd, (HMENU)ID_CMB_MINUTES, g_windows.hInstance, NULL);
             SendMessage(cmbMins, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             SendMessage(cmbMins, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
             for (int i = 0; i <= 59; i++) {
@@ -3005,13 +2950,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             
             HWND lblM = CreateWindowW(L"STATIC", L"m",
                 WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                controlX + 136, y, 18, 26, hwnd, NULL, g_hInstance, NULL);
+                controlX + 136, y, 18, 26, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblM, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Seconds dropdown
             HWND cmbSecs = CreateWindowW(L"COMBOBOX", L"",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX + 158, y, 55, 300, hwnd, (HMENU)ID_CMB_SECONDS, g_hInstance, NULL);
+                controlX + 158, y, 55, 300, hwnd, (HMENU)ID_CMB_SECONDS, g_windows.hInstance, NULL);
             SendMessage(cmbSecs, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             SendMessage(cmbSecs, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
             for (int i = 0; i <= 59; i++) {
@@ -3022,7 +2967,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             
             HWND lblS = CreateWindowW(L"STATIC", L"s",
                 WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                controlX + 216, y, 15, 26, hwnd, NULL, g_hInstance, NULL);
+                controlX + 216, y, 15, 26, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblS, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             y += rowH;
@@ -3030,19 +2975,19 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Save path - aligned with dropdowns
             HWND lblPath = CreateWindowW(L"STATIC", L"Save to",
                 WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                labelX, y + 1, labelW, 22, hwnd, NULL, g_hInstance, NULL);
+                labelX, y + 1, labelW, 22, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblPath, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Edit control - height 22 matches font better for vertical centering
             HWND edtPath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
                 WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                controlX, y, controlW - 80, 22, hwnd, (HMENU)ID_EDT_PATH, g_hInstance, NULL);
+                controlX, y, controlW - 80, 22, hwnd, (HMENU)ID_EDT_PATH, g_windows.hInstance, NULL);
             SendMessage(edtPath, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             SetWindowTextA(edtPath, g_config.savePath);
             
             HWND btnBrowse = CreateWindowW(L"BUTTON", L"Browse",
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                controlX + controlW - 72, y, 72, 22, hwnd, (HMENU)ID_BTN_BROWSE, g_hInstance, NULL);
+                controlX + controlW - 72, y, 72, 22, hwnd, (HMENU)ID_BTN_BROWSE, g_windows.hInstance, NULL);
             SendMessage(btnBrowse, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             y += rowH + 12;
@@ -3051,13 +2996,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Separator line
             CreateWindowW(L"STATIC", L"",
                 WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-                labelX, y, contentW, 2, hwnd, NULL, g_hInstance, NULL);
+                labelX, y, contentW, 2, hwnd, NULL, g_windows.hInstance, NULL);
             y += 14;
             
             // Enable replay checkbox
             HWND chkReplayEnabled = CreateWindowW(L"BUTTON", L"Enable Instant Replay",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                labelX, y, 200, 24, hwnd, (HMENU)ID_CHK_REPLAY_ENABLED, g_hInstance, NULL);
+                labelX, y, 200, 24, hwnd, (HMENU)ID_CHK_REPLAY_ENABLED, g_windows.hInstance, NULL);
             SendMessage(chkReplayEnabled, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             CheckDlgButton(hwnd, ID_CHK_REPLAY_ENABLED, g_config.replayEnabled ? BST_CHECKED : BST_UNCHECKED);
             y += 38;
@@ -3065,12 +3010,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Capture source dropdown
             HWND lblReplaySource = CreateWindowW(L"STATIC", L"Capture source",
                 WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_hInstance, NULL);
+                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblReplaySource, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             HWND cmbReplaySource = CreateWindowW(L"COMBOBOX", L"",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, controlW, 200, hwnd, (HMENU)ID_CMB_REPLAY_SOURCE, g_hInstance, NULL);
+                controlX, y, controlW, 200, hwnd, (HMENU)ID_CMB_REPLAY_SOURCE, g_windows.hInstance, NULL);
             SendMessage(cmbReplaySource, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Enumerate and add monitors dynamically
@@ -3107,12 +3052,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Aspect ratio dropdown (only enabled for monitor capture)
             HWND lblAspect = CreateWindowW(L"STATIC", L"Aspect ratio",
                 WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_hInstance, NULL);
+                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblAspect, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             HWND cmbAspect = CreateWindowW(L"COMBOBOX", L"",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, controlW, 250, hwnd, (HMENU)ID_CMB_REPLAY_ASPECT, g_hInstance, NULL);
+                controlX, y, controlW, 250, hwnd, (HMENU)ID_CMB_REPLAY_ASPECT, g_windows.hInstance, NULL);
             SendMessage(cmbAspect, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"Native (No change)");
             SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"16:9 (YouTube, Standard)");
@@ -3134,12 +3079,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Frame rate dropdown
             HWND lblFPS = CreateWindowW(L"STATIC", L"Frame rate",
                 WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_hInstance, NULL);
+                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblFPS, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             HWND cmbFPS = CreateWindowW(L"COMBOBOX", L"",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, controlW, 150, hwnd, (HMENU)ID_CMB_REPLAY_FPS, g_hInstance, NULL);
+                controlX, y, controlW, 150, hwnd, (HMENU)ID_CMB_REPLAY_FPS, g_windows.hInstance, NULL);
             SendMessage(cmbFPS, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"30 FPS");
             SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"60 FPS");
@@ -3152,7 +3097,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Buffer duration - using dropdowns for proper centering
             HWND lblReplayDuration = CreateWindowW(L"STATIC", L"Duration",
                 WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_hInstance, NULL);
+                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblReplayDuration, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Calculate hours, minutes, seconds from config
@@ -3164,7 +3109,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Hours dropdown
             HWND cmbReplayHours = CreateWindowW(L"COMBOBOX", L"",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, 55, 300, hwnd, (HMENU)ID_CMB_REPLAY_HOURS, g_hInstance, NULL);
+                controlX, y, 55, 300, hwnd, (HMENU)ID_CMB_REPLAY_HOURS, g_windows.hInstance, NULL);
             SendMessage(cmbReplayHours, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             SendMessage(cmbReplayHours, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
             for (int i = 0; i <= 24; i++) {
@@ -3175,13 +3120,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             
             HWND lblReplayH = CreateWindowW(L"STATIC", L"h",
                 WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                controlX + 58, y, 15, 26, hwnd, NULL, g_hInstance, NULL);
+                controlX + 58, y, 15, 26, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblReplayH, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Minutes dropdown
             HWND cmbReplayMinutes = CreateWindowW(L"COMBOBOX", L"",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX + 78, y, 55, 300, hwnd, (HMENU)ID_CMB_REPLAY_MINS, g_hInstance, NULL);
+                controlX + 78, y, 55, 300, hwnd, (HMENU)ID_CMB_REPLAY_MINS, g_windows.hInstance, NULL);
             SendMessage(cmbReplayMinutes, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             SendMessage(cmbReplayMinutes, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
             for (int i = 0; i <= 59; i++) {
@@ -3192,13 +3137,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             
             HWND lblReplayM = CreateWindowW(L"STATIC", L"m",
                 WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                controlX + 136, y, 18, 26, hwnd, NULL, g_hInstance, NULL);
+                controlX + 136, y, 18, 26, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblReplayM, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Seconds dropdown
             HWND cmbReplaySecs = CreateWindowW(L"COMBOBOX", L"",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX + 158, y, 55, 300, hwnd, (HMENU)ID_CMB_REPLAY_SECS, g_hInstance, NULL);
+                controlX + 158, y, 55, 300, hwnd, (HMENU)ID_CMB_REPLAY_SECS, g_windows.hInstance, NULL);
             SendMessage(cmbReplaySecs, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             SendMessage(cmbReplaySecs, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
             for (int i = 0; i <= 59; i++) {
@@ -3209,14 +3154,14 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             
             HWND lblReplayS = CreateWindowW(L"STATIC", L"s",
                 WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                controlX + 216, y, 15, 26, hwnd, NULL, g_hInstance, NULL);
+                controlX + 216, y, 15, 26, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblReplayS, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             y += rowH;
             
             // Save hotkey button
             HWND lblHotkey = CreateWindowW(L"STATIC", L"Save hotkey",
                 WS_CHILD | WS_VISIBLE,
-                labelX, y + 6, labelW, 20, hwnd, NULL, g_hInstance, NULL);
+                labelX, y + 6, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblHotkey, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Get current hotkey name
@@ -3226,13 +3171,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Create button showing current hotkey - click to change
             HWND btnHotkey = CreateWindowExA(0, "BUTTON", hotkeyName,
                 WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                controlX, y + 1, 120, 26, hwnd, (HMENU)ID_BTN_REPLAY_HOTKEY, g_hInstance, NULL);
+                controlX, y + 1, 120, 26, hwnd, (HMENU)ID_BTN_REPLAY_HOTKEY, g_windows.hInstance, NULL);
             SendMessage(btnHotkey, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Hint text - larger and more visible
             HWND lblHotkeyHint = CreateWindowW(L"STATIC", L"(Click to change)",
                 WS_CHILD | WS_VISIBLE,
-                controlX + 130, y + 7, 140, 24, hwnd, NULL, g_hInstance, NULL);
+                controlX + 130, y + 7, 140, 24, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblHotkeyHint, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             y += rowH;
@@ -3264,7 +3209,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 snprintf(explainText, sizeof(explainText), "When enabled, ~%d MB of RAM is reserved for the video buffer. See the calculation below:", ramMB);
                 HWND lblExplain = CreateWindowExA(0, "STATIC", explainText,
                     WS_CHILD | WS_VISIBLE,
-                    labelX, y + 4, contentW, 20, hwnd, (HMENU)ID_STATIC_REPLAY_RAM, g_hInstance, NULL);
+                    labelX, y + 4, contentW, 20, hwnd, (HMENU)ID_STATIC_REPLAY_RAM, g_windows.hInstance, NULL);
                 SendMessage(lblExplain, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
                 y += 32;
                 
@@ -3284,7 +3229,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 
                 HWND lblCalc = CreateWindowExA(0, "STATIC", calcText,
                     WS_CHILD | WS_VISIBLE,
-                    labelX + 20, y, contentW - 20, 20, hwnd, (HMENU)ID_STATIC_REPLAY_CALC, g_hInstance, NULL);
+                    labelX + 20, y, contentW - 20, 20, hwnd, (HMENU)ID_STATIC_REPLAY_CALC, g_windows.hInstance, NULL);
                 SendMessage(lblCalc, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             }
             
@@ -3296,13 +3241,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Divider line
             CreateWindowExA(0, "STATIC", "",
                 WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-                labelX, y, contentW, 2, hwnd, NULL, g_hInstance, NULL);
+                labelX, y, contentW, 2, hwnd, NULL, g_windows.hInstance, NULL);
             y += 14;
             
             // Enable Audio Capture checkbox
             HWND chkAudio = CreateWindowExA(0, "BUTTON", "Enable Audio Capture",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                labelX, y, 200, 24, hwnd, (HMENU)ID_CHK_AUDIO_ENABLED, g_hInstance, NULL);
+                labelX, y, 200, 24, hwnd, (HMENU)ID_CHK_AUDIO_ENABLED, g_windows.hInstance, NULL);
             SendMessage(chkAudio, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             SendMessage(chkAudio, BM_SETCHECK, g_config.audioEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
             y += 38;
@@ -3321,72 +3266,72 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             
             HWND lblAudio1 = CreateWindowExA(0, "STATIC", "Audio source 1",
                 WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_hInstance, NULL);
+                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblAudio1, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             HWND cmbAudio1 = CreateWindowExA(0, "COMBOBOX", "",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, audioDropW, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE1, g_hInstance, NULL);
+                controlX, y, audioDropW, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE1, g_windows.hInstance, NULL);
             SendMessage(cmbAudio1, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Volume slider 1
             HWND sldVol1 = CreateWindowExA(0, TRACKBAR_CLASSA, "",
                 WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-                sliderX, y + 2, sliderW, 22, hwnd, (HMENU)ID_SLD_AUDIO_VOLUME1, g_hInstance, NULL);
+                sliderX, y + 2, sliderW, 22, hwnd, (HMENU)ID_SLD_AUDIO_VOLUME1, g_windows.hInstance, NULL);
             SendMessage(sldVol1, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
             SendMessage(sldVol1, TBM_SETPOS, TRUE, g_config.audioVolume1);
             
             char volBuf1[16]; snprintf(volBuf1, sizeof(volBuf1), "%d%%", g_config.audioVolume1);
             HWND lblVol1 = CreateWindowExA(0, "STATIC", volBuf1,
                 WS_CHILD | WS_VISIBLE,
-                volLblX, y + 5, volLblW, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL1, g_hInstance, NULL);
+                volLblX, y + 5, volLblW, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL1, g_windows.hInstance, NULL);
             SendMessage(lblVol1, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             y += rowH;
             
             // Audio Source 2
             HWND lblAudio2 = CreateWindowExA(0, "STATIC", "Audio source 2",
                 WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_hInstance, NULL);
+                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblAudio2, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             HWND cmbAudio2 = CreateWindowExA(0, "COMBOBOX", "",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, audioDropW, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE2, g_hInstance, NULL);
+                controlX, y, audioDropW, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE2, g_windows.hInstance, NULL);
             SendMessage(cmbAudio2, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Volume slider 2
             HWND sldVol2 = CreateWindowExA(0, TRACKBAR_CLASSA, "",
                 WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-                sliderX, y + 2, sliderW, 22, hwnd, (HMENU)ID_SLD_AUDIO_VOLUME2, g_hInstance, NULL);
+                sliderX, y + 2, sliderW, 22, hwnd, (HMENU)ID_SLD_AUDIO_VOLUME2, g_windows.hInstance, NULL);
             SendMessage(sldVol2, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
             SendMessage(sldVol2, TBM_SETPOS, TRUE, g_config.audioVolume2);
             
             char volBuf2[16]; snprintf(volBuf2, sizeof(volBuf2), "%d%%", g_config.audioVolume2);
             HWND lblVol2 = CreateWindowExA(0, "STATIC", volBuf2,
                 WS_CHILD | WS_VISIBLE,
-                volLblX, y + 5, volLblW, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL2, g_hInstance, NULL);
+                volLblX, y + 5, volLblW, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL2, g_windows.hInstance, NULL);
             SendMessage(lblVol2, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             y += rowH;
             
             // Audio Source 3
             HWND lblAudio3 = CreateWindowExA(0, "STATIC", "Audio source 3",
                 WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_hInstance, NULL);
+                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblAudio3, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             HWND cmbAudio3 = CreateWindowExA(0, "COMBOBOX", "",
                 WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, audioDropW, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE3, g_hInstance, NULL);
+                controlX, y, audioDropW, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE3, g_windows.hInstance, NULL);
             SendMessage(cmbAudio3, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Volume slider 3
             HWND sldVol3 = CreateWindowExA(0, TRACKBAR_CLASSA, "",
                 WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-                sliderX, y + 2, sliderW, 22, hwnd, (HMENU)ID_SLD_AUDIO_VOLUME3, g_hInstance, NULL);
+                sliderX, y + 2, sliderW, 22, hwnd, (HMENU)ID_SLD_AUDIO_VOLUME3, g_windows.hInstance, NULL);
             SendMessage(sldVol3, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
             SendMessage(sldVol3, TBM_SETPOS, TRUE, g_config.audioVolume3);
             
             char volBuf3[16]; snprintf(volBuf3, sizeof(volBuf3), "%d%%", g_config.audioVolume3);
             HWND lblVol3 = CreateWindowExA(0, "STATIC", volBuf3,
                 WS_CHILD | WS_VISIBLE,
-                volLblX, y + 5, volLblW, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL3, g_hInstance, NULL);
+                volLblX, y + 5, volLblW, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL3, g_windows.hInstance, NULL);
             SendMessage(lblVol3, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Populate audio dropdowns using helper function
@@ -3402,25 +3347,25 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Divider line
             CreateWindowExA(0, "STATIC", "",
                 WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-                labelX, y, contentW, 2, hwnd, NULL, g_hInstance, NULL);
+                labelX, y, contentW, 2, hwnd, NULL, g_windows.hInstance, NULL);
             y += 14;
             
             // Enable Debug Logging checkbox
             HWND chkDebug = CreateWindowExA(0, "BUTTON", "Enable Debug Logging",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                labelX, y, 200, 24, hwnd, (HMENU)ID_CHK_DEBUG_LOGGING, g_hInstance, NULL);
+                labelX, y, 200, 24, hwnd, (HMENU)ID_CHK_DEBUG_LOGGING, g_windows.hInstance, NULL);
             SendMessage(chkDebug, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             SendMessage(chkDebug, BM_SETCHECK, g_config.debugLogging ? BST_CHECKED : BST_UNCHECKED, 0);
             
             // Add description text
             HWND lblDebugInfo = CreateWindowExA(0, "STATIC", "(Logs are saved to Debug folder next to exe)",
                 WS_CHILD | WS_VISIBLE,
-                labelX + 205, y + 4, 300, 20, hwnd, NULL, g_hInstance, NULL);
+                labelX + 205, y + 4, 300, 20, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblDebugInfo, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             // Initialize preview border and area selector
-            PreviewBorder_Init(g_hInstance);
-            AreaSelector_Init(g_hInstance);
+            PreviewBorder_Init(g_windows.hInstance);
+            AreaSelector_Init(g_windows.hInstance);
             
             // Show preview for current capture source
             UpdateReplayPreview();
@@ -3612,7 +3557,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     
                 case ID_BTN_REPLAY_HOTKEY:
                     // Enter hotkey capture mode
-                    g_waitingForHotkey = TRUE;
+                    g_interaction.waitingForHotkey = TRUE;
                     SetWindowTextA(GetDlgItem(hwnd, ID_BTN_REPLAY_HOTKEY), "Press a key...");
                     SetFocus(hwnd);  // Focus the window to receive key events
                     break;
@@ -3638,7 +3583,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                             SYSTEMTIME st;
                             GetLocalTime(&st);
                             snprintf(logFilename, sizeof(logFilename), "%s\\lwsr_log_%04d%02d%02d_%02d%02d%02d.txt",
-                                    debugFolder, st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
+                                    debugFolder, (int)st.wYear, (int)st.wMonth, (int)st.wDay, (int)st.wHour, (int)st.wMinute, (int)st.wSecond);
                             Logger_Init(logFilename, "w");
                             Logger_Log("Debug logging enabled (live toggle)\n");
                         }
@@ -3727,7 +3672,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         
         case WM_KEYDOWN:
         case WM_SYSKEYDOWN:  // For Alt combinations
-            if (g_waitingForHotkey) {
+            if (g_interaction.waitingForHotkey) {
                 // Get the virtual key code
                 int vk = (int)wParam;
                 
@@ -3760,7 +3705,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 GetKeyNameFromVK(vk, keyName, sizeof(keyName));
                 SetWindowTextA(GetDlgItem(hwnd, ID_BTN_REPLAY_HOTKEY), keyName);
                 
-                g_waitingForHotkey = FALSE;
+                g_interaction.waitingForHotkey = FALSE;
                 return 0;
             }
             break;
@@ -3803,7 +3748,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             if (g_settingsBgBrush) { DeleteObject(g_settingsBgBrush); g_settingsBgBrush = NULL; }
             
             DestroyWindow(hwnd);
-            g_settingsWnd = NULL;
+            g_windows.settingsWnd = NULL;
             
             // Refresh settings button to remove highlight
             if (g_controlWnd) {
@@ -3854,10 +3799,10 @@ static LRESULT CALLBACK CrosshairWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
             DeleteObject(bluePen);
             
             // Draw size text
-            if (!IsRectEmpty(&g_selectedRect)) {
+            if (!IsRectEmpty(&g_selection.selectedRect)) {
                 char sizeText[64];
-                int w = g_selectedRect.right - g_selectedRect.left;
-                int h = g_selectedRect.bottom - g_selectedRect.top;
+                int w = g_selection.selectedRect.right - g_selection.selectedRect.left;
+                int h = g_selection.selectedRect.bottom - g_selection.selectedRect.top;
                 snprintf(sizeText, sizeof(sizeText), "%d x %d", w, h);
                 
                 SetBkMode(hdc, TRANSPARENT);

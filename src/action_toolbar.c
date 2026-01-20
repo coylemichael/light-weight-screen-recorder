@@ -13,93 +13,25 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <dwmapi.h>
+#include "gdiplus_api.h"
 
-// GDI+ flat API
-typedef int GpStatus;
-typedef void* GpGraphics;
-typedef void* GpSolidFill;
-typedef void* GpPen;
-typedef void* GpPath;
-typedef void* GpFont;
-typedef void* GpFontFamily;
-typedef void* GpStringFormat;
-typedef float REAL;
+/* Additional GDI+ types needed by this module */
 typedef DWORD ARGB;
 
-// GDI+ function pointers
-static HMODULE g_gdiplus = NULL;
-static ULONG_PTR g_gdiplusToken = 0;
+/* ============================================================================
+ * TOOLBAR UI STATE
+ * ============================================================================
+ * Consolidated state for the action toolbar window.
+ * Thread Access: [Main thread only - UI operations]
+ */
 
-typedef GpStatus (WINAPI *GdiplusStartupFunc)(ULONG_PTR*, void*, void*);
-typedef void (WINAPI *GdiplusShutdownFunc)(ULONG_PTR);
-typedef GpStatus (WINAPI *GdipCreateFromHDCFunc)(HDC, GpGraphics**);
-typedef GpStatus (WINAPI *GdipDeleteGraphicsFunc)(GpGraphics*);
-typedef GpStatus (WINAPI *GdipSetSmoothingModeFunc)(GpGraphics*, int);
-typedef GpStatus (WINAPI *GdipSetTextRenderingHintFunc)(GpGraphics*, int);
-typedef GpStatus (WINAPI *GdipCreateSolidFillFunc)(ARGB, GpSolidFill**);
-typedef GpStatus (WINAPI *GdipDeleteBrushFunc)(GpSolidFill*);
-typedef GpStatus (WINAPI *GdipCreatePenFunc)(ARGB, REAL, int, GpPen**);
-typedef GpStatus (WINAPI *GdipDeletePenFunc)(GpPen*);
-typedef GpStatus (WINAPI *GdipCreatePathFunc)(int, GpPath**);
-typedef GpStatus (WINAPI *GdipDeletePathFunc)(GpPath*);
-typedef GpStatus (WINAPI *GdipAddPathArcFunc)(GpPath*, REAL, REAL, REAL, REAL, REAL, REAL);
-typedef GpStatus (WINAPI *GdipAddPathLineFunc)(GpPath*, REAL, REAL, REAL, REAL);
-typedef GpStatus (WINAPI *GdipClosePathFigureFunc)(GpPath*);
-typedef GpStatus (WINAPI *GdipFillPathFunc)(GpGraphics*, GpSolidFill*, GpPath*);
-typedef GpStatus (WINAPI *GdipDrawPathFunc)(GpGraphics*, GpPen*, GpPath*);
-typedef GpStatus (WINAPI *GdipFillRectangleFunc)(GpGraphics*, GpSolidFill*, REAL, REAL, REAL, REAL);
-typedef GpStatus (WINAPI *GdipGraphicsClearFunc)(GpGraphics*, ARGB);
-typedef GpStatus (WINAPI *GdipCreateFontFamilyFromNameFunc)(const WCHAR*, void*, GpFontFamily**);
-typedef GpStatus (WINAPI *GdipDeleteFontFamilyFunc)(GpFontFamily*);
-typedef GpStatus (WINAPI *GdipCreateFontFunc)(GpFontFamily*, REAL, int, int, GpFont**);
-typedef GpStatus (WINAPI *GdipDeleteFontFunc)(GpFont*);
-typedef GpStatus (WINAPI *GdipCreateStringFormatFunc)(int, LANGID, GpStringFormat**);
-typedef GpStatus (WINAPI *GdipDeleteStringFormatFunc)(GpStringFormat*);
-typedef GpStatus (WINAPI *GdipSetStringFormatAlignFunc)(GpStringFormat*, int);
-typedef GpStatus (WINAPI *GdipSetStringFormatLineAlignFunc)(GpStringFormat*, int);
-typedef GpStatus (WINAPI *GdipDrawStringFunc)(GpGraphics*, const WCHAR*, int, GpFont*, void*, GpStringFormat*, GpSolidFill*);
-
-static GdiplusStartupFunc pGdiplusStartup;
-static GdiplusShutdownFunc pGdiplusShutdown;
-static GdipCreateFromHDCFunc pGdipCreateFromHDC;
-static GdipDeleteGraphicsFunc pGdipDeleteGraphics;
-static GdipSetSmoothingModeFunc pGdipSetSmoothingMode;
-static GdipSetTextRenderingHintFunc pGdipSetTextRenderingHint;
-static GdipCreateSolidFillFunc pGdipCreateSolidFill;
-static GdipDeleteBrushFunc pGdipDeleteBrush;
-static GdipCreatePenFunc pGdipCreatePen;
-static GdipDeletePenFunc pGdipDeletePen;
-static GdipCreatePathFunc pGdipCreatePath;
-static GdipDeletePathFunc pGdipDeletePath;
-static GdipAddPathArcFunc pGdipAddPathArc;
-static GdipAddPathLineFunc pGdipAddPathLine;
-static GdipClosePathFigureFunc pGdipClosePathFigure;
-static GdipFillPathFunc pGdipFillPath;
-static GdipDrawPathFunc pGdipDrawPath;
-static GdipFillRectangleFunc pGdipFillRectangle;
-static GdipGraphicsClearFunc pGdipGraphicsClear;
-static GdipCreateFontFamilyFromNameFunc pGdipCreateFontFamilyFromName;
-static GdipDeleteFontFamilyFunc pGdipDeleteFontFamily;
-static GdipCreateFontFunc pGdipCreateFont;
-static GdipDeleteFontFunc pGdipDeleteFont;
-static GdipCreateStringFormatFunc pGdipCreateStringFormat;
-static GdipDeleteStringFormatFunc pGdipDeleteStringFormat;
-static GdipSetStringFormatAlignFunc pGdipSetStringFormatAlign;
-static GdipSetStringFormatLineAlignFunc pGdipSetStringFormatLineAlign;
-static GdipDrawStringFunc pGdipDrawString;
-
-// Toolbar state
-static HWND g_toolbarWnd = NULL;
-static HINSTANCE g_hInstance = NULL;
-static BOOL g_initialized = FALSE;
-
-// Button definitions
+/* Button definitions */
 #define BTN_COUNT 5
 #define BTN_MINIMIZE 0
 #define BTN_RECORD   1
 #define BTN_CLOSE    2
 #define BTN_SETTINGS 3
-#define BTN_UNUSED   4  // Reserved
+#define BTN_UNUSED   4  /* Reserved */
 
 typedef struct {
     RECT rect;
@@ -107,17 +39,26 @@ typedef struct {
     int hovering;
 } ToolbarButton;
 
-static ToolbarButton g_buttons[BTN_COUNT];
-static int g_hoveredButton = -1;
-static int g_pressedButton = -1;
+/*
+ * ToolbarUIState - Consolidated toolbar UI state
+ */
+typedef struct ToolbarUIState {
+    HWND wnd;
+    HINSTANCE hInstance;
+    BOOL initialized;
+    ToolbarButton buttons[BTN_COUNT];
+    int hoveredButton;
+    int pressedButton;
+    /* Action callbacks set by the caller */
+    void (*onMinimize)(void);
+    void (*onRecord)(void);
+    void (*onClose)(void);
+    void (*onSettings)(void);
+} ToolbarUIState;
 
-// Callbacks
-static void (*g_onMinimize)(void) = NULL;
-static void (*g_onRecord)(void) = NULL;
-static void (*g_onClose)(void) = NULL;
-static void (*g_onSettings)(void) = NULL;
+static ToolbarUIState g_ui = {0};
 
-// Toolbar dimensions
+/* Toolbar dimensions (constants) */
 #define TOOLBAR_WIDTH 180
 #define TOOLBAR_HEIGHT 36
 #define CORNER_RADIUS 10
@@ -125,88 +66,28 @@ static void (*g_onSettings)(void) = NULL;
 #define BTN_MARGIN 6
 #define BTN_GAP 4
 
-// Colors (ARGB format for GDI+)
-#define COLOR_BG         0xFF2D2D2D  // Dark gray background
-#define COLOR_BTN        0xFF3A3A3A  // Button normal
+/* Colors (ARGB format for GDI+) */
+#define COLOR_BG         0xFF2D2D2D  /* Dark gray background */
+#define COLOR_BTN        0xFF3A3A3A  /* Button normal */
 #define COLOR_BTN_HOVER  0xFF4A4A4A  // Button hover
 #define COLOR_BTN_PRESS  0xFF505050  // Button pressed
 #define COLOR_BORDER     0xFF505050  // Border
 #define COLOR_TEXT       0xFFFFFFFF  // White text
 
-// Initialize GDI+ for this module
-static BOOL InitToolbarGdiPlus(void) {
-    if (g_gdiplus) return TRUE;
-    
-    g_gdiplus = LoadLibraryA("gdiplus.dll");
-    if (!g_gdiplus) return FALSE;
-    
-    pGdiplusStartup = (GdiplusStartupFunc)GetProcAddress(g_gdiplus, "GdiplusStartup");
-    pGdiplusShutdown = (GdiplusShutdownFunc)GetProcAddress(g_gdiplus, "GdiplusShutdown");
-    pGdipCreateFromHDC = (GdipCreateFromHDCFunc)GetProcAddress(g_gdiplus, "GdipCreateFromHDC");
-    pGdipDeleteGraphics = (GdipDeleteGraphicsFunc)GetProcAddress(g_gdiplus, "GdipDeleteGraphics");
-    pGdipSetSmoothingMode = (GdipSetSmoothingModeFunc)GetProcAddress(g_gdiplus, "GdipSetSmoothingMode");
-    pGdipSetTextRenderingHint = (GdipSetTextRenderingHintFunc)GetProcAddress(g_gdiplus, "GdipSetTextRenderingHint");
-    pGdipCreateSolidFill = (GdipCreateSolidFillFunc)GetProcAddress(g_gdiplus, "GdipCreateSolidFill");
-    pGdipDeleteBrush = (GdipDeleteBrushFunc)GetProcAddress(g_gdiplus, "GdipDeleteBrush");
-    pGdipCreatePen = (GdipCreatePenFunc)GetProcAddress(g_gdiplus, "GdipCreatePen1");
-    pGdipDeletePen = (GdipDeletePenFunc)GetProcAddress(g_gdiplus, "GdipDeletePen");
-    pGdipCreatePath = (GdipCreatePathFunc)GetProcAddress(g_gdiplus, "GdipCreatePath");
-    pGdipDeletePath = (GdipDeletePathFunc)GetProcAddress(g_gdiplus, "GdipDeletePath");
-    pGdipAddPathArc = (GdipAddPathArcFunc)GetProcAddress(g_gdiplus, "GdipAddPathArc");
-    pGdipAddPathLine = (GdipAddPathLineFunc)GetProcAddress(g_gdiplus, "GdipAddPathLine");
-    pGdipClosePathFigure = (GdipClosePathFigureFunc)GetProcAddress(g_gdiplus, "GdipClosePathFigure");
-    pGdipFillPath = (GdipFillPathFunc)GetProcAddress(g_gdiplus, "GdipFillPath");
-    pGdipDrawPath = (GdipDrawPathFunc)GetProcAddress(g_gdiplus, "GdipDrawPath");
-    pGdipFillRectangle = (GdipFillRectangleFunc)GetProcAddress(g_gdiplus, "GdipFillRectangle");
-    pGdipGraphicsClear = (GdipGraphicsClearFunc)GetProcAddress(g_gdiplus, "GdipGraphicsClear");
-    pGdipCreateFontFamilyFromName = (GdipCreateFontFamilyFromNameFunc)GetProcAddress(g_gdiplus, "GdipCreateFontFamilyFromName");
-    pGdipDeleteFontFamily = (GdipDeleteFontFamilyFunc)GetProcAddress(g_gdiplus, "GdipDeleteFontFamily");
-    pGdipCreateFont = (GdipCreateFontFunc)GetProcAddress(g_gdiplus, "GdipCreateFont");
-    pGdipDeleteFont = (GdipDeleteFontFunc)GetProcAddress(g_gdiplus, "GdipDeleteFont");
-    pGdipCreateStringFormat = (GdipCreateStringFormatFunc)GetProcAddress(g_gdiplus, "GdipCreateStringFormat");
-    pGdipDeleteStringFormat = (GdipDeleteStringFormatFunc)GetProcAddress(g_gdiplus, "GdipDeleteStringFormat");
-    pGdipSetStringFormatAlign = (GdipSetStringFormatAlignFunc)GetProcAddress(g_gdiplus, "GdipSetStringFormatAlign");
-    pGdipSetStringFormatLineAlign = (GdipSetStringFormatLineAlignFunc)GetProcAddress(g_gdiplus, "GdipSetStringFormatLineAlign");
-    pGdipDrawString = (GdipDrawStringFunc)GetProcAddress(g_gdiplus, "GdipDrawString");
-    
-    if (!pGdiplusStartup) return FALSE;
-    
-    // GdiplusStartupInput
-    struct { UINT32 GdiplusVersion; void* DebugEventCallback; BOOL SuppressBackgroundThread; BOOL SuppressExternalCodecs; } startupInput = {1, NULL, FALSE, FALSE};
-    if (pGdiplusStartup(&g_gdiplusToken, &startupInput, NULL) != 0) {
-        FreeLibrary(g_gdiplus);
-        g_gdiplus = NULL;
-        return FALSE;
-    }
-    
-    return TRUE;
-}
-
-static void ShutdownToolbarGdiPlus(void) {
-    if (g_gdiplusToken && pGdiplusShutdown) {
-        pGdiplusShutdown(g_gdiplusToken);
-        g_gdiplusToken = 0;
-    }
-    if (g_gdiplus) {
-        FreeLibrary(g_gdiplus);
-        g_gdiplus = NULL;
-    }
-}
-
 // Create rounded rectangle path
 static GpPath* CreateRoundedRectPath(REAL x, REAL y, REAL w, REAL h, REAL r) {
     GpPath* path = NULL;
-    if (pGdipCreatePath(0, &path) != 0) return NULL;
+    if (g_gdip.CreatePath(0, &path) != 0) return NULL;
     
     // Top-left arc
-    pGdipAddPathArc(path, x, y, r*2, r*2, 180, 90);
+    g_gdip.AddPathArc(path, x, y, r*2, r*2, 180, 90);
     // Top-right arc
-    pGdipAddPathArc(path, x + w - r*2, y, r*2, r*2, 270, 90);
+    g_gdip.AddPathArc(path, x + w - r*2, y, r*2, r*2, 270, 90);
     // Bottom-right arc
-    pGdipAddPathArc(path, x + w - r*2, y + h - r*2, r*2, r*2, 0, 90);
+    g_gdip.AddPathArc(path, x + w - r*2, y + h - r*2, r*2, r*2, 0, 90);
     // Bottom-left arc
-    pGdipAddPathArc(path, x, y + h - r*2, r*2, r*2, 90, 90);
-    pGdipClosePathFigure(path);
+    g_gdip.AddPathArc(path, x, y + h - r*2, r*2, r*2, 90, 90);
+    g_gdip.ClosePathFigure(path);
     
     return path;
 }
@@ -214,33 +95,33 @@ static GpPath* CreateRoundedRectPath(REAL x, REAL y, REAL w, REAL h, REAL r) {
 // Paint the toolbar to a 32-bit ARGB bitmap
 static void PaintToolbar(HDC hdc, int width, int height) {
     GpGraphics* g = NULL;
-    if (pGdipCreateFromHDC(hdc, &g) != 0) return;
+    if (g_gdip.CreateFromHDC(hdc, &g) != 0) return;
     
     // Enable anti-aliasing
-    pGdipSetSmoothingMode(g, 4); // SmoothingModeAntiAlias
-    pGdipSetTextRenderingHint(g, 5); // TextRenderingHintClearTypeGridFit
+    g_gdip.SetSmoothingMode(g, 4); // SmoothingModeAntiAlias
+    g_gdip.SetTextRenderingHint(g, 5); // TextRenderingHintClearTypeGridFit
     
     // Clear to fully transparent
-    pGdipGraphicsClear(g, 0x00000000);
+    g_gdip.GraphicsClear(g, 0x00000000);
     
     // Draw background rounded rect
     GpPath* bgPath = CreateRoundedRectPath(0.5f, 0.5f, (REAL)width - 1, (REAL)height - 1, (REAL)CORNER_RADIUS);
     if (bgPath) {
         GpSolidFill* bgBrush = NULL;
-        pGdipCreateSolidFill(COLOR_BG, &bgBrush);
+        g_gdip.CreateSolidFill(COLOR_BG, &bgBrush);
         if (bgBrush) {
-            pGdipFillPath(g, bgBrush, bgPath);
-            pGdipDeleteBrush(bgBrush);
+            g_gdip.FillPath(g, bgBrush, bgPath);
+            g_gdip.BrushDelete(bgBrush);
         }
         
         // Draw border
         GpPen* borderPen = NULL;
-        pGdipCreatePen(COLOR_BORDER, 1.0f, 0, &borderPen);
+        g_gdip.CreatePen1(COLOR_BORDER, 1.0f, 0, &borderPen);
         if (borderPen) {
-            pGdipDrawPath(g, borderPen, bgPath);
-            pGdipDeletePen(borderPen);
+            g_gdip.DrawPath(g, borderPen, bgPath);
+            g_gdip.PenDelete(borderPen);
         }
-        pGdipDeletePath(bgPath);
+        g_gdip.DeletePath(bgPath);
     }
     
     // Draw buttons
@@ -248,33 +129,33 @@ static void PaintToolbar(HDC hdc, int width, int height) {
     GpFont* font = NULL;
     GpStringFormat* format = NULL;
     
-    pGdipCreateFontFamilyFromName(L"Segoe UI", NULL, &fontFamily);
+    g_gdip.CreateFontFamilyFromName(L"Segoe UI", NULL, &fontFamily);
     if (fontFamily) {
-        pGdipCreateFont(fontFamily, 11.0f, 0, 2, &font); // 2 = UnitPixel... actually UnitPoint is better
+        g_gdip.CreateFont(fontFamily, 11.0f, 0, 2, &font); // 2 = UnitPixel... actually UnitPoint is better
     }
-    pGdipCreateStringFormat(0, 0, &format);
+    g_gdip.CreateStringFormat(0, 0, &format);
     if (format) {
-        pGdipSetStringFormatAlign(format, 1); // StringAlignmentCenter
-        pGdipSetStringFormatLineAlign(format, 1); // StringAlignmentCenter
+        g_gdip.SetStringFormatAlign(format, 1); // StringAlignmentCenter
+        g_gdip.SetStringFormatLineAlign(format, 1); // StringAlignmentCenter
     }
     
     for (int i = 0; i < BTN_COUNT; i++) {
         ARGB btnColor = COLOR_BTN;
-        if (i == g_pressedButton) btnColor = COLOR_BTN_PRESS;
-        else if (i == g_hoveredButton) btnColor = COLOR_BTN_HOVER;
+        if (i == g_ui.pressedButton) btnColor = COLOR_BTN_PRESS;
+        else if (i == g_ui.hoveredButton) btnColor = COLOR_BTN_HOVER;
         
-        RECT* r = &g_buttons[i].rect;
+        RECT* r = &g_ui.buttons[i].rect;
         GpPath* btnPath = CreateRoundedRectPath((REAL)r->left + 0.5f, (REAL)r->top + 0.5f, 
                                                   (REAL)(r->right - r->left) - 1, 
                                                   (REAL)(r->bottom - r->top) - 1, 4.0f);
         if (btnPath) {
             GpSolidFill* btnBrush = NULL;
-            pGdipCreateSolidFill(btnColor, &btnBrush);
+            g_gdip.CreateSolidFill(btnColor, &btnBrush);
             if (btnBrush) {
-                pGdipFillPath(g, btnBrush, btnPath);
-                pGdipDeleteBrush(btnBrush);
+                g_gdip.FillPath(g, btnBrush, btnPath);
+                g_gdip.BrushDelete(btnBrush);
             }
-            pGdipDeletePath(btnPath);
+            g_gdip.DeletePath(btnPath);
         }
         
         // Draw text
@@ -283,24 +164,24 @@ static void PaintToolbar(HDC hdc, int width, int height) {
             RectF textRect = { (REAL)r->left, (REAL)r->top, (REAL)(r->right - r->left), (REAL)(r->bottom - r->top) };
             
             GpSolidFill* textBrush = NULL;
-            pGdipCreateSolidFill(COLOR_TEXT, &textBrush);
+            g_gdip.CreateSolidFill(COLOR_TEXT, &textBrush);
             if (textBrush) {
-                pGdipDrawString(g, g_buttons[i].text, -1, font, &textRect, format, textBrush);
-                pGdipDeleteBrush(textBrush);
+                g_gdip.DrawString(g, g_ui.buttons[i].text, -1, font, &textRect, format, textBrush);
+                g_gdip.BrushDelete(textBrush);
             }
         }
     }
     
-    if (format) pGdipDeleteStringFormat(format);
-    if (font) pGdipDeleteFont(font);
-    if (fontFamily) pGdipDeleteFontFamily(fontFamily);
+    if (format) g_gdip.DeleteStringFormat(format);
+    if (font) g_gdip.DeleteFont(font);
+    if (fontFamily) g_gdip.DeleteFontFamily(fontFamily);
     
-    pGdipDeleteGraphics(g);
+    g_gdip.DeleteGraphics(g);
 }
 
 // Update the layered window
 static void UpdateToolbarBitmap(void) {
-    if (!g_toolbarWnd) return;
+    if (!g_ui.wnd) return;
     
     int width = TOOLBAR_WIDTH;
     int height = TOOLBAR_HEIGHT;
@@ -318,6 +199,11 @@ static void UpdateToolbarBitmap(void) {
     HDC screenDC = GetDC(NULL);
     HDC memDC = CreateCompatibleDC(screenDC);
     HBITMAP hBitmap = CreateDIBSection(screenDC, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!hBitmap) {
+        DeleteDC(memDC);
+        ReleaseDC(NULL, screenDC);
+        return;
+    }
     HBITMAP oldBitmap = SelectObject(memDC, hBitmap);
     
     // Paint using GDI+
@@ -329,10 +215,10 @@ static void UpdateToolbarBitmap(void) {
     BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
     
     RECT wr;
-    GetWindowRect(g_toolbarWnd, &wr);
+    GetWindowRect(g_ui.wnd, &wr);
     POINT ptDst = {wr.left, wr.top};
     
-    UpdateLayeredWindow(g_toolbarWnd, screenDC, &ptDst, &sizeWnd, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
+    UpdateLayeredWindow(g_ui.wnd, screenDC, &ptDst, &sizeWnd, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
     
     SelectObject(memDC, oldBitmap);
     DeleteObject(hBitmap);
@@ -344,7 +230,7 @@ static void UpdateToolbarBitmap(void) {
 static int HitTestButton(int x, int y) {
     POINT pt = {x, y};
     for (int i = 0; i < BTN_COUNT; i++) {
-        if (PtInRect(&g_buttons[i].rect, pt)) {
+        if (PtInRect(&g_ui.buttons[i].rect, pt)) {
             return i;
         }
     }
@@ -362,27 +248,27 @@ static LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             int settingsBtnWidth = 60; // For "Settings" text
             int btnGap = BTN_GAP;
             
-            g_buttons[BTN_MINIMIZE].text = L"\u2014";  // Em dash (horizontal line)
-            g_buttons[BTN_RECORD].text = L"\u25CF";   // Filled circle
-            g_buttons[BTN_CLOSE].text = L"\u2715";    // Multiplication X
-            g_buttons[BTN_SETTINGS].text = L"Settings";
+            g_ui.buttons[BTN_MINIMIZE].text = L"\u2014";  // Em dash (horizontal line)
+            g_ui.buttons[BTN_RECORD].text = L"\u25CF";   // Filled circle
+            g_ui.buttons[BTN_CLOSE].text = L"\u2715";    // Multiplication X
+            g_ui.buttons[BTN_SETTINGS].text = L"Settings";
             
             // Layout symbol buttons
             for (int i = 0; i <= BTN_CLOSE; i++) {
-                g_buttons[i].rect.left = x;
-                g_buttons[i].rect.top = (TOOLBAR_HEIGHT - BTN_HEIGHT) / 2;
-                g_buttons[i].rect.right = x + smallBtnWidth;
-                g_buttons[i].rect.bottom = g_buttons[i].rect.top + BTN_HEIGHT;
+                g_ui.buttons[i].rect.left = x;
+                g_ui.buttons[i].rect.top = (TOOLBAR_HEIGHT - BTN_HEIGHT) / 2;
+                g_ui.buttons[i].rect.right = x + smallBtnWidth;
+                g_ui.buttons[i].rect.bottom = g_ui.buttons[i].rect.top + BTN_HEIGHT;
                 x += smallBtnWidth + btnGap;
             }
             // Settings button is wider
-            g_buttons[BTN_SETTINGS].rect.left = x;
-            g_buttons[BTN_SETTINGS].rect.top = (TOOLBAR_HEIGHT - BTN_HEIGHT) / 2;
-            g_buttons[BTN_SETTINGS].rect.right = x + settingsBtnWidth;
-            g_buttons[BTN_SETTINGS].rect.bottom = g_buttons[BTN_SETTINGS].rect.top + BTN_HEIGHT;
+            g_ui.buttons[BTN_SETTINGS].rect.left = x;
+            g_ui.buttons[BTN_SETTINGS].rect.top = (TOOLBAR_HEIGHT - BTN_HEIGHT) / 2;
+            g_ui.buttons[BTN_SETTINGS].rect.right = x + settingsBtnWidth;
+            g_ui.buttons[BTN_SETTINGS].rect.bottom = g_ui.buttons[BTN_SETTINGS].rect.top + BTN_HEIGHT;
             
             // BTN_UNUSED has zero rect (not displayed)
-            g_buttons[BTN_UNUSED].rect = (RECT){0, 0, 0, 0};
+            g_ui.buttons[BTN_UNUSED].rect = (RECT){0, 0, 0, 0};
             return 0;
         }
         
@@ -391,8 +277,8 @@ static LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             int y = HIWORD(lParam);
             int btn = HitTestButton(x, y);
             
-            if (btn != g_hoveredButton) {
-                g_hoveredButton = btn;
+            if (btn != g_ui.hoveredButton) {
+                g_ui.hoveredButton = btn;
                 UpdateToolbarBitmap();
             }
             
@@ -403,8 +289,8 @@ static LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         }
         
         case WM_MOUSELEAVE:
-            if (g_hoveredButton != -1) {
-                g_hoveredButton = -1;
+            if (g_ui.hoveredButton != -1) {
+                g_ui.hoveredButton = -1;
                 UpdateToolbarBitmap();
             }
             return 0;
@@ -414,7 +300,7 @@ static LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             int y = HIWORD(lParam);
             int btn = HitTestButton(x, y);
             if (btn >= 0) {
-                g_pressedButton = btn;
+                g_ui.pressedButton = btn;
                 UpdateToolbarBitmap();
                 SetCapture(hwnd);
             }
@@ -427,17 +313,17 @@ static LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             int y = HIWORD(lParam);
             int btn = HitTestButton(x, y);
             
-            if (btn >= 0 && btn == g_pressedButton) {
+            if (btn >= 0 && btn == g_ui.pressedButton) {
                 // Button clicked!
                 switch (btn) {
-                    case BTN_MINIMIZE: if (g_onMinimize) g_onMinimize(); break;
-                    case BTN_RECORD:   if (g_onRecord) g_onRecord(); break;
-                    case BTN_CLOSE:    if (g_onClose) g_onClose(); break;
-                    case BTN_SETTINGS: if (g_onSettings) g_onSettings(); break;
+                    case BTN_MINIMIZE: if (g_ui.onMinimize) g_ui.onMinimize(); break;
+                    case BTN_RECORD:   if (g_ui.onRecord) g_ui.onRecord(); break;
+                    case BTN_CLOSE:    if (g_ui.onClose) g_ui.onClose(); break;
+                    case BTN_SETTINGS: if (g_ui.onSettings) g_ui.onSettings(); break;
                 }
             }
             
-            g_pressedButton = -1;
+            g_ui.pressedButton = -1;
             UpdateToolbarBitmap();
             return 0;
         }
@@ -452,11 +338,12 @@ static LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 
 // Public API
 BOOL ActionToolbar_Init(HINSTANCE hInstance) {
-    if (g_initialized) return TRUE;
+    if (g_ui.initialized) return TRUE;
     
-    g_hInstance = hInstance;
+    g_ui.hInstance = hInstance;
     
-    if (!InitToolbarGdiPlus()) return FALSE;
+    // GDI+ is now initialized globally via g_gdip in main.c
+    if (!g_gdip.initialized) return FALSE;
     
     // Register window class
     WNDCLASSEXA wc = {0};
@@ -469,7 +356,7 @@ BOOL ActionToolbar_Init(HINSTANCE hInstance) {
     RegisterClassExA(&wc);
     
     // Create layered window
-    g_toolbarWnd = CreateWindowExA(
+    g_ui.wnd = CreateWindowExA(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
         "LWSRActionToolbar",
         NULL,
@@ -478,47 +365,47 @@ BOOL ActionToolbar_Init(HINSTANCE hInstance) {
         NULL, NULL, hInstance, NULL
     );
     
-    if (!g_toolbarWnd) return FALSE;
+    if (!g_ui.wnd) return FALSE;
     
-    g_initialized = TRUE;
+    g_ui.initialized = TRUE;
     return TRUE;
 }
 
 void ActionToolbar_Shutdown(void) {
-    if (g_toolbarWnd) {
-        DestroyWindow(g_toolbarWnd);
-        g_toolbarWnd = NULL;
+    if (g_ui.wnd) {
+        DestroyWindow(g_ui.wnd);
+        g_ui.wnd = NULL;
     }
-    ShutdownToolbarGdiPlus();
-    g_initialized = FALSE;
+    // GDI+ shutdown handled globally by main.c
+    g_ui.initialized = FALSE;
 }
 
 void ActionToolbar_Show(int x, int y) {
-    if (!g_toolbarWnd) return;
+    if (!g_ui.wnd) return;
     
-    SetWindowPos(g_toolbarWnd, HWND_TOPMOST, 
+    SetWindowPos(g_ui.wnd, HWND_TOPMOST, 
                  x - TOOLBAR_WIDTH / 2, y,
                  TOOLBAR_WIDTH, TOOLBAR_HEIGHT, 
                  SWP_NOACTIVATE);
     
     UpdateToolbarBitmap();
-    ShowWindow(g_toolbarWnd, SW_SHOWNOACTIVATE);
+    ShowWindow(g_ui.wnd, SW_SHOWNOACTIVATE);
 }
 
 void ActionToolbar_Hide(void) {
-    if (g_toolbarWnd) {
-        ShowWindow(g_toolbarWnd, SW_HIDE);
+    if (g_ui.wnd) {
+        ShowWindow(g_ui.wnd, SW_HIDE);
     }
 }
 
 void ActionToolbar_SetCallbacks(void (*onMinimize)(void), void (*onRecord)(void), 
                                  void (*onClose)(void), void (*onSettings)(void)) {
-    g_onMinimize = onMinimize;
-    g_onRecord = onRecord;
-    g_onClose = onClose;
-    g_onSettings = onSettings;
+    g_ui.onMinimize = onMinimize;
+    g_ui.onRecord = onRecord;
+    g_ui.onClose = onClose;
+    g_ui.onSettings = onSettings;
 }
 
 HWND ActionToolbar_GetWindow(void) {
-    return g_toolbarWnd;
+    return g_ui.wnd;
 }

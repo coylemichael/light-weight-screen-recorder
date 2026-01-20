@@ -26,42 +26,76 @@
 #include "gpu_converter.h"
 #include "constants.h"
 #include <stdio.h>
-#include <mmsystem.h>  // For timeBeginPeriod/timeEndPeriod
-#include <objbase.h>   // For CoInitializeEx/CoUninitialize
+#include <mmsystem.h>  /* For timeBeginPeriod/timeEndPeriod */
+#include <objbase.h>   /* For CoInitializeEx/CoUninitialize */
 
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "ole32.lib")
 
-// Global state
-static NVENCEncoder* g_encoder = NULL;
-static SampleBuffer g_sampleBuffer = {0};
+/* ============================================================================
+ * INTERNAL STATE STRUCTURES
+ * ============================================================================
+ * These structs consolidate related state that was previously scattered
+ * across individual static globals. Passed to thread proc as context.
+ */
 
-// HEVC sequence header (VPS/SPS/PPS) for muxing
-static BYTE g_seqHeader[MAX_SEQ_HEADER_SIZE];
-static DWORD g_seqHeaderSize = 0;
+/*
+ * ReplayVideoState - Video encoding pipeline state
+ * Owned by: Buffer thread
+ * Lifetime: Created in BufferThreadProc, destroyed on thread exit
+ */
+typedef struct ReplayVideoState {
+    NVENCEncoder* encoder;              /* NVENC hardware encoder instance */
+    SampleBuffer sampleBuffer;          /* Circular buffer of encoded frames */
+    BYTE seqHeader[MAX_SEQ_HEADER_SIZE];/* HEVC VPS/SPS/PPS for muxing */
+    DWORD seqHeaderSize;                /* Size of sequence header */
+} ReplayVideoState;
 
-// Audio state
-static AudioCaptureContext* g_audioCapture = NULL;
-static AACEncoder* g_aacEncoder = NULL;
-static MuxerAudioSample* g_audioSamples = NULL;
-static int g_audioSampleCount = 0;
-static int g_audioSampleCapacity = 0;
-static CRITICAL_SECTION g_audioLock;
-static BOOL g_audioLockInitialized = FALSE;  // Track CS initialization
-static BYTE* g_aacConfigData = NULL;
-static int g_aacConfigSize = 0;
-static LONGLONG g_audioMaxDuration = 0;  // Max duration in 100-ns units for eviction
+/*
+ * ReplayAudioState - Audio encoding pipeline state
+ * Owned by: Buffer thread, callbacks protected by lock
+ * Lifetime: Created in BufferThreadProc, destroyed on thread exit
+ */
+typedef struct ReplayAudioState {
+    AudioCaptureContext* capture;       /* WASAPI capture context */
+    AACEncoder* encoder;                /* AAC MFT encoder */
+    MuxerAudioSample* samples;          /* Circular buffer of AAC samples */
+    int sampleCount;                    /* Current sample count */
+    int sampleCapacity;                 /* Allocated capacity */
+    BYTE* configData;                   /* AAC AudioSpecificConfig */
+    int configSize;                     /* Size of configData */
+    LONGLONG maxDuration;               /* Max buffer duration (100-ns units) */
+    CRITICAL_SECTION lock;              /* Protects samples array */
+    BOOL lockInitialized;               /* Track CS initialization */
+} ReplayAudioState;
 
-extern CaptureState g_capture;
-extern AppConfig g_config;
+/*
+ * ReplayInternalState - Combined internal state for buffer thread
+ * Single instance, passed to BufferThreadProc
+ */
+typedef struct ReplayInternalState {
+    ReplayVideoState video;
+    ReplayAudioState audio;
+} ReplayInternalState;
+
+/* ============================================================================
+ * MODULE STATE
+ * ============================================================================
+ * Single instance of internal state. Pointer used by callbacks.
+ */
+static ReplayInternalState g_internal = {0};
+
+/* ---- External References ---- */
+extern CaptureState g_capture;      /* From main.c - DXGI capture */
+extern AppConfig g_config;          /* From main.c - Application config */
 
 static DWORD WINAPI BufferThreadProc(LPVOID param);
 
-// Alias for logging
+/* Alias for logging */
 #define ReplayLog Logger_Log
 
-// Callback for draining completed encoded frames into sample buffer
-// Called from NVENC output thread - must be thread-safe
+/* Callback for draining completed encoded frames into sample buffer */
+/* Called from NVENC output thread - must be thread-safe */
 static void DrainCallback(EncodedFrame* frame, void* userData) {
     SampleBuffer* buffer = (SampleBuffer*)userData;
     if (frame && frame->data && buffer) {
@@ -69,112 +103,122 @@ static void DrainCallback(EncodedFrame* frame, void* userData) {
     }
 }
 
-// Audio callback - stores encoded AAC samples
+/* Audio callback - stores encoded AAC samples */
+/* Called from audio mixer thread - protected by audio.lock */
 static void AudioEncoderCallback(const AACSample* sample, void* userData) {
-    (void)userData;  // Unused - samples go to global buffer
-    if (!sample || !sample->data || sample->size <= 0) return;
+    ReplayAudioState* audio = (ReplayAudioState*)userData;
+    if (!sample || !sample->data || sample->size <= 0 || !audio) return;
     
-    EnterCriticalSection(&g_audioLock);
+    EnterCriticalSection(&audio->lock);
     
-    // Time-based eviction: remove samples older than max duration
-    // This matches video buffer eviction behavior
-    if (g_audioSampleCount > 0 && g_audioMaxDuration > 0) {
+    /* Time-based eviction: remove samples older than max duration */
+    if (audio->sampleCount > 0 && audio->maxDuration > 0) {
         int evicted = 0;
-        while (g_audioSampleCount > 0) {
-            LONGLONG oldest = g_audioSamples[0].timestamp;
+        while (audio->sampleCount > 0) {
+            LONGLONG oldest = audio->samples[0].timestamp;
             LONGLONG span = sample->timestamp - oldest;
             
-            if (span <= g_audioMaxDuration) {
-                break;  // Within duration limit
+            if (span <= audio->maxDuration) {
+                break;  /* Within duration limit */
             }
             
-            // Evict oldest sample
-            if (g_audioSamples[0].data) {
-                free(g_audioSamples[0].data);
+            /* Evict oldest sample */
+            if (audio->samples[0].data) {
+                free(audio->samples[0].data);
             }
-            memmove(g_audioSamples, g_audioSamples + 1, 
-                    (g_audioSampleCount - 1) * sizeof(MuxerAudioSample));
-            g_audioSampleCount--;
+            memmove(audio->samples, audio->samples + 1, 
+                    (audio->sampleCount - 1) * sizeof(MuxerAudioSample));
+            audio->sampleCount--;
             evicted++;
         }
         
-        // Log eviction periodically (counter reset each callback to avoid stale state)
+        /* Log eviction periodically */
         static int audioEvictLogCounter = 0;
         audioEvictLogCounter++;
         if (evicted > 0 && (audioEvictLogCounter % AUDIO_EVICT_LOG_INTERVAL) == 0) {
             double spanSec = 0;
-            if (g_audioSampleCount > 0) {
-                spanSec = (sample->timestamp - g_audioSamples[0].timestamp) / (double)MF_UNITS_PER_SECOND;
+            if (audio->sampleCount > 0) {
+                spanSec = (sample->timestamp - audio->samples[0].timestamp) / (double)MF_UNITS_PER_SECOND;
             }
             ReplayLog("Audio eviction: removed %d samples, count=%d, span=%.2fs\n",
-                      evicted, g_audioSampleCount, spanSec);
+                      evicted, audio->sampleCount, spanSec);
         }
     }
     
-    // Grow array if needed (capacity-based)
-    if (g_audioSampleCount >= g_audioSampleCapacity) {
-        int newCapacity = g_audioSampleCapacity == 0 ? INITIAL_AUDIO_CAPACITY : g_audioSampleCapacity * AUDIO_CAPACITY_GROWTH_FACTOR;
+    /* Grow array if needed (capacity-based) */
+    if (audio->sampleCount >= audio->sampleCapacity) {
+        int newCapacity = audio->sampleCapacity == 0 ? INITIAL_AUDIO_CAPACITY : audio->sampleCapacity * AUDIO_CAPACITY_GROWTH_FACTOR;
         if (newCapacity > MAX_AUDIO_SAMPLES) newCapacity = MAX_AUDIO_SAMPLES;
         
-        if (g_audioSampleCount >= newCapacity) {
-            // Still full after time eviction - emergency capacity eviction
+        if (audio->sampleCount >= newCapacity) {
+            /* Still full after time eviction - emergency capacity eviction */
             int toKeep = (int)(newCapacity * EMERGENCY_KEEP_FRACTION);
-            int toRemove = g_audioSampleCount - toKeep;
+            int toRemove = audio->sampleCount - toKeep;
             
-            for (int i = 0; i < toRemove && i < g_audioSampleCount; i++) {
-                if (g_audioSamples[i].data) {
-                    free(g_audioSamples[i].data);
+            for (int i = 0; i < toRemove && i < audio->sampleCount; i++) {
+                if (audio->samples[i].data) {
+                    free(audio->samples[i].data);
                 }
             }
             
-            memmove(g_audioSamples, g_audioSamples + toRemove, 
+            memmove(audio->samples, audio->samples + toRemove, 
                     toKeep * sizeof(MuxerAudioSample));
-            g_audioSampleCount = toKeep;
+            audio->sampleCount = toKeep;
         } else {
-            MuxerAudioSample* newArr = realloc(g_audioSamples, 
+            MuxerAudioSample* newArr = realloc(audio->samples, 
                                                 newCapacity * sizeof(MuxerAudioSample));
             if (newArr) {
-                g_audioSamples = newArr;
-                g_audioSampleCapacity = newCapacity;
+                /* Zero-initialize new capacity */
+                if (audio->sampleCapacity < newCapacity) {
+                    memset(newArr + audio->sampleCapacity, 0, 
+                           (newCapacity - audio->sampleCapacity) * sizeof(MuxerAudioSample));
+                }
+                audio->samples = newArr;
+                audio->sampleCapacity = newCapacity;
             } else {
-                // realloc failed - log and drop sample
                 static int reallocFailCount = 0;
                 if (++reallocFailCount <= MAX_REALLOC_FAIL_LOGS) {
                     ReplayLog("WARNING: Audio buffer realloc failed (count=%d, capacity=%d)\n", 
-                              g_audioSampleCount, newCapacity);
+                              audio->sampleCount, newCapacity);
                 }
             }
         }
     }
     
-    if (g_audioSampleCount < g_audioSampleCapacity) {
-        MuxerAudioSample* dst = &g_audioSamples[g_audioSampleCount];
+    if (audio->sampleCount < audio->sampleCapacity) {
+        MuxerAudioSample* dst = &audio->samples[audio->sampleCount];
         dst->data = (BYTE*)malloc(sample->size);
         if (dst->data) {
             memcpy(dst->data, sample->data, sample->size);
             dst->size = sample->size;
             dst->timestamp = sample->timestamp;
             dst->duration = sample->duration;
-            g_audioSampleCount++;
+            audio->sampleCount++;
         }
     }
     
-    LeaveCriticalSection(&g_audioLock);
+    LeaveCriticalSection(&audio->lock);
 }
 
-// ============================================================================
-// PUBLIC API
-// ============================================================================
+/* ============================================================================
+ * PUBLIC API
+ * ============================================================================ */
 
 BOOL ReplayBuffer_Init(ReplayBufferState* state) {
+    /* Precondition */
+    LWSR_ASSERT(state != NULL);
+    
     if (!state) return FALSE;
     ZeroMemory(state, sizeof(ReplayBufferState));
     
-    // Create synchronization events
-    state->hReadyEvent = CreateEvent(NULL, TRUE, FALSE, NULL);  // Manual reset
-    state->hSaveRequestEvent = CreateEvent(NULL, FALSE, FALSE, NULL);  // Auto reset
-    state->hSaveCompleteEvent = CreateEvent(NULL, FALSE, FALSE, NULL);  // Auto reset
-    state->hStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);  // Manual reset
+    /* Initialize internal state structure */
+    ZeroMemory(&g_internal, sizeof(g_internal));
+    
+    /* Create synchronization events */
+    state->hReadyEvent = CreateEvent(NULL, TRUE, FALSE, NULL);  /* Manual reset */
+    state->hSaveRequestEvent = CreateEvent(NULL, FALSE, FALSE, NULL);  /* Auto reset */
+    state->hSaveCompleteEvent = CreateEvent(NULL, FALSE, FALSE, NULL);  /* Auto reset */
+    state->hStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);  /* Manual reset */
     
     if (!state->hReadyEvent || !state->hSaveRequestEvent || 
         !state->hSaveCompleteEvent || !state->hStopEvent) {
@@ -186,9 +230,10 @@ BOOL ReplayBuffer_Init(ReplayBufferState* state) {
         return FALSE;
     }
     
+    /* Initialize audio critical section */
     state->state = REPLAY_STATE_UNINITIALIZED;
-    InitializeCriticalSection(&g_audioLock);
-    g_audioLockInitialized = TRUE;
+    InitializeCriticalSection(&g_internal.audio.lock);
+    g_internal.audio.lockInitialized = TRUE;
     return TRUE;
 }
 
@@ -196,7 +241,7 @@ void ReplayBuffer_Shutdown(ReplayBufferState* state) {
     if (!state) return;
     ReplayBuffer_Stop(state);
     
-    // Close event handles
+    /* Close event handles */
     if (state->hReadyEvent) CloseHandle(state->hReadyEvent);
     if (state->hSaveRequestEvent) CloseHandle(state->hSaveRequestEvent);
     if (state->hSaveCompleteEvent) CloseHandle(state->hSaveCompleteEvent);
@@ -206,29 +251,34 @@ void ReplayBuffer_Shutdown(ReplayBufferState* state) {
     state->hSaveCompleteEvent = NULL;
     state->hStopEvent = NULL;
     
-    // Clean up audio samples - must be done BEFORE deleting critical section
-    if (g_audioLockInitialized) {
-        EnterCriticalSection(&g_audioLock);
-        if (g_audioSamples) {
-            for (int i = 0; i < g_audioSampleCount; i++) {
-                if (g_audioSamples[i].data) free(g_audioSamples[i].data);
+    /* Clean up audio samples - must be done BEFORE deleting critical section */
+    ReplayAudioState* audio = &g_internal.audio;
+    if (audio->lockInitialized) {
+        EnterCriticalSection(&audio->lock);
+        if (audio->samples) {
+            for (int i = 0; i < audio->sampleCount; i++) {
+                if (audio->samples[i].data) free(audio->samples[i].data);
             }
-            free(g_audioSamples);
-            g_audioSamples = NULL;
+            free(audio->samples);
+            audio->samples = NULL;
         }
-        g_audioSampleCount = 0;
-        g_audioSampleCapacity = 0;
-        g_audioMaxDuration = 0;
-        LeaveCriticalSection(&g_audioLock);
+        audio->sampleCount = 0;
+        audio->sampleCapacity = 0;
+        audio->maxDuration = 0;
+        LeaveCriticalSection(&audio->lock);
         
-        DeleteCriticalSection(&g_audioLock);
-        g_audioLockInitialized = FALSE;
+        DeleteCriticalSection(&audio->lock);
+        audio->lockInitialized = FALSE;
     }
     
-    // Logger cleanup is handled by Logger_Shutdown in main.c
+    /* Logger cleanup is handled by Logger_Shutdown in main.c */
 }
 
 BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
+    /* Preconditions */
+    LWSR_ASSERT(state != NULL);
+    LWSR_ASSERT(config != NULL);
+    
     if (!state || !config) return FALSE;
     if (state->isBuffering) return TRUE;
     
@@ -237,7 +287,7 @@ BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
     state->captureSource = config->replayCaptureSource;
     state->monitorIndex = config->replayMonitorIndex;
     
-    // Copy audio settings
+    /* Copy audio settings */
     state->audioEnabled = config->audioEnabled;
     strncpy(state->audioSource1, config->audioSource1, sizeof(state->audioSource1) - 1);
     strncpy(state->audioSource2, config->audioSource2, sizeof(state->audioSource2) - 1);
@@ -248,31 +298,32 @@ BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
     
     if (!state->enabled) return FALSE;
     
-    // Reset state machine
+    /* Reset state machine */
     InterlockedExchange(&state->state, REPLAY_STATE_STARTING);
     InterlockedExchange(&state->framesCaptured, 0);
     state->saveSuccess = FALSE;
     state->savePath[0] = '\0';
     
-    // Reset events
+    /* Reset events */
     ResetEvent(state->hReadyEvent);
     ResetEvent(state->hSaveCompleteEvent);
     ResetEvent(state->hStopEvent);
     
-    // Legacy flags
+    /* Legacy flags */
     state->bufferReady = FALSE;
     
-    // Reset audio buffer
-    EnterCriticalSection(&g_audioLock);
-    for (int i = 0; i < g_audioSampleCount; i++) {
-        if (g_audioSamples[i].data) {
-            free(g_audioSamples[i].data);
-            g_audioSamples[i].data = NULL;
+    /* Reset audio buffer using new struct */
+    ReplayAudioState* audio = &g_internal.audio;
+    EnterCriticalSection(&audio->lock);
+    for (int i = 0; i < audio->sampleCount; i++) {
+        if (audio->samples[i].data) {
+            free(audio->samples[i].data);
+            audio->samples[i].data = NULL;
         }
     }
-    g_audioSampleCount = 0;
-    g_audioMaxDuration = 0;  // Reset max duration for next run
-    LeaveCriticalSection(&g_audioLock);
+    audio->sampleCount = 0;
+    audio->maxDuration = 0;
+    LeaveCriticalSection(&audio->lock);
     
     state->bufferThread = CreateThread(NULL, 0, BufferThreadProc, state, 0, NULL);
     state->isBuffering = (state->bufferThread != NULL);
@@ -282,11 +333,11 @@ BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
         return FALSE;
     }
     
-    // Wait up to 5 seconds for the buffer thread to become ready
+    /* Wait up to 5 seconds for the buffer thread to become ready */
     DWORD waitResult = WaitForSingleObject(state->hReadyEvent, 5000);
     if (waitResult != WAIT_OBJECT_0) {
         ReplayLog("Timeout waiting for buffer thread to become ready\n");
-        // Don't fail - thread is running, just not ready yet
+        /* Don't fail - thread is running, just not ready yet */
     }
     
     return state->isBuffering;
@@ -295,35 +346,32 @@ BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
 void ReplayBuffer_Stop(ReplayBufferState* state) {
     if (!state || !state->isBuffering) return;
     
-    // Signal stop via event (proper cross-thread communication)
-    LONG prevState = InterlockedExchange(&state->state, REPLAY_STATE_STOPPING);
+    /* Signal stop via event (proper cross-thread communication) */
+    (void)InterlockedExchange(&state->state, REPLAY_STATE_STOPPING);
     SetEvent(state->hStopEvent);
     
     if (state->bufferThread) {
         DWORD waitResult = WaitForSingleObject(state->bufferThread, 5000);
         
         if (waitResult == WAIT_TIMEOUT) {
-            // Thread is hung! We can't safely clean up the encoder from here
-            // because the hung thread may still be using it.
-            // Log it and leak the resources - safer than crashing.
+            /* Thread is hung! We can't safely clean up the encoder from here
+             * because the hung thread may still be using it.
+             * Log it and leak the resources - safer than crashing. */
             ReplayLog("WARNING: Buffer thread hung (5s timeout) - forcing cleanup\n");
             
-            // Try to terminate the hung thread (dangerous but necessary)
-            // This may leak resources but prevents deadlock
+            /* Try to terminate the hung thread (dangerous but necessary) */
             TerminateThread(state->bufferThread, 1);
             
-            // Give terminated thread a moment to die
+            /* Give terminated thread a moment to die */
             WaitForSingleObject(state->bufferThread, 1000);
             
-            // Force destroy the encoder since the thread won't do it
-            // This may crash if the thread was in the middle of an NVENC call,
-            // but it's better than leaking the encoder session forever
-            if (g_encoder) {
+            /* Force destroy the encoder since the thread won't do it */
+            ReplayVideoState* video = &g_internal.video;
+            if (video->encoder) {
                 ReplayLog("Force-destroying hung encoder...\n");
-                // Don't call NVENCEncoder_Destroy - it tries to stop output thread
-                // which is also likely hung. Just leak it.
-                // The NVENC session will be cleaned up when the process exits.
-                g_encoder = NULL;
+                /* Don't call NVENCEncoder_Destroy - it tries to stop output thread
+                 * which is also likely hung. Just leak it. */
+                video->encoder = NULL;
             }
         }
         
@@ -334,6 +382,10 @@ void ReplayBuffer_Stop(ReplayBufferState* state) {
 }
 
 BOOL ReplayBuffer_Save(ReplayBufferState* state, const char* outputPath) {
+    // Preconditions
+    LWSR_ASSERT(state != NULL);
+    LWSR_ASSERT(outputPath != NULL);
+    
     if (!state || !outputPath || !state->isBuffering) {
         ReplayLog("Save rejected: state=%p, path=%s, buffering=%d\n", 
                   state, outputPath ? outputPath : "NULL", state ? state->isBuffering : 0);
@@ -376,11 +428,17 @@ BOOL ReplayBuffer_Save(ReplayBufferState* state, const char* outputPath) {
 }
 
 void ReplayBuffer_GetStatus(ReplayBufferState* state, char* buffer, int bufferSize) {
+    /* Preconditions */
+    LWSR_ASSERT(state != NULL);
+    LWSR_ASSERT(buffer != NULL);
+    LWSR_ASSERT(bufferSize > 0);
+    
     if (!state || !buffer || bufferSize < 1) return;
     
     if (state->isBuffering) {
-        double duration = SampleBuffer_GetDuration(&g_sampleBuffer);
-        size_t memMB = SampleBuffer_GetMemoryUsage(&g_sampleBuffer) / (1024 * 1024);
+        ReplayVideoState* video = &g_internal.video;
+        double duration = SampleBuffer_GetDuration(&video->sampleBuffer);
+        size_t memMB = SampleBuffer_GetMemoryUsage(&video->sampleBuffer) / (1024 * 1024);
         snprintf(buffer, bufferSize, "Replay: %.0fs (%zuMB)", duration, memMB);
     } else {
         strncpy(buffer, "Replay: OFF", bufferSize - 1);
@@ -389,10 +447,15 @@ void ReplayBuffer_GetStatus(ReplayBufferState* state, char* buffer, int bufferSi
 }
 
 int ReplayBuffer_EstimateRAMUsage(int durationSec, int w, int h, int fps) {
-    // Estimate based on bitrate
-    // At 90 Mbps, 60 sec = 90 * 60 / 8 = 675 MB
-    float baseMbps = 75.0f;  // Medium quality default
-    // Cast to size_t before multiplication to prevent 32-bit overflow
+    /* Preconditions */
+    LWSR_ASSERT(durationSec > 0);
+    LWSR_ASSERT(w > 0);
+    LWSR_ASSERT(h > 0);
+    LWSR_ASSERT(fps > 0);
+    
+    /* Estimate based on bitrate
+     * At 90 Mbps, 60 sec = 90 * 60 / 8 = 675 MB */
+    float baseMbps = 75.0f;
     float megapixels = (float)((size_t)w * (size_t)h) / 1000000.0f;
     float resScale = megapixels / 3.7f;
     if (resScale < 0.5f) resScale = 0.5f;
@@ -407,30 +470,28 @@ int ReplayBuffer_EstimateRAMUsage(int durationSec, int w, int h, int fps) {
     return (int)totalMB;
 }
 
-// ============================================================================
-// CAPTURE THREAD
-// ============================================================================
+/* ============================================================================
+ * CAPTURE THREAD
+ * ============================================================================ */
 
 static DWORD WINAPI BufferThreadProc(LPVOID param) {
     ReplayBufferState* state = (ReplayBufferState*)param;
     if (!state) return 1;
     
-    // Reset static globals at start of each run to prevent stale state
-    g_encoder = NULL;
-    ZeroMemory(&g_sampleBuffer, sizeof(g_sampleBuffer));
-    g_seqHeaderSize = 0;
-    g_audioCapture = NULL;
-    g_aacEncoder = NULL;
-    g_audioSamples = NULL;
-    g_audioSampleCount = 0;
-    g_audioSampleCapacity = 0;
-    g_aacConfigData = NULL;
-    g_aacConfigSize = 0;
+    /* Reset internal state at start of each run to prevent stale state
+     * NOTE: We only zero the video state, not audio state.
+     * The audio critical section was initialized in ReplayBuffer_Init
+     * and CRITICAL_SECTION cannot be copied by value - it must remain in place. */
+    ZeroMemory(&g_internal.video, sizeof(g_internal.video));
+    /* Audio state (including its samples array) is cleaned up by ReplayBuffer_Start
+     * before creating this thread, so we don't need to touch it here */
     
     ReplayLog("BufferThread started (ShadowPlay RAM mode)\n");
+    
     ReplayLog("Config: replayEnabled=%d, duration=%d, captureSource=%d, monitorIndex=%d\n",
               g_config.replayEnabled, g_config.replayDuration, 
               g_config.replayCaptureSource, g_config.replayMonitorIndex);
+              
     ReplayLog("Config: replayFPS=%d, replayAspectRatio=%d, quality=%d\n",
               g_config.replayFPS, g_config.replayAspectRatio, g_config.quality);
     
@@ -451,6 +512,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     
     int width = rect.right - rect.left;
     int height = rect.bottom - rect.top;
+    
     ReplayLog("Raw monitor bounds: %dx%d (rect: %d,%d,%d,%d)\n", 
               width, height, rect.left, rect.top, rect.right, rect.bottom);
     
@@ -502,47 +564,49 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     }
     ReplayLog("GPU color converter initialized (D3D11 Video Processor)\n");
     
-    // Initialize NVENC HEVC encoder with D3D11 device (native API)
+    /* Initialize NVENC HEVC encoder with D3D11 device (native API) */
+    ReplayVideoState* video = &g_internal.video;
     ReplayLog("Creating NVENCEncoder (%dx%d @ %d fps, quality=%d)...\n", width, height, fps, g_config.quality);
-    g_encoder = NVENCEncoder_Create(capture->device, width, height, fps, g_config.quality);
-    if (!g_encoder) {
+    video->encoder = NVENCEncoder_Create(capture->device, width, height, fps, g_config.quality);
+    if (!video->encoder) {
         ReplayLog("NVENCEncoder_Create failed - NVIDIA GPU with NVENC required!\n");
         GPUConverter_Shutdown(&gpuConverter);
         return 1;
     }
     ReplayLog("NVENC HEVC hardware encoder initialized (native API)\n");
     
-    // Extract HEVC sequence header (VPS/SPS/PPS) for MP4 muxing
-    if (NVENCEncoder_GetSequenceHeader(g_encoder, g_seqHeader, sizeof(g_seqHeader), &g_seqHeaderSize)) {
-        ReplayLog("HEVC sequence header extracted (%u bytes)\n", g_seqHeaderSize);
+    /* Extract HEVC sequence header (VPS/SPS/PPS) for MP4 muxing */
+    if (NVENCEncoder_GetSequenceHeader(video->encoder, video->seqHeader, sizeof(video->seqHeader), &video->seqHeaderSize)) {
+        ReplayLog("HEVC sequence header extracted (%u bytes)\n", video->seqHeaderSize);
     } else {
         ReplayLog("WARNING: Failed to get HEVC sequence header - muxing may fail!\n");
-        g_seqHeaderSize = 0;
+        video->seqHeaderSize = 0;
     };
     
-    // Initialize sample buffer BEFORE setting encoder callback
-    // (callback needs valid buffer pointer)
-    if (!SampleBuffer_Init(&g_sampleBuffer, g_config.replayDuration, fps, 
+    /* Initialize sample buffer BEFORE setting encoder callback
+     * (callback needs valid buffer pointer) */
+    if (!SampleBuffer_Init(&video->sampleBuffer, g_config.replayDuration, fps, 
                            width, height, g_config.quality)) {
         ReplayLog("SampleBuffer_Init failed\n");
-        NVENCEncoder_Destroy(g_encoder);
-        g_encoder = NULL;
+        NVENCEncoder_Destroy(video->encoder);
+        video->encoder = NULL;
         GPUConverter_Shutdown(&gpuConverter);
         return 1;
     }
     
-    // Set encoder callback to receive completed frames (async mode)
-    // The output thread will call DrainCallback when frames complete
-    NVENCEncoder_SetCallback(g_encoder, DrainCallback, &g_sampleBuffer);
+    /* Set encoder callback to receive completed frames (async mode)
+     * The output thread will call DrainCallback when frames complete */
+    NVENCEncoder_SetCallback(video->encoder, DrainCallback, &video->sampleBuffer);
     
-    // Pass sequence header to sample buffer for video-only saves
-    if (g_seqHeaderSize > 0) {
-        SampleBuffer_SetSequenceHeader(&g_sampleBuffer, g_seqHeader, g_seqHeaderSize);
+    /* Pass sequence header to sample buffer for video-only saves */
+    if (video->seqHeaderSize > 0) {
+        SampleBuffer_SetSequenceHeader(&video->sampleBuffer, video->seqHeader, video->seqHeaderSize);
     }
     
     ReplayLog("Sample buffer initialized (max %ds)\n", g_config.replayDuration);
     
-    // Initialize audio capture if enabled
+    /* Initialize audio capture if enabled */
+    ReplayAudioState* audio = &g_internal.audio;
     BOOL audioActive = FALSE;
     if (state->audioEnabled && (state->audioSource1[0] || state->audioSource2[0] || state->audioSource3[0])) {
         ReplayLog("Audio capture enabled, sources: [%s] [%s] [%s]\n",
@@ -550,25 +614,25 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                   state->audioSource2[0] ? state->audioSource2 : "none",
                   state->audioSource3[0] ? state->audioSource3 : "none");
         
-        g_audioCapture = AudioCapture_Create(
+        audio->capture = AudioCapture_Create(
             state->audioSource1, state->audioVolume1,
             state->audioSource2, state->audioVolume2,
             state->audioSource3, state->audioVolume3
         );
         
-        if (g_audioCapture) {
-            g_aacEncoder = AACEncoder_Create();
-            if (g_aacEncoder) {
-                AACEncoder_SetCallback(g_aacEncoder, AudioEncoderCallback, NULL);
+        if (audio->capture) {
+            audio->encoder = AACEncoder_Create();
+            if (audio->encoder) {
+                AACEncoder_SetCallback(audio->encoder, AudioEncoderCallback, audio);
                 
-                // Set audio max duration to match video buffer (in 100-ns units)
-                g_audioMaxDuration = (LONGLONG)g_config.replayDuration * 10000000LL;
+                /* Set audio max duration to match video buffer (in 100-ns units) */
+                audio->maxDuration = (LONGLONG)g_config.replayDuration * 10000000LL;
                 ReplayLog("Audio eviction enabled: max duration = %ds\n", g_config.replayDuration);
                 
-                // Get AAC config for muxer
-                AACEncoder_GetConfig(g_aacEncoder, &g_aacConfigData, &g_aacConfigSize);
+                /* Get AAC config for muxer */
+                AACEncoder_GetConfig(audio->encoder, &audio->configData, &audio->configSize);
                 
-                if (AudioCapture_Start(g_audioCapture)) {
+                if (AudioCapture_Start(audio->capture)) {
                     audioActive = TRUE;
                     ReplayLog("Audio capture started successfully\n");
                 } else {
@@ -613,7 +677,6 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     
     // Build wait handle array for event-driven loop
     HANDLE waitHandles[2] = { state->hStopEvent, state->hSaveRequestEvent };
-    DWORD lastHeartbeat = GetTickCount();
     
     while (InterlockedCompareExchange(&state->state, 0, 0) == REPLAY_STATE_CAPTURING) {
         // Heartbeat every iteration (non-blocking)
@@ -629,30 +692,30 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
         }
         
         if (waitResult == WAIT_OBJECT_0 + 1) {
-            // Save request event signaled
-            double duration = SampleBuffer_GetDuration(&g_sampleBuffer);
-            int count = SampleBuffer_GetCount(&g_sampleBuffer);
+            /* Save request event signaled */
+            double duration = SampleBuffer_GetDuration(&video->sampleBuffer);
+            int count = SampleBuffer_GetCount(&video->sampleBuffer);
             
-            // Calculate actual capture stats for diagnostics
+            /* Calculate actual capture stats for diagnostics */
             LARGE_INTEGER nowTime;
             QueryPerformanceCounter(&nowTime);
             double realElapsedSec = (double)(nowTime.QuadPart - captureStartTime.QuadPart) / perfFreq.QuadPart;
             double actualFPS = (realElapsedSec > 0) ? frameCount / realElapsedSec : 0;
             
             ReplayLog("SAVE REQUEST: %d video samples (%.2fs), %d audio samples, after %.2fs real time\n", 
-                      count, duration, g_audioSampleCount, realElapsedSec);
+                      count, duration, audio->sampleCount, realElapsedSec);
             ReplayLog("  Actual capture rate: %.2f fps (target: %d fps)\n", actualFPS, fps);
             ReplayLog("  Output path: %s\n", state->savePath);
             
-            // Write buffer to file (with audio if available)
+            /* Write buffer to file (with audio if available) */
             BOOL ok = FALSE;
             
-            EnterCriticalSection(&g_audioLock);
-            int audioCount = g_audioSampleCount;
+            EnterCriticalSection(&audio->lock);
+            int audioCount = audio->sampleCount;
             MuxerAudioSample* audioCopy = NULL;
             
-            if (audioCount > 0 && g_audioSamples && g_aacConfigData && g_aacConfigSize > 0) {
-                // Deep copy audio samples with overflow check
+            if (audioCount > 0 && audio->samples && audio->configData && audio->configSize > 0) {
+                /* Deep copy audio samples with overflow check */
                 size_t allocSize = (size_t)audioCount * sizeof(MuxerAudioSample);
                 if (allocSize / sizeof(MuxerAudioSample) != (size_t)audioCount) {
                     ReplayLog("WARNING: Audio allocation overflow, skipping audio\n");
@@ -661,20 +724,20 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                     audioCopy = (MuxerAudioSample*)malloc(allocSize);
                 }
                 if (audioCopy) {
-                    LONGLONG firstAudioTs = g_audioSamples[0].timestamp;
+                    LONGLONG firstAudioTs = audio->samples[0].timestamp;
                     int copiedCount = 0;
                     BOOL copyFailed = FALSE;
                     
                     for (int i = 0; i < audioCount; i++) {
-                        audioCopy[i].data = (BYTE*)malloc(g_audioSamples[i].size);
+                        audioCopy[i].data = (BYTE*)malloc(audio->samples[i].size);
                         if (audioCopy[i].data) {
-                            memcpy(audioCopy[i].data, g_audioSamples[i].data, g_audioSamples[i].size);
-                            audioCopy[i].size = g_audioSamples[i].size;
-                            audioCopy[i].timestamp = g_audioSamples[i].timestamp - firstAudioTs;
-                            audioCopy[i].duration = g_audioSamples[i].duration;
+                            memcpy(audioCopy[i].data, audio->samples[i].data, audio->samples[i].size);
+                            audioCopy[i].size = audio->samples[i].size;
+                            audioCopy[i].timestamp = audio->samples[i].timestamp - firstAudioTs;
+                            audioCopy[i].duration = audio->samples[i].duration;
                             copiedCount++;
                         } else {
-                            // malloc failed - free all previous copies and abort
+                            /* malloc failed - free all previous copies and abort */
                             ReplayLog("WARNING: Audio copy malloc failed at sample %d/%d\n", i, audioCount);
                             for (int j = 0; j < i; j++) {
                                 if (audioCopy[j].data) free(audioCopy[j].data);
@@ -686,7 +749,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                         }
                     }
                     
-                    // Update audioCount to reflect actual copied samples
+                    /* Update audioCount to reflect actual copied samples */
                     if (!copyFailed) {
                         audioCount = copiedCount;
                     } else {
@@ -694,41 +757,41 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                     }
                 }
             }
-            LeaveCriticalSection(&g_audioLock);
+            LeaveCriticalSection(&audio->lock);
             
-            // Get video samples
+            /* Get video samples */
             MuxerSample* videoSamples = NULL;
             int videoCount = 0;
-            if (SampleBuffer_GetSamplesForMuxing(&g_sampleBuffer, &videoSamples, &videoCount)) {
-                // Build video config
+            if (SampleBuffer_GetSamplesForMuxing(&video->sampleBuffer, &videoSamples, &videoCount)) {
+                /* Build video config */
                 MuxerConfig videoConfig;
-                videoConfig.width = g_sampleBuffer.width;
-                videoConfig.height = g_sampleBuffer.height;
-                videoConfig.fps = g_sampleBuffer.fps;
-                videoConfig.quality = g_sampleBuffer.quality;
-                videoConfig.seqHeader = g_sampleBuffer.seqHeaderSize > 0 ? g_sampleBuffer.seqHeader : NULL;
-                videoConfig.seqHeaderSize = g_sampleBuffer.seqHeaderSize;
+                videoConfig.width = video->sampleBuffer.width;
+                videoConfig.height = video->sampleBuffer.height;
+                videoConfig.fps = video->sampleBuffer.fps;
+                videoConfig.quality = video->sampleBuffer.quality;
+                videoConfig.seqHeader = video->sampleBuffer.seqHeaderSize > 0 ? video->sampleBuffer.seqHeader : NULL;
+                videoConfig.seqHeaderSize = video->sampleBuffer.seqHeaderSize;
                 
                 if (audioCopy && audioCount > 0) {
-                    // Mux with audio
+                    /* Mux with audio */
                     ReplayLog("  Starting save (audio+video path, %d audio samples)...\n", audioCount);
                     MuxerAudioConfig audioConfig;
-                    audioConfig.sampleRate = AAC_SAMPLE_RATE;   // Use constants from aac_encoder.h
+                    audioConfig.sampleRate = AAC_SAMPLE_RATE;
                     audioConfig.channels = AAC_CHANNELS;
                     audioConfig.bitrate = AAC_BITRATE;
-                    audioConfig.configData = g_aacConfigData;
-                    audioConfig.configSize = g_aacConfigSize;
+                    audioConfig.configData = audio->configData;
+                    audioConfig.configSize = audio->configSize;
                     
                     ok = MP4Muxer_WriteFileWithAudio(state->savePath, 
                                                      videoSamples, videoCount, &videoConfig,
                                                      audioCopy, audioCount, &audioConfig);
                 } else {
-                    // Video only
+                    /* Video only */
                     ReplayLog("  Starting save (video-only path)...\n");
                     ok = MP4Muxer_WriteFile(state->savePath, videoSamples, videoCount, &videoConfig);
                 }
                 
-                // Free video samples
+                /* Free video samples */
                 for (int i = 0; i < videoCount; i++) {
                     if (videoSamples[i].data) free(videoSamples[i].data);
                 }
@@ -737,7 +800,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                 ReplayLog("  SampleBuffer_GetSamplesForMuxing failed\n");
             }
             
-            // Free audio copy
+            /* Free audio copy */
             if (audioCopy) {
                 for (int i = 0; i < audioCount; i++) {
                     if (audioCopy[i].data) free(audioCopy[i].data);
@@ -749,20 +812,20 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
             
             state->saveSuccess = ok;
             SetEvent(state->hSaveCompleteEvent);
-            continue;  // Skip frame capture this iteration
+            continue;  /* Skip frame capture this iteration */
         }
         
-        // === AUDIO CAPTURE ===
-        if (audioActive && g_audioCapture && g_aacEncoder) {
+        /* === AUDIO CAPTURE === */
+        if (audioActive && audio->capture && audio->encoder) {
             BYTE audioPcmBuf[8192];
             LONGLONG audioTs = 0;
-            int audioBytes = AudioCapture_Read(g_audioCapture, audioPcmBuf, sizeof(audioPcmBuf), &audioTs);
+            int audioBytes = AudioCapture_Read(audio->capture, audioPcmBuf, sizeof(audioPcmBuf), &audioTs);
             if (audioBytes > 0) {
-                AACEncoder_Feed(g_aacEncoder, audioPcmBuf, audioBytes, audioTs);
+                AACEncoder_Feed(audio->encoder, audioPcmBuf, audioBytes, audioTs);
             }
         }
         
-        // === FRAME CAPTURE (GPU PATH) ===
+        /* === FRAME CAPTURE (GPU PATH) === */
         LARGE_INTEGER currentTime;
         QueryPerformanceCounter(&currentTime);
         double frameElapsedMs = (double)(currentTime.QuadPart - lastFrameTime.QuadPart) * 1000.0 / perfFreq.QuadPart;
@@ -787,7 +850,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
             // Pipeline timing for diagnostics
             LARGE_INTEGER t1, t2, t3, t4;
             
-            if (gpuConverter.initialized && g_encoder) {
+            if (gpuConverter.initialized && video->encoder) {
                 QueryPerformanceCounter(&t1);
                 ID3D11Texture2D* bgraTexture = Capture_GetFrameTexture(capture, NULL);
                 QueryPerformanceCounter(&t2);
@@ -797,10 +860,10 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                     QueryPerformanceCounter(&t3);
                     
                     if (nv12Texture) {
-                        // Async API: Submit frame (fast, non-blocking)
-                        // Output thread will call DrainCallback when frame completes
-                        // Returns: 1=success, 0=transient failure, -1=device lost
-                        int submitResult = NVENCEncoder_SubmitTexture(g_encoder, nv12Texture, realTimestamp);
+                        /* Async API: Submit frame (fast, non-blocking)
+                         * Output thread will call DrainCallback when frame completes
+                         * Returns: 1=success, 0=transient failure, -1=device lost */
+                        int submitResult = NVENCEncoder_SubmitTexture(video->encoder, nv12Texture, realTimestamp);
                         QueryPerformanceCounter(&t4);
                         
                         if (submitResult == 1) {
@@ -896,7 +959,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                 }
             }
             
-            // Periodic log with actual FPS calculation
+            /* Periodic log with actual FPS calculation */
             if (frameCount - lastLogFrame >= fps * 5) {
                 LARGE_INTEGER nowTime;
                 QueryPerformanceCounter(&nowTime);
@@ -904,20 +967,20 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                 double actualFPS = frameCount / logElapsedSec;
                 double attemptFPS = attemptCount / logElapsedSec;
                 
-                // Get encoder stats
+                /* Get encoder stats */
                 int encFrames = 0;
                 double avgEncMs = 0;
-                NVENCEncoder_GetStats(g_encoder, &encFrames, &avgEncMs);
+                NVENCEncoder_GetStats(video->encoder, &encFrames, &avgEncMs);
                 
-                double duration = SampleBuffer_GetDuration(&g_sampleBuffer);
-                int bufCount = SampleBuffer_GetCount(&g_sampleBuffer);
-                size_t memMB = SampleBuffer_GetMemoryUsage(&g_sampleBuffer) / (1024 * 1024);
-                size_t memKB = SampleBuffer_GetMemoryUsage(&g_sampleBuffer) / 1024;
+                double duration = SampleBuffer_GetDuration(&video->sampleBuffer);
+                int bufCount = SampleBuffer_GetCount(&video->sampleBuffer);
+                size_t memMB = SampleBuffer_GetMemoryUsage(&video->sampleBuffer) / (1024 * 1024);
+                size_t memKB = SampleBuffer_GetMemoryUsage(&video->sampleBuffer) / 1024;
                 int avgKBPerFrame = bufCount > 0 ? (int)(memKB / bufCount) : 0;
                 ReplayLog("Status: %d/%d frames in %.1fs (encode=%.1f fps, attempt=%.1f fps, target=%d fps), buffer=%.1fs (%d samples, %zu MB, %d KB/frame)\n", 
                           frameCount, attemptCount, realElapsedSec, actualFPS, attemptFPS, fps, duration, bufCount, memMB, avgKBPerFrame);
                 
-                // Log failure breakdown if any
+                /* Log failure breakdown if any */
                 if (captureNullCount + convertNullCount + encodeFailCount > 0) {
                     ReplayLog("  Failures: capture=%d, convert=%d, encode=%d\n",
                               captureNullCount, convertNullCount, encodeFailCount);
@@ -926,43 +989,43 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                 lastLogFrame = frameCount;
             }
         }
-        // No Sleep() needed - WaitForMultipleObjects provides timing
+        /* No Sleep() needed - WaitForMultipleObjects provides timing */
     }
     
-    // Cleanup
+    /* Cleanup */
     ReplayLog("Shutting down (state=%d)...\n", InterlockedCompareExchange(&state->state, 0, 0));
     
-    // Restore timer resolution
+    /* Restore timer resolution */
     timeEndPeriod(1);
     
-    // Shutdown GPU converter
+    /* Shutdown GPU converter */
     GPUConverter_Shutdown(&gpuConverter);
     
-    // Stop audio capture
+    /* Stop audio capture */
     if (audioActive) {
-        if (g_audioCapture) {
-            AudioCapture_Stop(g_audioCapture);
-            AudioCapture_Destroy(g_audioCapture);
-            g_audioCapture = NULL;
+        if (audio->capture) {
+            AudioCapture_Stop(audio->capture);
+            AudioCapture_Destroy(audio->capture);
+            audio->capture = NULL;
         }
-        if (g_aacEncoder) {
-            AACEncoder_Destroy(g_aacEncoder);
-            g_aacEncoder = NULL;
+        if (audio->encoder) {
+            AACEncoder_Destroy(audio->encoder);
+            audio->encoder = NULL;
         }
         ReplayLog("Audio capture stopped\n");
     }
     
-    // Flush encoder
-    if (g_encoder) {
+    /* Flush encoder */
+    if (video->encoder) {
         EncodedFrame flushed = {0};
-        while (NVENCEncoder_Flush(g_encoder, &flushed)) {
-            SampleBuffer_Add(&g_sampleBuffer, &flushed);
+        while (NVENCEncoder_Flush(video->encoder, &flushed)) {
+            SampleBuffer_Add(&video->sampleBuffer, &flushed);
         }
         
-        NVENCEncoder_Destroy(g_encoder);
-        g_encoder = NULL;
+        NVENCEncoder_Destroy(video->encoder);
+        video->encoder = NULL;
     }
-    SampleBuffer_Shutdown(&g_sampleBuffer);
+    SampleBuffer_Shutdown(&video->sampleBuffer);
     
     ReplayLog("BufferThread exit\n");
     return 0;

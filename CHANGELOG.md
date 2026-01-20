@@ -1,5 +1,61 @@
 # Changelog
 
+## [1.2.11] - 2026-01-20
+
+### Improved
+- **Consolidated GDI+ API loading into shared module**
+  - Created `gdiplus_api.h/.c` to eliminate ~200 lines of duplicate GDI+ code between `overlay.c` and `action_toolbar.c`
+  - Single `GdiplusFunctions` struct consolidates 25+ function pointers
+  - Global `g_gdip` instance initialized once in `main.c`, shared by both modules
+  - Improves maintainability: GDI+ changes now only need to be made in one place
+
+### Fixed
+- **Windows SDK macro conflict with GDI+ field names**
+  - Issue: `DeleteBrush` and `DeletePen` are Windows SDK macros that expand to `DeleteObject`
+  - Symptoms: Compiler error "struct GdiplusFunctions has no field DeleteObject"
+  - Fix: Renamed struct fields to `BrushDelete` and `PenDelete` to avoid macro expansion
+  - `gdiplus_api.c` uses explicit `GetProcAddress()` calls for these two functions
+
+### Technical Details
+- `gdiplus_api.h`: GDI+ types, function pointer typedefs, `GdiplusFunctions` struct, `extern g_gdip`
+- `gdiplus_api.c`: `GdiplusAPI_Init()` loads gdiplus.dll, `GdiplusAPI_Shutdown()` releases resources
+- `main.c`: Calls `GdiplusAPI_Init(&g_gdip)` before UI creation, `GdiplusAPI_Shutdown(&g_gdip)` at exit
+- `overlay.c`: Removed `InitGdiPlus()`/`ShutdownGdiPlus()`, now uses shared `g_gdip`
+- `action_toolbar.c`: Removed `InitToolbarGdiPlus()`/`ShutdownToolbarGdiPlus()`, now uses shared `g_gdip`
+- Thread safety: All GDI+ operations remain main-thread-only (UI operations)
+
+---
+
+## [1.2.10] - 2026-01-19
+
+### Improved
+- **Added assertions throughout codebase for early error detection**
+  - Created `LWSR_ASSERT` macro that logs before asserting for better diagnostics
+  - Added `LWSR_ASSERT_MSG` variant for custom error messages
+  - Assertions can be disabled in release builds via `LWSR_DISABLE_ASSERTS`
+  - Added precondition assertions to all public-facing API functions
+  - Added invariant checks for buffer indices, counts, and state consistency
+  - Logger module uses standard `assert()` to avoid circular dependency
+
+### Technical Details
+- `constants.h`: Added `LWSR_ASSERT` and `LWSR_ASSERT_MSG` macros
+- Modules updated with assertions:
+  - `logger.c`: Format strings non-null, thread IDs in range
+  - `config.c`: Config pointers non-null, buffer sizes valid
+  - `capture.c`: State/bounds/region validation, monitor indices >= 0
+  - `encoder.c`: Output paths non-null, dimensions positive
+  - `sample_buffer.c`: Buffer indices in bounds, counts non-negative
+  - `replay_buffer.c`: State pointers, config validation
+  - `mp4_muxer.c`: Sample arrays, config validity
+  - `audio_capture.c`: Context pointers, buffer sizes
+  - `aac_encoder.c`: Encoder state, PCM data
+  - `nvenc_encoder.c`: Device pointers, texture handles
+  - `gpu_converter.c`: Converter state, texture validation
+  - `util.c`: Dimension/FPS positive, string pointers non-null
+- Assertions catch programming errors during development without runtime overhead in release builds
+
+---
+
 ## [1.2.9] - 2026-01-19
 
 ### Improved

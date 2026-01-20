@@ -21,11 +21,14 @@
 #include <mferror.h>
 #include <stdio.h>
 
-// HEVC format GUID: {43564548-0000-0010-8000-00AA00389B71}
+/*
+ * HEVC format GUID: {43564548-0000-0010-8000-00AA00389B71}
+ * Thread Access: [ReadOnly - constant initialized at compile time]
+ */
 static const GUID MFVideoFormat_HEVC_Local = 
     {0x43564548, 0x0000, 0x0010, {0x80, 0x00, 0x00, 0xaa, 0x00, 0x38, 0x9b, 0x71}};
 
-// Alias for logging
+/* Alias for logging */
 #define MuxLog Logger_Log
 
 BOOL MP4Muxer_WriteFile(
@@ -34,6 +37,15 @@ BOOL MP4Muxer_WriteFile(
     int sampleCount,
     const MuxerConfig* config)
 {
+    // Preconditions
+    LWSR_ASSERT(outputPath != NULL);
+    LWSR_ASSERT(samples != NULL);
+    LWSR_ASSERT(sampleCount > 0);
+    LWSR_ASSERT(config != NULL);
+    LWSR_ASSERT(config->width > 0);
+    LWSR_ASSERT(config->height > 0);
+    LWSR_ASSERT(config->fps > 0);
+    
     BOOL result = FALSE;
     IMFSinkWriter* writer = NULL;
     IMFAttributes* attrs = NULL;
@@ -218,6 +230,12 @@ BOOL MP4Muxer_WriteFileWithAudio(
     int audioSampleCount,
     const MuxerAudioConfig* audioConfig)
 {
+    // Preconditions (video is required, audio is optional)
+    LWSR_ASSERT(outputPath != NULL);
+    LWSR_ASSERT(videoSamples != NULL);
+    LWSR_ASSERT(videoSampleCount > 0);
+    LWSR_ASSERT(videoConfig != NULL);
+    
     BOOL result = FALSE;
     IMFSinkWriter* writer = NULL;
     IMFAttributes* attrs = NULL;

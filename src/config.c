@@ -13,10 +13,20 @@
 #include <shlobj.h>
 #include <stdio.h>
 
-static const char* FORMAT_EXTENSIONS[] = { ".mp4", ".avi", ".wmv" };
-static const char* FORMAT_NAMES[] = { "MP4 (H.264)", "AVI", "WMV" };
+/* ============================================================================
+ * CONSTANT LOOKUP TABLES
+ * ============================================================================
+ * Read-only after compile time. Used by Config_GetFormatExtension/Name.
+ * Thread Access: [ReadOnly - safe for concurrent access]
+ */
+static const char* const FORMAT_EXTENSIONS[] = { ".mp4", ".avi", ".wmv" };
+static const char* const FORMAT_NAMES[] = { "MP4 (H.264)", "AVI", "WMV" };
 
 void Config_GetPath(char* buffer, size_t size) {
+    // Preconditions
+    LWSR_ASSERT(buffer != NULL);
+    LWSR_ASSERT(size > 0);
+    
     // Store config next to executable
     GetModuleFileNameA(NULL, buffer, (DWORD)size);
     char* lastSlash = strrchr(buffer, '\\');
@@ -28,6 +38,9 @@ void Config_GetPath(char* buffer, size_t size) {
 }
 
 void Config_Load(AppConfig* config) {
+    // Precondition
+    LWSR_ASSERT(config != NULL);
+    
     char configPath[MAX_PATH];
     Config_GetPath(configPath, MAX_PATH);
     
@@ -153,6 +166,9 @@ void Config_Load(AppConfig* config) {
 }
 
 void Config_Save(const AppConfig* config) {
+    // Precondition
+    LWSR_ASSERT(config != NULL);
+    
     char configPath[MAX_PATH];
     Config_GetPath(configPath, MAX_PATH);
     
@@ -243,6 +259,9 @@ void Config_Save(const AppConfig* config) {
 }
 
 const char* Config_GetFormatExtension(OutputFormat format) {
+    // Precondition: format in valid range (defensive, returns default if invalid)
+    LWSR_ASSERT(format >= 0 && format < FORMAT_COUNT);
+    
     if (format >= 0 && format < FORMAT_COUNT) {
         return FORMAT_EXTENSIONS[format];
     }
@@ -250,6 +269,9 @@ const char* Config_GetFormatExtension(OutputFormat format) {
 }
 
 const char* Config_GetFormatName(OutputFormat format) {
+    // Precondition: format in valid range (defensive, returns default if invalid)
+    LWSR_ASSERT(format >= 0 && format < FORMAT_COUNT);
+    
     if (format >= 0 && format < FORMAT_COUNT) {
         return FORMAT_NAMES[format];
     }

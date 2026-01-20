@@ -13,18 +13,32 @@
 #include "constants.h"
 #include <stdlib.h>
 
-// Module state
-static HINSTANCE g_hInstance = NULL;
-static HWND g_borderWnd = NULL;
-static BOOL g_isVisible = FALSE;
-static RECT g_currentRect = {0};
+/* ============================================================================
+ * RECORDING BORDER STATE
+ * ============================================================================
+ * Static globals for the red recording border.
+ * Thread Access: [Main thread only - UI operations]
+ */
+
+/*
+ * RecordingBorderState - State for the red recording border
+ * Used during active recording to highlight the capture area.
+ */
+typedef struct RecordingBorderState {
+    HINSTANCE hInstance;
+    HWND wnd;
+    BOOL isVisible;
+    RECT currentRect;
+} RecordingBorderState;
+
+static RecordingBorderState g_recording = {0};
 
 // Forward declarations
 static LRESULT CALLBACK BorderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 static void UpdateBorderBitmap(int width, int height);
 
 BOOL Border_Init(HINSTANCE hInstance) {
-    g_hInstance = hInstance;
+    g_recording.hInstance = hInstance;
     
     // Register window class
     WNDCLASSEXA wc = {0};
@@ -46,7 +60,7 @@ BOOL Border_Init(HINSTANCE hInstance) {
     // Create the border window
     // WS_EX_TRANSPARENT makes it click-through
     // WS_EX_LAYERED allows per-pixel alpha
-    g_borderWnd = CreateWindowExA(
+    g_recording.wnd = CreateWindowExA(
         WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         "LWSRBorder",
         NULL,
@@ -58,20 +72,20 @@ BOOL Border_Init(HINSTANCE hInstance) {
     // Note: SetWindowDisplayAffinity doesn't work with ULW_ALPHA layered windows
     // The border will appear in recordings - this is expected behavior
     
-    return g_borderWnd != NULL;
+    return g_recording.wnd != NULL;
 }
 
 void Border_Shutdown(void) {
-    if (g_borderWnd) {
-        DestroyWindow(g_borderWnd);
-        g_borderWnd = NULL;
+    if (g_recording.wnd) {
+        DestroyWindow(g_recording.wnd);
+        g_recording.wnd = NULL;
     }
-    g_isVisible = FALSE;
+    g_recording.isVisible = FALSE;
 }
 
 // Create and set a 32-bit ARGB bitmap for the border with transparency
 static void UpdateBorderBitmap(int width, int height) {
-    if (!g_borderWnd || width < 1 || height < 1) return;
+    if (!g_recording.wnd || width < 1 || height < 1) return;
     
     // Create a compatible DC
     HDC screenDC = GetDC(NULL);
@@ -129,9 +143,9 @@ static void UpdateBorderBitmap(int width, int height) {
     blend.SourceConstantAlpha = 255;
     blend.AlphaFormat = AC_SRC_ALPHA;
     
-    POINT ptDst = {g_currentRect.left, g_currentRect.top};
+    POINT ptDst = {g_recording.currentRect.left, g_recording.currentRect.top};
     
-    UpdateLayeredWindow(g_borderWnd, screenDC, &ptDst, &sizeWnd, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
+    UpdateLayeredWindow(g_recording.wnd, screenDC, &ptDst, &sizeWnd, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
     
     // Cleanup
     SelectObject(memDC, oldBitmap);
@@ -141,34 +155,34 @@ static void UpdateBorderBitmap(int width, int height) {
 }
 
 void Border_Show(RECT captureRect) {
-    if (!g_borderWnd) return;
+    if (!g_recording.wnd) return;
     
     // Position border around capture area
     int pad = BORDER_THICKNESS;
-    g_currentRect.left = captureRect.left - pad;
-    g_currentRect.top = captureRect.top - pad;
-    g_currentRect.right = captureRect.right + pad;
-    g_currentRect.bottom = captureRect.bottom + pad;
+    g_recording.currentRect.left = captureRect.left - pad;
+    g_recording.currentRect.top = captureRect.top - pad;
+    g_recording.currentRect.right = captureRect.right + pad;
+    g_recording.currentRect.bottom = captureRect.bottom + pad;
     
-    int width = g_currentRect.right - g_currentRect.left;
-    int height = g_currentRect.bottom - g_currentRect.top;
+    int width = g_recording.currentRect.right - g_recording.currentRect.left;
+    int height = g_recording.currentRect.bottom - g_recording.currentRect.top;
     
     // Update the bitmap with the new size
     UpdateBorderBitmap(width, height);
     
-    ShowWindow(g_borderWnd, SW_SHOWNA); // Show without activating
-    g_isVisible = TRUE;
+    ShowWindow(g_recording.wnd, SW_SHOWNA); // Show without activating
+    g_recording.isVisible = TRUE;
 }
 
 void Border_Hide(void) {
-    if (g_borderWnd) {
-        ShowWindow(g_borderWnd, SW_HIDE);
+    if (g_recording.wnd) {
+        ShowWindow(g_recording.wnd, SW_HIDE);
     }
-    g_isVisible = FALSE;
+    g_recording.isVisible = FALSE;
 }
 
 BOOL Border_IsVisible(void) {
-    return g_isVisible;
+    return g_recording.isVisible;
 }
 
 static LRESULT CALLBACK BorderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
@@ -178,22 +192,32 @@ static LRESULT CALLBACK BorderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             return HTTRANSPARENT;
             
         case WM_ERASEBKGND:
-            return 1; // Prevent background erase
+            return 1; /* Prevent background erase */
     }
     
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
-// ============================================================================
-// Preview Border Implementation (for settings window)
-// ============================================================================
+/* ============================================================================
+ * PREVIEW BORDER STATE (for settings window)
+ * ============================================================================
+ * Shows a dashed blue preview of the capture area.
+ * Thread Access: [Main thread only - UI operations]
+ */
 
-static HWND g_previewBorderWnd = NULL;
-static BOOL g_previewVisible = FALSE;
-static RECT g_previewRect = {0};
+/*
+ * PreviewBorderState - State for the preview border in settings
+ */
+typedef struct PreviewBorderState {
+    HWND wnd;
+    BOOL visible;
+    RECT rect;
+} PreviewBorderState;
+
+static PreviewBorderState g_preview = {0};
 
 static void UpdatePreviewBorderBitmap(int width, int height) {
-    if (!g_previewBorderWnd || width < 1 || height < 1) return;
+    if (!g_preview.wnd || width < 1 || height < 1) return;
     
     HDC screenDC = GetDC(NULL);
     HDC memDC = CreateCompatibleDC(screenDC);
@@ -239,9 +263,9 @@ static void UpdatePreviewBorderBitmap(int width, int height) {
     POINT ptSrc = {0, 0};
     SIZE sizeWnd = {width, height};
     BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-    POINT ptDst = {g_previewRect.left, g_previewRect.top};
+    POINT ptDst = {g_preview.rect.left, g_preview.rect.top};
     
-    UpdateLayeredWindow(g_previewBorderWnd, screenDC, &ptDst, &sizeWnd, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
+    UpdateLayeredWindow(g_preview.wnd, screenDC, &ptDst, &sizeWnd, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
     
     SelectObject(memDC, oldBitmap);
     DeleteObject(hBitmap);
@@ -262,59 +286,69 @@ BOOL PreviewBorder_Init(HINSTANCE hInstance) {
         return FALSE;
     }
     
-    g_previewBorderWnd = CreateWindowExA(
+    g_preview.wnd = CreateWindowExA(
         WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
         "LWSRPreviewBorder", NULL, WS_POPUP,
         -9999, -9999, 1, 1,
         NULL, NULL, hInstance, NULL
     );
     
-    return g_previewBorderWnd != NULL;
+    return g_preview.wnd != NULL;
 }
 
 void PreviewBorder_Shutdown(void) {
-    if (g_previewBorderWnd) {
-        DestroyWindow(g_previewBorderWnd);
-        g_previewBorderWnd = NULL;
+    if (g_preview.wnd) {
+        DestroyWindow(g_preview.wnd);
+        g_preview.wnd = NULL;
     }
-    g_previewVisible = FALSE;
+    g_preview.visible = FALSE;
 }
 
 void PreviewBorder_Show(RECT rect) {
-    if (!g_previewBorderWnd) return;
+    if (!g_preview.wnd) return;
     
     int pad = PREVIEW_BORDER_THICKNESS;
-    g_previewRect.left = rect.left - pad;
-    g_previewRect.top = rect.top - pad;
-    g_previewRect.right = rect.right + pad;
-    g_previewRect.bottom = rect.bottom + pad;
+    g_preview.rect.left = rect.left - pad;
+    g_preview.rect.top = rect.top - pad;
+    g_preview.rect.right = rect.right + pad;
+    g_preview.rect.bottom = rect.bottom + pad;
     
-    int width = g_previewRect.right - g_previewRect.left;
-    int height = g_previewRect.bottom - g_previewRect.top;
+    int width = g_preview.rect.right - g_preview.rect.left;
+    int height = g_preview.rect.bottom - g_preview.rect.top;
     
     UpdatePreviewBorderBitmap(width, height);
-    ShowWindow(g_previewBorderWnd, SW_SHOWNA);
-    g_previewVisible = TRUE;
+    ShowWindow(g_preview.wnd, SW_SHOWNA);
+    g_preview.visible = TRUE;
 }
 
 void PreviewBorder_Hide(void) {
-    if (g_previewBorderWnd) {
-        ShowWindow(g_previewBorderWnd, SW_HIDE);
+    if (g_preview.wnd) {
+        ShowWindow(g_preview.wnd, SW_HIDE);
     }
-    g_previewVisible = FALSE;
+    g_preview.visible = FALSE;
 }
 
-// ============================================================================
-// Draggable Area Selector Implementation
-// ============================================================================
+/* ============================================================================
+ * AREA SELECTOR STATE (draggable capture region)
+ * ============================================================================
+ * Provides a resizable/draggable rectangle for custom area selection.
+ * Thread Access: [Main thread only - UI operations]
+ */
 
-static HWND g_areaSelectorWnd = NULL;
-static BOOL g_areaVisible = FALSE;
-static RECT g_areaRect = {0};
-static BOOL g_areaDragging = FALSE;
-static POINT g_dragOffset = {0};
-static int g_resizeEdge = 0;  // 0=none, 1=left, 2=right, 4=top, 8=bottom (can combine)
-static BOOL g_areaLocked = FALSE;  // When TRUE, cannot move or resize
+/*
+ * AreaSelectorState - State for the draggable capture region selector
+ */
+typedef struct AreaSelectorState {
+    HWND wnd;
+    BOOL visible;
+    RECT rect;
+    BOOL dragging;
+    POINT dragOffset;
+    int resizeEdge;    /* 0=none, 1=left, 2=right, 4=top, 8=bottom (combinable) */
+    BOOL locked;       /* When TRUE, cannot move or resize */
+} AreaSelectorState;
+
+static AreaSelectorState g_area = {0};
 
 #define RESIZE_HANDLE_SIZE 8
 #define MIN_AREA_SIZE 100
@@ -350,7 +384,7 @@ static LRESULT CALLBACK AreaSelectorWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             Rectangle(hdc, 0, 0, rc.right, rc.bottom);
             
             // Draw resize handles at corners (only if not locked)
-            if (!g_areaLocked) {
+            if (!g_area.locked) {
                 HBRUSH handleBrush = CreateSolidBrush(RGB(255, 255, 255));
                 HPEN handlePen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));  // White pen to match fill
                 SelectObject(hdc, handleBrush);
@@ -373,7 +407,7 @@ static LRESULT CALLBACK AreaSelectorWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
                                      ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                                      CLEARTYPE_QUALITY, DEFAULT_PITCH, "Segoe UI");
             HFONT oldFont = (HFONT)SelectObject(hdc, font);
-            const char* text = g_areaLocked ? "Capture Area" : "Drag to move, corners to resize";
+            const char* text = g_area.locked ? "Capture Area" : "Drag to move, corners to resize";
             DrawTextA(hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             
             SelectObject(hdc, oldFont);
@@ -389,7 +423,7 @@ static LRESULT CALLBACK AreaSelectorWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         
         case WM_SETCURSOR: {
             // If locked, just show arrow cursor
-            if (g_areaLocked) {
+            if (g_area.locked) {
                 SetCursor(LoadCursor(NULL, IDC_ARROW));
                 return TRUE;
             }
@@ -412,55 +446,55 @@ static LRESULT CALLBACK AreaSelectorWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
         
         case WM_LBUTTONDOWN: {
             // Don't allow dragging if locked
-            if (g_areaLocked) return 0;
+            if (g_area.locked) return 0;
             
             int x = LOWORD(lParam);
             int y = HIWORD(lParam);
             
-            g_resizeEdge = GetResizeEdge(hwnd, x, y);
-            g_areaDragging = TRUE;
+            g_area.resizeEdge = GetResizeEdge(hwnd, x, y);
+            g_area.dragging = TRUE;
             
             POINT pt;
             GetCursorPos(&pt);
-            g_dragOffset.x = pt.x - g_areaRect.left;
-            g_dragOffset.y = pt.y - g_areaRect.top;
+            g_area.dragOffset.x = pt.x - g_area.rect.left;
+            g_area.dragOffset.y = pt.y - g_area.rect.top;
             
             SetCapture(hwnd);
             return 0;
         }
         
         case WM_MOUSEMOVE:
-            if (g_areaDragging) {
+            if (g_area.dragging) {
                 POINT pt;
                 GetCursorPos(&pt);
                 
-                int width = g_areaRect.right - g_areaRect.left;
-                int height = g_areaRect.bottom - g_areaRect.top;
+                int width = g_area.rect.right - g_area.rect.left;
+                int height = g_area.rect.bottom - g_area.rect.top;
                 
-                if (g_resizeEdge == 0) {
+                if (g_area.resizeEdge == 0) {
                     // Move
-                    g_areaRect.left = pt.x - g_dragOffset.x;
-                    g_areaRect.top = pt.y - g_dragOffset.y;
-                    g_areaRect.right = g_areaRect.left + width;
-                    g_areaRect.bottom = g_areaRect.top + height;
+                    g_area.rect.left = pt.x - g_area.dragOffset.x;
+                    g_area.rect.top = pt.y - g_area.dragOffset.y;
+                    g_area.rect.right = g_area.rect.left + width;
+                    g_area.rect.bottom = g_area.rect.top + height;
                 } else {
                     // Resize
-                    if (g_resizeEdge & 1) g_areaRect.left = min(pt.x, g_areaRect.right - MIN_AREA_SIZE);
-                    if (g_resizeEdge & 2) g_areaRect.right = max(pt.x, g_areaRect.left + MIN_AREA_SIZE);
-                    if (g_resizeEdge & 4) g_areaRect.top = min(pt.y, g_areaRect.bottom - MIN_AREA_SIZE);
-                    if (g_resizeEdge & 8) g_areaRect.bottom = max(pt.y, g_areaRect.top + MIN_AREA_SIZE);
+                    if (g_area.resizeEdge & 1) g_area.rect.left = min(pt.x, g_area.rect.right - MIN_AREA_SIZE);
+                    if (g_area.resizeEdge & 2) g_area.rect.right = max(pt.x, g_area.rect.left + MIN_AREA_SIZE);
+                    if (g_area.resizeEdge & 4) g_area.rect.top = min(pt.y, g_area.rect.bottom - MIN_AREA_SIZE);
+                    if (g_area.resizeEdge & 8) g_area.rect.bottom = max(pt.y, g_area.rect.top + MIN_AREA_SIZE);
                 }
                 
-                SetWindowPos(hwnd, NULL, g_areaRect.left, g_areaRect.top,
-                            g_areaRect.right - g_areaRect.left,
-                            g_areaRect.bottom - g_areaRect.top,
+                SetWindowPos(hwnd, NULL, g_area.rect.left, g_area.rect.top,
+                            g_area.rect.right - g_area.rect.left,
+                            g_area.rect.bottom - g_area.rect.top,
                             SWP_NOZORDER | SWP_NOACTIVATE);
             }
             return 0;
         
         case WM_LBUTTONUP:
-            g_areaDragging = FALSE;
-            g_resizeEdge = 0;
+            g_area.dragging = FALSE;
+            g_area.resizeEdge = 0;
             ReleaseCapture();
             return 0;
         
@@ -494,16 +528,16 @@ BOOL AreaSelector_Init(HINSTANCE hInstance) {
 }
 
 void AreaSelector_Shutdown(void) {
-    if (g_areaSelectorWnd) {
-        DestroyWindow(g_areaSelectorWnd);
-        g_areaSelectorWnd = NULL;
+    if (g_area.wnd) {
+        DestroyWindow(g_area.wnd);
+        g_area.wnd = NULL;
     }
-    g_areaVisible = FALSE;
+    g_area.visible = FALSE;
 }
 
 void AreaSelector_Show(RECT initialRect, BOOL allowMove) {
     // Set locked state
-    g_areaLocked = !allowMove;
+    g_area.locked = !allowMove;
     
     // Ensure minimum size (only if movable)
     if (allowMove && (initialRect.right - initialRect.left < MIN_AREA_SIZE)) {
@@ -511,51 +545,51 @@ void AreaSelector_Show(RECT initialRect, BOOL allowMove) {
         initialRect.bottom = initialRect.top + 300;
     }
     
-    g_areaRect = initialRect;
+    g_area.rect = initialRect;
     
-    if (!g_areaSelectorWnd) {
-        g_areaSelectorWnd = CreateWindowExA(
+    if (!g_area.wnd) {
+        g_area.wnd = CreateWindowExA(
             WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
             "LWSRAreaSelector", NULL,
             WS_POPUP | WS_VISIBLE,
-            g_areaRect.left, g_areaRect.top,
-            g_areaRect.right - g_areaRect.left,
-            g_areaRect.bottom - g_areaRect.top,
+            g_area.rect.left, g_area.rect.top,
+            g_area.rect.right - g_area.rect.left,
+            g_area.rect.bottom - g_area.rect.top,
             NULL, NULL, GetModuleHandle(NULL), NULL
         );
     } else {
-        SetWindowPos(g_areaSelectorWnd, HWND_TOPMOST, 
-                    g_areaRect.left, g_areaRect.top,
-                    g_areaRect.right - g_areaRect.left,
-                    g_areaRect.bottom - g_areaRect.top,
+        SetWindowPos(g_area.wnd, HWND_TOPMOST, 
+                    g_area.rect.left, g_area.rect.top,
+                    g_area.rect.right - g_area.rect.left,
+                    g_area.rect.bottom - g_area.rect.top,
                     SWP_SHOWWINDOW | SWP_NOACTIVATE);
         // Force repaint to update text and handles
-        InvalidateRect(g_areaSelectorWnd, NULL, TRUE);
+        InvalidateRect(g_area.wnd, NULL, TRUE);
     }
     
     // Make it semi-transparent
-    SetLayeredWindowAttributes(g_areaSelectorWnd, 0, 128, LWA_ALPHA);
+    SetLayeredWindowAttributes(g_area.wnd, 0, 128, LWA_ALPHA);
     // Need to add WS_EX_LAYERED for transparency
-    SetWindowLongPtr(g_areaSelectorWnd, GWL_EXSTYLE, 
-                     GetWindowLongPtr(g_areaSelectorWnd, GWL_EXSTYLE) | WS_EX_LAYERED);
-    SetLayeredWindowAttributes(g_areaSelectorWnd, 0, 100, LWA_ALPHA);
+    SetWindowLongPtr(g_area.wnd, GWL_EXSTYLE, 
+                     GetWindowLongPtr(g_area.wnd, GWL_EXSTYLE) | WS_EX_LAYERED);
+    SetLayeredWindowAttributes(g_area.wnd, 0, 100, LWA_ALPHA);
     
-    g_areaVisible = TRUE;
+    g_area.visible = TRUE;
 }
 
 void AreaSelector_Hide(void) {
-    if (g_areaSelectorWnd) {
-        ShowWindow(g_areaSelectorWnd, SW_HIDE);
+    if (g_area.wnd) {
+        ShowWindow(g_area.wnd, SW_HIDE);
     }
-    g_areaVisible = FALSE;
+    g_area.visible = FALSE;
 }
 
 BOOL AreaSelector_GetRect(RECT* outRect) {
-    if (!g_areaVisible || !outRect) return FALSE;
-    *outRect = g_areaRect;
+    if (!g_area.visible || !outRect) return FALSE;
+    *outRect = g_area.rect;
     return TRUE;
 }
 
 BOOL AreaSelector_IsVisible(void) {
-    return g_areaVisible;
+    return g_area.visible;
 }
