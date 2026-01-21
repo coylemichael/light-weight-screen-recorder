@@ -191,9 +191,15 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
         IDXGIDevice* dxgiDevice = NULL;
         IDXGIAdapter* adapter = NULL;
         HRESULT hr = d3dDevice->lpVtbl->QueryInterface(d3dDevice, &IID_IDXGIDevice, (void**)&dxgiDevice);
-        if (SUCCEEDED(hr)) {
-            hr = dxgiDevice->lpVtbl->GetAdapter(dxgiDevice, &adapter);
-            dxgiDevice->lpVtbl->Release(dxgiDevice);
+        if (FAILED(hr)) {
+            NvLog("NVENCEncoder: QueryInterface IDXGIDevice failed (0x%08X)\n", hr);
+            goto fail;
+        }
+        hr = dxgiDevice->lpVtbl->GetAdapter(dxgiDevice, &adapter);
+        dxgiDevice->lpVtbl->Release(dxgiDevice);
+        if (FAILED(hr)) {
+            NvLog("NVENCEncoder: GetAdapter failed (0x%08X)\n", hr);
+            goto fail;
         }
         
         D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_0 };
@@ -201,8 +207,8 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
         
         // Create encoder's own D3D11 device on the same adapter
         hr = D3D11CreateDevice(
-            adapter,  // Use same GPU as source
-            adapter ? D3D_DRIVER_TYPE_UNKNOWN : D3D_DRIVER_TYPE_HARDWARE,
+            adapter,  // Use same GPU as source (guaranteed non-NULL now)
+            D3D_DRIVER_TYPE_UNKNOWN,
             NULL,
             0,  // No special flags needed
             featureLevels,
@@ -213,7 +219,7 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
             &enc->encContext
         );
         
-        if (adapter) adapter->lpVtbl->Release(adapter);
+        adapter->lpVtbl->Release(adapter);
         
         if (FAILED(hr)) {
             NvLog("NVENCEncoder: Failed to create encoder D3D11 device (0x%08X)\n", hr);
@@ -275,7 +281,11 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     capsParam.version = NV_ENC_CAPS_PARAM_VER;
     capsParam.capsToQuery = NV_ENC_CAPS_ASYNC_ENCODE_SUPPORT;
     int capsVal = 0;
-    enc->fn.nvEncGetEncodeCaps(enc->encoder, NV_ENC_CODEC_HEVC_GUID, &capsParam, &capsVal);
+    NVENCSTATUS capsSt = enc->fn.nvEncGetEncodeCaps(enc->encoder, NV_ENC_CODEC_HEVC_GUID, &capsParam, &capsVal);
+    if (capsSt != NV_ENC_SUCCESS) {
+        NvLog("NVENCEncoder: nvEncGetEncodeCaps failed (%d)\n", capsSt);
+        goto fail;
+    }
     if (!capsVal) {
         NvLog("NVENCEncoder: Async mode not supported - this GPU/driver does not support async encoding\n");
         goto fail;
@@ -660,7 +670,10 @@ BOOL NVENCEncoder_Flush(NVENCEncoder* enc, EncodedFrame* out) {
     NV_ENC_PIC_PARAMS picParams = {0};
     picParams.version = NV_ENC_PIC_PARAMS_VER;
     picParams.encodePicFlags = NV_ENC_PIC_FLAG_EOS;
-    enc->fn.nvEncEncodePicture(enc->encoder, &picParams);
+    NVENCSTATUS st = enc->fn.nvEncEncodePicture(enc->encoder, &picParams);
+    if (st != NV_ENC_SUCCESS) {
+        NvLog("NVENCEncoder_Flush: EOS failed (%d)\n", st);
+    }
     
     return FALSE;
 }
@@ -715,7 +728,10 @@ void NVENCEncoder_Destroy(NVENCEncoder* enc) {
             }
         }
         
-        WaitForSingleObject(enc->outputThread, THREAD_JOIN_TIMEOUT_MS);
+        DWORD waitResult = WaitForSingleObject(enc->outputThread, THREAD_JOIN_TIMEOUT_MS);
+        if (waitResult == WAIT_TIMEOUT) {
+            NvLog("NVENCEncoder: Warning - output thread did not exit in time\n");
+        }
         CloseHandle(enc->outputThread);
     }
     
@@ -737,7 +753,10 @@ void NVENCEncoder_Destroy(NVENCEncoder* enc) {
         NV_ENC_PIC_PARAMS picParams = {0};
         picParams.version = NV_ENC_PIC_PARAMS_VER;
         picParams.encodePicFlags = NV_ENC_PIC_FLAG_EOS;
-        enc->fn.nvEncEncodePicture(enc->encoder, &picParams);
+        NVENCSTATUS eosSt = enc->fn.nvEncEncodePicture(enc->encoder, &picParams);
+        if (eosSt != NV_ENC_SUCCESS) {
+            NvLog("NVENCEncoder: EOS in Destroy failed (%d)\n", eosSt);
+        }
         
         // Unregister events and destroy buffers
         for (int i = 0; i < NUM_BUFFERS; i++) {
@@ -886,6 +905,8 @@ static unsigned __stdcall OutputThreadProc(void* param) {
             frame.timestamp = enc->pendingTimestamps[idx];
             frame.duration = enc->frameDuration;
             frame.isKeyframe = (lockParams.pictureType == NV_ENC_PIC_TYPE_IDR);
+        } else {
+            NvLog("NVENCEncoder: malloc failed for frame data (%u bytes) - frame dropped\n", lockParams.bitstreamSizeInBytes);
         }
         
         // Unlock bitstream

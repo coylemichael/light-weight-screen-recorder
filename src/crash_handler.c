@@ -317,6 +317,10 @@ static void HandleCrash(EXCEPTION_POINTERS* exInfo, const char* reason) {
     
     // Create event for synchronization
     g_dumpCompleteEvent = CreateEvent(NULL, TRUE, FALSE, NULL);
+    if (!g_dumpCompleteEvent) {
+        // Cannot log via Logger_Log in crash context, but proceed anyway
+        // Fall through - dump thread will run without synchronization
+    }
     
     // Spawn a dedicated thread to write the dump
     // This avoids issues with corrupted stack or locked heaps
@@ -581,6 +585,10 @@ void CrashHandler_StartWatchdog(void) {
     InterlockedExchange(&g_watchdogRunning, TRUE);
     InterlockedExchange(&g_heartbeatCounter, 0);
     g_watchdogThread = CreateThread(NULL, 0, WatchdogThread, NULL, 0, NULL);
+    if (!g_watchdogThread) {
+        Logger_Log("CrashHandler: Failed to create watchdog thread\n");
+        InterlockedExchange(&g_watchdogRunning, FALSE);
+    }
 }
 
 void CrashHandler_StopWatchdog(void) {

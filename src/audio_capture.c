@@ -80,7 +80,11 @@ BOOL AudioCapture_Init(void) {
         (void**)&g_audioEnumerator
     );
     
-    return SUCCEEDED(hr);
+    if (FAILED(hr)) {
+        Logger_Log("AudioCapture_Init: CoCreateInstance failed (0x%08X)\n", hr);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 void AudioCapture_Shutdown(void) {
@@ -227,6 +231,7 @@ static BOOL InitSourceCapture(AudioCaptureSource* src) {
     );
     
     if (FAILED(hr)) {
+        Logger_Log("InitSourceCapture: Initialize failed (0x%08X)\n", hr);
         return FALSE;
     }
     
@@ -238,6 +243,7 @@ static BOOL InitSourceCapture(AudioCaptureSource* src) {
     );
     
     if (FAILED(hr)) {
+        Logger_Log("InitSourceCapture: GetService failed (0x%08X)\n", hr);
         return FALSE;
     }
     
@@ -366,7 +372,11 @@ static DWORD WINAPI SourceCaptureThread(LPVOID param) {
     
     // Temporary buffer for format conversion
     BYTE* convBuffer = (BYTE*)malloc(SOURCE_BUFFER_SIZE);
-    if (!convBuffer) return 0;
+    if (!convBuffer) {
+        Logger_Log("SourceCaptureThread: malloc failed for convBuffer\n");
+        InterlockedExchange(&src->active, FALSE);
+        return 0;
+    }
     
     while (InterlockedCompareExchange(&src->active, 0, 0)) {
         // Heartbeat (use AUDIO_SRC1 - we could differentiate but keep it simple)
@@ -685,6 +695,7 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
             for (int j = 0; j < i; j++) {
                 if (srcBuffers[j]) free(srcBuffers[j]);
             }
+            InterlockedExchange(&ctx->running, FALSE);
             return 0;
         }
     }
@@ -788,39 +799,42 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
         // Mix sources using helper function
         if (bytesToMix > 0) {
             BYTE* mixChunk = (BYTE*)malloc(bytesToMix);
-            if (mixChunk) {
-                memset(mixChunk, 0, bytesToMix);
-                int numSamples = bytesToMix / AUDIO_BLOCK_ALIGN;
-                
-                MixAudioSamples(srcBuffers, srcBytes, ctx->volumes, 
-                               ctx->sourceCount, numSamples, 
-                               mixChunk, &peakLeft, &peakRight);
-                
-                // Log peak levels periodically
-                logCounter++;
-                if (logCounter % 500 == 0) {
-                    // Convert to dB-ish scale (peak/32767 as percentage)
-                    float peakPctL = (float)peakLeft / 32767.0f * 100.0f;
-                    float peakPctR = (float)peakRight / 32767.0f * 100.0f;
-                    double rateElapsed = (double)(now.QuadPart - rateStartTime.QuadPart) / ctx->perfFreq.QuadPart;
-                    double actualRate = (rateElapsed > 0) ? (totalBytesOutput / rateElapsed) : 0;
-                    Logger_Log("Audio: L=%.1f%% R=%.1f%% bytes=[%d,%d,%d] dormant=[%d,%d,%d] rate=%.0f/s (target=%d)\n", 
-                               peakPctL, peakPctR,
-                               srcBytes[0], srcBytes[1], srcBytes[2],
-                               srcDormant[0], srcDormant[1], srcDormant[2],
-                               actualRate, AUDIO_BYTES_PER_SEC);
-                    peakLeft = 0;
-                    peakRight = 0;
-                }
-                
-                // Write mixed audio to output buffer (using helper)
-                WriteMixedToBuffer(ctx, mixChunk, bytesToMix);
-                
-                // Track total output for rate limiting
-                totalBytesOutput += bytesToMix;
-                
-                free(mixChunk);
+            if (!mixChunk) {
+                Logger_Log("MixCaptureThread: malloc failed for mixChunk (%d bytes)\n", bytesToMix);
+                Sleep(10);  // Back off on allocation failure
+                continue;
             }
+            memset(mixChunk, 0, bytesToMix);
+            int numSamples = bytesToMix / AUDIO_BLOCK_ALIGN;
+            
+            MixAudioSamples(srcBuffers, srcBytes, ctx->volumes, 
+                           ctx->sourceCount, numSamples, 
+                           mixChunk, &peakLeft, &peakRight);
+            
+            // Log peak levels periodically
+            logCounter++;
+            if (logCounter % 500 == 0) {
+                // Convert to dB-ish scale (peak/32767 as percentage)
+                float peakPctL = (float)peakLeft / 32767.0f * 100.0f;
+                float peakPctR = (float)peakRight / 32767.0f * 100.0f;
+                double rateElapsed = (double)(now.QuadPart - rateStartTime.QuadPart) / ctx->perfFreq.QuadPart;
+                double actualRate = (rateElapsed > 0) ? (totalBytesOutput / rateElapsed) : 0;
+                Logger_Log("Audio: L=%.1f%% R=%.1f%% bytes=[%d,%d,%d] dormant=[%d,%d,%d] rate=%.0f/s (target=%d)\n", 
+                           peakPctL, peakPctR,
+                           srcBytes[0], srcBytes[1], srcBytes[2],
+                           srcDormant[0], srcDormant[1], srcDormant[2],
+                           actualRate, AUDIO_BYTES_PER_SEC);
+                peakLeft = 0;
+                peakRight = 0;
+            }
+            
+            // Write mixed audio to output buffer (using helper)
+            WriteMixedToBuffer(ctx, mixChunk, bytesToMix);
+            
+            // Track total output for rate limiting
+            totalBytesOutput += bytesToMix;
+            
+            free(mixChunk);
         }
     }
     
@@ -844,6 +858,7 @@ BOOL AudioCapture_Start(AudioCaptureContext* ctx) {
         if (!src) continue;
         
         if (!InitSourceCapture(src)) {
+            Logger_Log("AudioCapture_Start: InitSourceCapture failed for source %d\n", i);
             continue;
         }
         
@@ -857,12 +872,18 @@ BOOL AudioCapture_Start(AudioCaptureContext* ctx) {
         // Start audio client
         HRESULT hr = src->audioClient->lpVtbl->Start(src->audioClient);
         if (FAILED(hr)) {
+            Logger_Log("AudioCapture: IAudioClient::Start failed (0x%08X) for device %s\n", hr, src->deviceId);
             InterlockedExchange(&src->active, FALSE);
             continue;
         }
         
         // Start capture thread for this source
         src->captureThread = CreateThread(NULL, 0, SourceCaptureThread, src, 0, NULL);
+        if (!src->captureThread) {
+            Logger_Log("AudioCapture: CreateThread failed for source %s\n", src->deviceId);
+            src->audioClient->lpVtbl->Stop(src->audioClient);
+            InterlockedExchange(&src->active, FALSE);
+        }
     }
     
     // Record start time
@@ -871,6 +892,11 @@ BOOL AudioCapture_Start(AudioCaptureContext* ctx) {
     // Start mix thread - use atomic write
     InterlockedExchange(&ctx->running, TRUE);
     ctx->captureThread = CreateThread(NULL, 0, MixCaptureThread, ctx, 0, NULL);
+    if (!ctx->captureThread) {
+        Logger_Log("AudioCapture: CreateThread failed for mix thread\n");
+        InterlockedExchange(&ctx->running, FALSE);
+        return FALSE;
+    }
     
     return TRUE;
 }
@@ -895,7 +921,10 @@ void AudioCapture_Stop(AudioCaptureContext* ctx) {
         
         // Wait for source capture thread to finish
         if (src->captureThread) {
-            WaitForSingleObject(src->captureThread, 1000);
+            DWORD waitResult = WaitForSingleObject(src->captureThread, 3000);
+            if (waitResult == WAIT_TIMEOUT) {
+                Logger_Log("AudioCapture_Stop: Warning - source thread %d did not exit in time\n", i);
+            }
             CloseHandle(src->captureThread);
             src->captureThread = NULL;
         }
@@ -903,7 +932,10 @@ void AudioCapture_Stop(AudioCaptureContext* ctx) {
     
     // Wait for mix thread
     if (ctx->captureThread) {
-        WaitForSingleObject(ctx->captureThread, 1000);
+        DWORD waitResult = WaitForSingleObject(ctx->captureThread, 3000);
+        if (waitResult == WAIT_TIMEOUT) {
+            Logger_Log("AudioCapture_Stop: Warning - mix thread did not exit in time\n");
+        }
         CloseHandle(ctx->captureThread);
         ctx->captureThread = NULL;
     }

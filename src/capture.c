@@ -67,7 +67,11 @@ static BOOL CALLBACK MonitorEnumProcCallback(HMONITOR hMonitor, HDC hdcMonitor,
     
     MONITORINFO mi;
     mi.cbSize = sizeof(mi);
-    GetMonitorInfo(hMonitor, &mi);
+    if (!GetMonitorInfo(hMonitor, &mi)) {
+        // Continue enumeration on error, treat as non-primary
+        data->index++;
+        return TRUE;
+    }
     
     BOOL isPrimary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
     BOOL continueEnum = data->callback(data->index, *lprcMonitor, isPrimary, data->userData);
@@ -128,8 +132,9 @@ BOOL Capture_GetMonitorFromPoint(POINT pt, RECT* monitorRect, int* monitorIndex)
     *monitorRect = mi.rcMonitor;
     
     // Find the DXGI output index for this monitor
-    // We need to enumerate DXGI outputs and match coordinates
-    *monitorIndex = 0; // Will be updated by Capture_InitForRegion
+    // Note: Returns 0 as default; caller should use Capture_SetRegion 
+    // which will find the correct output automatically
+    *monitorIndex = 0;
     
     return TRUE;
 }
@@ -145,6 +150,22 @@ BOOL Capture_GetAllMonitorsBounds(RECT* bounds) {
     return !IsRectEmpty(bounds);
 }
 
+// DWM library loading - file-scope statics for thread-safe initialization
+typedef HRESULT (WINAPI *DwmGetWindowAttributeFunc)(HWND, DWORD, PVOID, DWORD);
+static DwmGetWindowAttributeFunc s_pDwmGetWindowAttribute = NULL;
+static INIT_ONCE s_dwmInitOnce = INIT_ONCE_STATIC_INIT;
+
+static BOOL CALLBACK InitDwmOnce(PINIT_ONCE initOnce, PVOID param, PVOID* context) {
+    (void)initOnce; (void)param; (void)context;
+    HMODULE hDwm = LoadLibraryA("dwmapi.dll");
+    if (hDwm) {
+        s_pDwmGetWindowAttribute = (DwmGetWindowAttributeFunc)
+            GetProcAddress(hDwm, "DwmGetWindowAttribute");
+        // Intentionally not calling FreeLibrary - keep loaded for app lifetime
+    }
+    return TRUE;
+}
+
 BOOL Capture_GetWindowRect(HWND hwnd, RECT* rect) {
     // Preconditions
     LWSR_ASSERT(rect != NULL);
@@ -152,24 +173,12 @@ BOOL Capture_GetWindowRect(HWND hwnd, RECT* rect) {
     if (!rect) return FALSE;
     if (!IsWindow(hwnd)) return FALSE;
     
-    // Use DwmGetWindowAttribute for accurate bounds if available
-    typedef HRESULT (WINAPI *DwmGetWindowAttributeFunc)(HWND, DWORD, PVOID, DWORD);
-    static DwmGetWindowAttributeFunc pDwmGetWindowAttribute = NULL;
-    static HMODULE hDwm = NULL;  // Keep handle to avoid leak
-    static BOOL tried = FALSE;
+    // Thread-safe one-time DWM initialization
+    InitOnceExecuteOnce(&s_dwmInitOnce, InitDwmOnce, NULL, NULL);
     
-    if (!tried) {
-        hDwm = LoadLibraryA("dwmapi.dll");
-        if (hDwm) {
-            pDwmGetWindowAttribute = (DwmGetWindowAttributeFunc)
-                GetProcAddress(hDwm, "DwmGetWindowAttribute");
-        }
-        tried = TRUE;
-    }
-    
-    if (pDwmGetWindowAttribute) {
+    if (s_pDwmGetWindowAttribute) {
         // DWMWA_EXTENDED_FRAME_BOUNDS = 9
-        if (SUCCEEDED(pDwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS_CONST, rect, sizeof(RECT)))) {
+        if (SUCCEEDED(s_pDwmGetWindowAttribute(hwnd, DWMWA_EXTENDED_FRAME_BOUNDS_CONST, rect, sizeof(RECT)))) {
             return TRUE;
         }
     }
@@ -190,11 +199,17 @@ static BOOL InitDuplicationForOutput(CaptureState* state, IDXGIAdapter* adapter,
     IDXGIOutput1* dxgiOutput1 = NULL;
     
     HRESULT hr = adapter->lpVtbl->EnumOutputs(adapter, outputIndex, &dxgiOutput);
-    if (FAILED(hr)) goto cleanup;
+    if (FAILED(hr)) {
+        Logger_Log("InitDuplicationForOutput: EnumOutputs[%d] failed (0x%08X)\n", outputIndex, hr);
+        goto cleanup;
+    }
     
     // Get output description
     hr = dxgiOutput->lpVtbl->GetDesc(dxgiOutput, &state->outputDesc);
-    if (FAILED(hr)) goto cleanup;
+    if (FAILED(hr)) {
+        Logger_Log("InitDuplicationForOutput: GetDesc failed (0x%08X)\n", hr);
+        goto cleanup;
+    }
     
     // Get refresh rate from display mode
     DXGI_MODE_DESC desiredMode = {0};
@@ -213,11 +228,17 @@ static BOOL InitDuplicationForOutput(CaptureState* state, IDXGIAdapter* adapter,
     
     // Get Output1 interface for duplication
     hr = dxgiOutput->lpVtbl->QueryInterface(dxgiOutput, &IID_IDXGIOutput1, (void**)&dxgiOutput1);
-    if (FAILED(hr)) goto cleanup;
+    if (FAILED(hr)) {
+        Logger_Log("InitDuplicationForOutput: QueryInterface IDXGIOutput1 failed (0x%08X)\n", hr);
+        goto cleanup;
+    }
     
     // Create desktop duplication
     hr = dxgiOutput1->lpVtbl->DuplicateOutput(dxgiOutput1, (IUnknown*)state->device, &state->duplication);
-    if (FAILED(hr)) goto cleanup;
+    if (FAILED(hr)) {
+        Logger_Log("InitDuplicationForOutput: DuplicateOutput failed (0x%08X)\n", hr);
+        goto cleanup;
+    }
     
     state->monitorIndex = outputIndex;
     state->monitorWidth = state->outputDesc.DesktopCoordinates.right - 
@@ -249,8 +270,9 @@ static int FindOutputForRegion(IDXGIAdapter* adapter, RECT region) {
         if (FAILED(adapter->lpVtbl->EnumOutputs(adapter, i, &output))) break;
         
         DXGI_OUTPUT_DESC desc;
-        output->lpVtbl->GetDesc(output, &desc);
+        HRESULT hr = output->lpVtbl->GetDesc(output, &desc);
         output->lpVtbl->Release(output);
+        if (FAILED(hr)) continue;
         
         RECT overlap;
         if (IntersectRect(&overlap, &region, &desc.DesktopCoordinates)) {
@@ -293,15 +315,24 @@ BOOL Capture_Init(CaptureState* state) {
         &state->context
     );
     
-    if (FAILED(hr)) goto cleanup;
+    if (FAILED(hr)) {
+        Logger_Log("Capture_Init: D3D11CreateDevice failed (0x%08X)\n", hr);
+        goto cleanup;
+    }
     
     // Get DXGI device
     hr = state->device->lpVtbl->QueryInterface(state->device, &IID_IDXGIDevice, (void**)&dxgiDevice);
-    if (FAILED(hr)) goto cleanup;
+    if (FAILED(hr)) {
+        Logger_Log("Capture_Init: QueryInterface IDXGIDevice failed (0x%08X)\n", hr);
+        goto cleanup;
+    }
     
     // Get DXGI adapter and store it
     hr = dxgiDevice->lpVtbl->GetAdapter(dxgiDevice, &state->adapter);
-    if (FAILED(hr)) goto cleanup;
+    if (FAILED(hr)) {
+        Logger_Log("Capture_Init: GetAdapter failed (0x%08X)\n", hr);
+        goto cleanup;
+    }
     
     // Initialize with primary output (output 0)
     if (!InitDuplicationForOutput(state, state->adapter, 0)) goto cleanup;
@@ -337,7 +368,11 @@ BOOL Capture_SetRegion(CaptureState* state, RECT region) {
         ReleaseDuplication(state);
         if (!InitDuplicationForOutput(state, state->adapter, targetOutput)) {
             // Failed to switch, try to restore original
-            InitDuplicationForOutput(state, state->adapter, state->monitorIndex);
+            if (!InitDuplicationForOutput(state, state->adapter, state->monitorIndex)) {
+                // Both failed - mark state as unusable
+                state->initialized = FALSE;
+                Logger_Log("Capture_SetRegion: Failed to restore duplication\n");
+            }
             return FALSE;
         }
     }
@@ -363,16 +398,18 @@ BOOL Capture_SetRegion(CaptureState* state, RECT region) {
     // Reallocate frame buffer if needed
     size_t newSize = (size_t)state->captureWidth * state->captureHeight * BYTES_PER_PIXEL_BGRA;
     if (newSize > state->frameBufferSize) {
-        free(state->frameBuffer);
-        state->frameBuffer = (BYTE*)malloc(newSize);
-        if (state->frameBuffer) {
+        BYTE* newBuffer = (BYTE*)malloc(newSize);
+        if (newBuffer) {
+            free(state->frameBuffer);
+            state->frameBuffer = newBuffer;
             state->frameBufferSize = newSize;
         } else {
-            state->frameBufferSize = 0;
+            Logger_Log("Capture_SetRegion: malloc failed for frame buffer (%zu bytes)\n", newSize);
+            return FALSE;  // Keep existing buffer
         }
     }
     
-    return state->frameBuffer != NULL;
+    return TRUE;
 }
 
 BOOL Capture_SetMonitor(CaptureState* state, int monitorIndex) {
@@ -413,7 +450,7 @@ BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
     // Precondition
     LWSR_ASSERT(state != NULL);
     
-    if (!state->initialized || !state->duplication) return NULL;
+    if (!state || !state->initialized || !state->duplication) return NULL;
     
     IDXGIResource* desktopResource = NULL;
     DXGI_OUTDUPL_FRAME_INFO frameInfo;
@@ -424,7 +461,7 @@ BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
     
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
         // No new frame, return last frame if available (for static content)
-        if (state->frameBuffer) {
+        if (state->frameBuffer && state->frameBufferSize > 0) {
             if (timestamp) *timestamp = state->lastFrameTime;
             return state->frameBuffer;
         }
@@ -506,6 +543,12 @@ BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
     }
     
     // Copy to frame buffer (handle pitch difference)
+    if (!state->frameBuffer) {
+        state->context->lpVtbl->Unmap(state->context, (ID3D11Resource*)state->stagingTexture, 0);
+        state->duplication->lpVtbl->ReleaseFrame(state->duplication);
+        return NULL;
+    }
+    
     BYTE* src = (BYTE*)mapped.pData;
     BYTE* dst = state->frameBuffer;
     size_t rowBytes = (size_t)state->captureWidth * BYTES_PER_PIXEL_BGRA;
@@ -529,7 +572,7 @@ ID3D11Texture2D* Capture_GetFrameTexture(CaptureState* state, UINT64* timestamp)
     // Precondition
     LWSR_ASSERT(state != NULL);
     
-    if (!state->initialized || !state->duplication) return NULL;
+    if (!state || !state->initialized || !state->duplication) return NULL;
     
     IDXGIResource* desktopResource = NULL;
     DXGI_OUTDUPL_FRAME_INFO frameInfo;

@@ -1318,6 +1318,13 @@ void Recording_Start(void) {
     
     // Start recording thread
     g_recording.thread = CreateThread(NULL, 0, RecordingThread, NULL, 0, NULL);
+    if (!g_recording.thread) {
+        Logger_Log("Recording_Start: CreateThread failed\\n");
+        InterlockedExchange(&g_isRecording, FALSE);
+        Overlay_SetRecordingState(FALSE);
+        Border_Hide();
+        return;
+    }
     
     // Start time limit timer if configured
     if (g_config.maxRecordingSeconds > 0) {

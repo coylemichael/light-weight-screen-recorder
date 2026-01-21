@@ -90,7 +90,10 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     
     // Create sink writer attributes
     HRESULT hr = MFCreateAttributes(&attributes, 3);
-    if (FAILED(hr)) goto cleanup;
+    if (FAILED(hr)) {
+        Logger_Log("Encoder_Init: MFCreateAttributes failed (0x%08X)\\n\", hr);
+        goto cleanup;
+    }
     
     // Enable hardware encoding (NVENC, Intel QSV, AMD VCE)
     attributes->lpVtbl->SetUINT32(attributes, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
@@ -100,11 +103,17 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     
     // Create sink writer
     hr = MFCreateSinkWriterFromURL(wPath, NULL, attributes, &state->sinkWriter);
-    if (FAILED(hr)) goto cleanup;
+    if (FAILED(hr)) {
+        Logger_Log("Encoder_Init: MFCreateSinkWriterFromURL failed (0x%08X)\\n\", hr);
+        goto cleanup;
+    }
     
     // Configure output media type (encoded)
     hr = MFCreateMediaType(&outputType);
-    if (FAILED(hr)) goto cleanup;
+    if (FAILED(hr)) {
+        Logger_Log("Encoder_Init: MFCreateMediaType (output) failed (0x%08X)\\n\", hr);
+        goto cleanup;
+    }
     
     GUID videoFormat = GetVideoFormat(format);
     UINT32 bitrate = Util_CalculateBitrate(width, height, fps, quality);
@@ -134,11 +143,17 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     outputType->lpVtbl->SetUINT64(outputType, &MF_MT_PIXEL_ASPECT_RATIO, aspectRatio);
     
     hr = state->sinkWriter->lpVtbl->AddStream(state->sinkWriter, outputType, &state->videoStreamIndex);
-    if (FAILED(hr)) goto cleanup;
+    if (FAILED(hr)) {
+        Logger_Log("Encoder_Init: AddStream failed (0x%08X)\\n\", hr);
+        goto cleanup;
+    }
     
     // Configure input media type (raw BGRA)
     hr = MFCreateMediaType(&inputType);
-    if (FAILED(hr)) goto cleanup;
+    if (FAILED(hr)) {
+        Logger_Log("Encoder_Init: MFCreateMediaType (input) failed (0x%08X)\\n\", hr);
+        goto cleanup;
+    }
     
     inputType->lpVtbl->SetGUID(inputType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
     inputType->lpVtbl->SetGUID(inputType, &MF_MT_SUBTYPE, &MFVideoFormat_RGB32);
@@ -153,11 +168,17 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     
     hr = state->sinkWriter->lpVtbl->SetInputMediaType(state->sinkWriter, state->videoStreamIndex, 
                                                        inputType, NULL);
-    if (FAILED(hr)) goto cleanup;
+    if (FAILED(hr)) {
+        Logger_Log("Encoder_Init: SetInputMediaType failed (0x%08X)\\n\", hr);
+        goto cleanup;
+    }
     
     // Start writing
     hr = state->sinkWriter->lpVtbl->BeginWriting(state->sinkWriter);
-    if (FAILED(hr)) goto cleanup;
+    if (FAILED(hr)) {
+        Logger_Log("Encoder_Init: BeginWriting failed (0x%08X)\\n\", hr);
+        goto cleanup;
+    }
     
     // Thread-safe state flags
     InterlockedExchange(&state->initialized, TRUE);

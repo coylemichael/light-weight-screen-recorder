@@ -38,7 +38,11 @@ BOOL AudioDevice_Init(void) {
         (void**)&g_deviceEnumerator
     );
     
-    return SUCCEEDED(hr);
+    if (FAILED(hr)) {
+        Logger_Log("AudioDevice_Init: CoCreateInstance failed (0x%08X)\n", hr);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 void AudioDevice_Shutdown(void) {
