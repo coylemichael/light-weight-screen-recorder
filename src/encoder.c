@@ -91,7 +91,7 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     // Create sink writer attributes
     HRESULT hr = MFCreateAttributes(&attributes, 3);
     if (FAILED(hr)) {
-        Logger_Log("Encoder_Init: MFCreateAttributes failed (0x%08X)\\n\", hr);
+        Logger_Log("Encoder_Init: MFCreateAttributes failed (0x%08X)\n", hr);
         goto cleanup;
     }
     
@@ -104,14 +104,14 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     // Create sink writer
     hr = MFCreateSinkWriterFromURL(wPath, NULL, attributes, &state->sinkWriter);
     if (FAILED(hr)) {
-        Logger_Log("Encoder_Init: MFCreateSinkWriterFromURL failed (0x%08X)\\n\", hr);
+        Logger_Log("Encoder_Init: MFCreateSinkWriterFromURL failed (0x%08X)\n", hr);
         goto cleanup;
     }
     
     // Configure output media type (encoded)
     hr = MFCreateMediaType(&outputType);
     if (FAILED(hr)) {
-        Logger_Log("Encoder_Init: MFCreateMediaType (output) failed (0x%08X)\\n\", hr);
+        Logger_Log("Encoder_Init: MFCreateMediaType (output) failed (0x%08X)\n", hr);
         goto cleanup;
     }
     
@@ -144,14 +144,14 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     
     hr = state->sinkWriter->lpVtbl->AddStream(state->sinkWriter, outputType, &state->videoStreamIndex);
     if (FAILED(hr)) {
-        Logger_Log("Encoder_Init: AddStream failed (0x%08X)\\n\", hr);
+        Logger_Log("Encoder_Init: AddStream failed (0x%08X)\n", hr);
         goto cleanup;
     }
     
     // Configure input media type (raw BGRA)
     hr = MFCreateMediaType(&inputType);
     if (FAILED(hr)) {
-        Logger_Log("Encoder_Init: MFCreateMediaType (input) failed (0x%08X)\\n\", hr);
+        Logger_Log("Encoder_Init: MFCreateMediaType (input) failed (0x%08X)\n", hr);
         goto cleanup;
     }
     
@@ -169,14 +169,14 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     hr = state->sinkWriter->lpVtbl->SetInputMediaType(state->sinkWriter, state->videoStreamIndex, 
                                                        inputType, NULL);
     if (FAILED(hr)) {
-        Logger_Log("Encoder_Init: SetInputMediaType failed (0x%08X)\\n\", hr);
+        Logger_Log("Encoder_Init: SetInputMediaType failed (0x%08X)\n", hr);
         goto cleanup;
     }
     
     // Start writing
     hr = state->sinkWriter->lpVtbl->BeginWriting(state->sinkWriter);
     if (FAILED(hr)) {
-        Logger_Log("Encoder_Init: BeginWriting failed (0x%08X)\\n\", hr);
+        Logger_Log("Encoder_Init: BeginWriting failed (0x%08X)\n", hr);
         goto cleanup;
     }
     

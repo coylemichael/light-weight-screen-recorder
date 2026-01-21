@@ -11,6 +11,28 @@
  * - Thread-safe state checks using InterlockedCompareExchange
  * - All errors logged; non-critical errors allow graceful degradation
  * - Returns BOOL to propagate errors; callers must check
+ *
+ * THREAD TERMINATION STRATEGY:
+ * The buffer thread can hang if NVENC/D3D11 enters a bad state (GPU sleep,
+ * driver crash, device removal). When this happens, WaitForSingleObject times
+ * out and we have two options:
+ *
+ *   1. ALLOW_TERMINATE_THREAD = 0 (DEFAULT - SAFE):
+ *      - Log the hang and leak the thread/encoder resources
+ *      - Application remains stable but resources are not freed
+ *      - Recommended for production use
+ *
+ *   2. ALLOW_TERMINATE_THREAD = 1 (DANGEROUS - DEBUG ONLY):
+ *      - Call TerminateThread() to forcibly kill the hung thread
+ *      - RISKS: Memory leaks, unreleased critical sections, corrupted
+ *        D3D11/COM state, potential deadlocks on next operation
+ *      - Only enable this if repeated hangs occur and you need to
+ *        investigate the root cause or require forced cleanup
+ *
+ * If you experience repeated thread hangs, investigate:
+ *   - GPU power management (disable sleep in NVIDIA Control Panel)
+ *   - Driver stability (update/rollback graphics drivers)
+ *   - NVENC session limits (max 3 concurrent on consumer GPUs)
  */
 
 #include "replay_buffer.h"
@@ -31,6 +53,16 @@
 
 #pragma comment(lib, "winmm.lib")
 #pragma comment(lib, "ole32.lib")
+
+/*
+ * ALLOW_TERMINATE_THREAD - Emergency thread termination toggle
+ * 
+ * Set to 1 to enable TerminateThread() as last resort for hung buffer threads.
+ * Set to 0 (default) to leak resources safely instead of risking corruption.
+ * 
+ * See file header comment "THREAD TERMINATION STRATEGY" for full details.
+ */
+#define ALLOW_TERMINATE_THREAD 0
 
 /* ============================================================================
  * INTERNAL STATE STRUCTURES
@@ -298,6 +330,12 @@ BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
     
     if (!state->enabled) return FALSE;
     
+    /* Validate duration */
+    if (state->durationSeconds <= 0) {
+        ReplayLog("ReplayBuffer_Start: Invalid duration %d seconds\n", state->durationSeconds);
+        return FALSE;
+    }
+    
     /* Reset state machine */
     InterlockedExchange(&state->state, REPLAY_STATE_STARTING);
     InterlockedExchange(&state->framesCaptured, 0);
@@ -356,23 +394,51 @@ void ReplayBuffer_Stop(ReplayBufferState* state) {
         if (waitResult == WAIT_TIMEOUT) {
             /* Thread is hung! We can't safely clean up the encoder from here
              * because the hung thread may still be using it.
-             * Log it and leak the resources - safer than crashing. */
-            ReplayLog("WARNING: Buffer thread hung (5s timeout) - forcing cleanup\n");
+             * 
+             * See file header "THREAD TERMINATION STRATEGY" for options. */
+            ReplayLog("WARNING: Buffer thread hung (5s timeout)\n");
             
-            /* Try to terminate the hung thread (dangerous but necessary) */
+#if ALLOW_TERMINATE_THREAD
+            /* DANGEROUS: TerminateThread is enabled via ALLOW_TERMINATE_THREAD=1
+             * 
+             * This forcibly kills the thread but has serious risks:
+             * - Thread stack memory is leaked (~1MB)
+             * - Any held critical sections remain locked (potential deadlock)
+             * - COM/D3D11 resources may be left in inconsistent state
+             * - NVENC session may not be properly closed (counts against limit)
+             * 
+             * Only use this for debugging hung thread issues. For production,
+             * set ALLOW_TERMINATE_THREAD=0 and accept the resource leak. */
+            ReplayLog("WARNING: Using TerminateThread (ALLOW_TERMINATE_THREAD=1)\n");
             TerminateThread(state->bufferThread, 1);
             
             /* Give terminated thread a moment to die */
-            WaitForSingleObject(state->bufferThread, 1000);
+            DWORD termWait = WaitForSingleObject(state->bufferThread, 1000);
+            if (termWait == WAIT_TIMEOUT) {
+                ReplayLog("WARNING: Thread still alive after TerminateThread!\n");
+            }
             
-            /* Force destroy the encoder since the thread won't do it */
+            /* Force-null the encoder pointer since thread won't clean up */
             ReplayVideoState* video = &g_internal.video;
             if (video->encoder) {
-                ReplayLog("Force-destroying hung encoder...\n");
-                /* Don't call NVENCEncoder_Destroy - it tries to stop output thread
-                 * which is also likely hung. Just leak it. */
+                ReplayLog("Force-nulling hung encoder (leaked)...\n");
+                /* Don't call NVENCEncoder_Destroy - output thread is also hung */
                 video->encoder = NULL;
             }
+#else
+            /* SAFE DEFAULT: Leak resources rather than risk corruption.
+             * The thread handle will be closed below, but the thread itself
+             * and all its resources (encoder, textures, etc.) are leaked.
+             * This is safer than TerminateThread for production use. */
+            ReplayLog("WARNING: Leaking hung thread resources (ALLOW_TERMINATE_THREAD=0)\n");
+            ReplayLog("  To enable forced termination, set ALLOW_TERMINATE_THREAD=1\n");
+            
+            /* Null out encoder pointer so we don't try to use it */
+            ReplayVideoState* video = &g_internal.video;
+            if (video->encoder) {
+                video->encoder = NULL;  /* Leaked intentionally */
+            }
+#endif
         }
         
         CloseHandle(state->bufferThread);
@@ -860,6 +926,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     
     if (!InitCaptureRegion(state, capture, &rect)) {
         ReplayLog("InitCaptureRegion failed\n");
+        InterlockedExchange(&state->state, REPLAY_STATE_ERROR);
         return 1;
     }
     
@@ -874,6 +941,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     
     if (width <= 0 || height <= 0) {
         ReplayLog("Invalid capture size: %dx%d\n", width, height);
+        InterlockedExchange(&state->state, REPLAY_STATE_ERROR);
         return 1;
     }
     
@@ -881,6 +949,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     if (!Capture_SetRegion(capture, rect)) {
         ReplayLog("Capture_SetRegion failed - cannot capture region %d,%d,%d,%d\n",
                   rect.left, rect.top, rect.right, rect.bottom);
+        InterlockedExchange(&state->state, REPLAY_STATE_ERROR);
         return 1;
     }
     
@@ -899,6 +968,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     ReplayVideoState* video = &g_internal.video;
     
     if (!InitVideoPipeline(capture, video, &gpuConverter, width, height, fps)) {
+        InterlockedExchange(&state->state, REPLAY_STATE_ERROR);
         return 1;
     }
     
