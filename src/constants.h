@@ -495,4 +495,33 @@ void Logger_Log(const char* fmt, ...);
  */
 #define FALLBACK_RECORDINGS_PATH    "C:\\Recordings"
 
+/* ============================================================================
+ * OVERLAY UI CONSTANTS
+ * ============================================================================
+ * 
+ * Layout and timing constants for the overlay selection UI.
+ * 
+ * CONTROL_PANEL_WIDTH/HEIGHT: Dimensions of the floating control toolbar.
+ *   730px width accommodates capture mode buttons + icon buttons.
+ *   44px height is compact but touch-friendly.
+ * 
+ * CROSSHAIR_SIZE: Size of the dimension indicator that follows the cursor
+ *   during area selection. Shows current width x height.
+ * 
+ * SELECTION_HANDLE_SIZE: Diameter of the resize handles shown at corners
+ *   and edges of a completed selection rectangle.
+ * 
+ * OVERLAY_HIDE_SETTLE_MS: Wait time after hiding overlay windows before
+ *   capturing the screen. This allows the window manager to complete the
+ *   hide animation and repaint the underlying content. Without this delay,
+ *   captures may include ghosting or partially-hidden overlay elements.
+ *   Note: This uses RedrawWindow + Sleep rather than just Sleep because
+ *   we need to ensure the system has actually processed the hide request.
+ */
+#define CONTROL_PANEL_WIDTH         730
+#define CONTROL_PANEL_HEIGHT        44
+#define CROSSHAIR_SIZE              80
+#define SELECTION_HANDLE_SIZE       10
+#define OVERLAY_HIDE_SETTLE_MS      50
+
 #endif // CONSTANTS_H

@@ -223,8 +223,8 @@ static InteractionState g_interaction = {0};
 /* Current capture mode selection (simple enough to leave as scalar) */
 static CaptureMode g_currentMode = MODE_NONE;
 
-/* Handle size constant */
-#define HANDLE_SIZE 10
+/* Use SELECTION_HANDLE_SIZE from constants.h instead of local define */
+#define HANDLE_SIZE SELECTION_HANDLE_SIZE
 
 /* Recording thread */
 static DWORD WINAPI RecordingThread(LPVOID param);
@@ -485,7 +485,7 @@ static void UpdateCrosshair(int x, int y) {
     RECT screenRect;
     Capture_GetAllMonitorsBounds(&screenRect);
     
-    int crossSize = 80;
+    int crossSize = CROSSHAIR_SIZE;
     int offset = 20;
     int posX, posY;
     
@@ -622,10 +622,15 @@ static void CaptureToClipboard(void) {
     int w = g_selection.selectedRect.right - g_selection.selectedRect.left;
     int h = g_selection.selectedRect.bottom - g_selection.selectedRect.top;
     
-    // Hide overlay temporarily
+    // Hide overlay temporarily and wait for redraw
     ShowWindow(g_overlayWnd, SW_HIDE);
     ActionToolbar_Hide();
-    Sleep(50); // Let windows redraw
+    /* Force windows to repaint the area we just revealed, then wait for
+     * the window manager to complete the operation. RedrawWindow with
+     * RDW_UPDATENOW ensures synchronous repaint; the Sleep gives the
+     * compositor time to finish any animations. */
+    RedrawWindow(NULL, &g_selection.selectedRect, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+    Sleep(OVERLAY_HIDE_SETTLE_MS);
     
     HDC screenDC = GetDC(NULL);
     HDC memDC = CreateCompatibleDC(screenDC);
@@ -661,10 +666,13 @@ static void CaptureToFile(void) {
     int w = g_selection.selectedRect.right - g_selection.selectedRect.left;
     int h = g_selection.selectedRect.bottom - g_selection.selectedRect.top;
     
-    // Hide overlay temporarily
+    // Hide overlay temporarily and wait for redraw
     ShowWindow(g_overlayWnd, SW_HIDE);
     ActionToolbar_Hide();
-    Sleep(50);
+    /* Force windows to repaint the area we just revealed, then wait for
+     * the window manager to complete the operation. */
+    RedrawWindow(NULL, &g_selection.selectedRect, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
+    Sleep(OVERLAY_HIDE_SETTLE_MS);
     
     HDC screenDC = GetDC(NULL);
     HDC memDC = CreateCompatibleDC(screenDC);
@@ -1131,8 +1139,8 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     POINT center;
     GetPrimaryMonitorCenter(&center);
     
-    int ctrlWidth = 730;  // Capture buttons + icon buttons on right
-    int ctrlHeight = 44;
+    int ctrlWidth = CONTROL_PANEL_WIDTH;
+    int ctrlHeight = CONTROL_PANEL_HEIGHT;
     
     g_controlWnd = CreateWindowExA(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
@@ -1158,7 +1166,7 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
         "LWSRCrosshair",
         NULL,
         WS_POPUP,
-        -9999, -9999, 80, 80,  // Start off-screen
+        -9999, -9999, CROSSHAIR_SIZE, CROSSHAIR_SIZE,  // Start off-screen
         NULL, NULL, hInstance, NULL
     );
     
@@ -1319,7 +1327,7 @@ void Recording_Start(void) {
     // Start recording thread
     g_recording.thread = CreateThread(NULL, 0, RecordingThread, NULL, 0, NULL);
     if (!g_recording.thread) {
-        Logger_Log("Recording_Start: CreateThread failed\\n");
+        Logger_Log("Recording_Start: CreateThread failed\n");
         InterlockedExchange(&g_isRecording, FALSE);
         Overlay_SetRecordingState(FALSE);
         Border_Hide();
