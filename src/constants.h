@@ -496,6 +496,32 @@ void Logger_Log(const char* fmt, ...);
 #define FALLBACK_RECORDINGS_PATH    "C:\\Recordings"
 
 /* ============================================================================
+ * AAC ENCODER CONSTANTS
+ * ============================================================================
+ * 
+ * Audio encoding parameters for AAC-LC encoding via Media Foundation.
+ * 
+ * AAC_SAMPLE_RATE: 48kHz is the standard sample rate for video production.
+ *   This matches most HDMI audio and ensures best quality with WASAPI loopback.
+ * 
+ * AAC_CHANNELS: Stereo (2 channels) for standard desktop audio.
+ * 
+ * AAC_BITRATE: 192kbps provides excellent quality for stereo AAC-LC.
+ *   This is the sweet spot between file size and transparency.
+ * 
+ * AAC_LC_PROFILE_LEVEL: AAC-LC (Low Complexity) profile level indication.
+ *   0x29 = Level 2 which supports up to 48kHz stereo.
+ * 
+ * AAC_OUTPUT_BUFFER_SIZE: Buffer size for encoded AAC output frames.
+ *   8KB is sufficient for 192kbps AAC at any frame size.
+ */
+#define AAC_SAMPLE_RATE             48000
+#define AAC_CHANNELS                2
+#define AAC_BITRATE                 192000
+#define AAC_LC_PROFILE_LEVEL        0x29
+#define AAC_OUTPUT_BUFFER_SIZE      8192
+
+/* ============================================================================
  * OVERLAY UI CONSTANTS
  * ============================================================================
  * 

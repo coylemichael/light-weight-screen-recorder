@@ -8,11 +8,7 @@
 
 #include <windows.h>
 #include "audio_capture.h"
-
-// AAC output configuration
-#define AAC_SAMPLE_RATE     48000
-#define AAC_CHANNELS        2
-#define AAC_BITRATE         192000  // 192 kbps
+#include "constants.h"
 
 // Forward declaration
 typedef struct AACEncoder AACEncoder;

@@ -296,7 +296,16 @@ AACEncoder* AACEncoder_Create(void) {
     
     // Start streaming
     hr = encoder->transform->lpVtbl->ProcessMessage(encoder->transform, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
+    if (FAILED(hr)) {
+        Logger_Log("AACEncoder: BEGIN_STREAMING failed 0x%08X\n", hr);
+        goto cleanup_fail;
+    }
+    
     hr = encoder->transform->lpVtbl->ProcessMessage(encoder->transform, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
+    if (FAILED(hr)) {
+        Logger_Log("AACEncoder: START_OF_STREAM failed 0x%08X\n", hr);
+        goto cleanup_fail;
+    }
     
     encoder->initialized = TRUE;
     return encoder;
