@@ -189,7 +189,7 @@ static DWORD WINAPI LoggerThreadProc(LPVOID param) {
                         }
                         
                         fprintf(g_log.file, "  %-12s: beats=%6ld, last=%5lums ago [%s]\n",
-                                g_threadNames[i], count, age, status);
+                                g_threadNames[i], (long)count, (unsigned long)age, status);
                     }
                 }
                 fprintf(g_log.file, "=========================\n");
@@ -339,7 +339,8 @@ void Logger_LogThread(ThreadId thread, const char* fmt, ...) {
     assert(fmt != NULL && "Logger_LogThread: format string cannot be NULL");
     assert(thread >= 0 && thread < THREAD_MAX && "Logger_LogThread: invalid thread ID");
     
-    if (!g_log.initialized) return;
+    // Thread-safe check (must use atomic read for cross-thread safety)
+    if (!InterlockedCompareExchange(&g_log.initialized, 0, 0)) return;
     if (thread < 0 || thread >= THREAD_MAX) return;
     
     // Get next slot
@@ -412,4 +413,15 @@ void Logger_Flush(void) {
 const char* Logger_GetThreadName(ThreadId thread) {
     if (thread < 0 || thread >= THREAD_MAX) return "UNKNOWN";
     return g_threadNames[thread];
+}
+
+DWORD Logger_GetHeartbeatAge(ThreadId thread) {
+    if (thread < 0 || thread >= THREAD_MAX) return UINT_MAX;
+    if (!InterlockedCompareExchange(&g_heartbeats[thread].active, 0, 0)) return UINT_MAX;
+    
+    // Note: Using DWORD (32-bit) truncation of GetTickCount64 is intentional.
+    // Subtraction handles wrap correctly for relative time within ~49 days.
+    DWORD now = (DWORD)GetTickCount64();
+    DWORD lastBeat = (DWORD)InterlockedCompareExchange(&g_heartbeats[thread].lastHeartbeat, 0, 0);
+    return now - lastBeat;
 }

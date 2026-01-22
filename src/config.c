@@ -30,11 +30,28 @@ void Config_GetPath(char* buffer, size_t size) {
     if (!buffer || size == 0) return;
     
     // Store config next to executable
-    GetModuleFileNameA(NULL, buffer, (DWORD)size);
+    DWORD len = GetModuleFileNameA(NULL, buffer, (DWORD)size);
+    if (len == 0 || len >= size) {
+        // Fallback to current directory on failure or truncation
+        strncpy(buffer, "lwsr_config.ini", size - 1);
+        buffer[size - 1] = '\0';
+        return;
+    }
+    
     char* lastSlash = strrchr(buffer, '\\');
     if (lastSlash) {
-        size_t remaining = size - (lastSlash + 1 - buffer);
-        strncpy(lastSlash + 1, "lwsr_config.ini", remaining - 1);
+        size_t remaining = size - (size_t)(lastSlash + 1 - buffer);
+        if (remaining > sizeof("lwsr_config.ini")) {
+            strncpy(lastSlash + 1, "lwsr_config.ini", remaining - 1);
+            buffer[size - 1] = '\0';
+        } else {
+            // Not enough space, use fallback
+            strncpy(buffer, "lwsr_config.ini", size - 1);
+            buffer[size - 1] = '\0';
+        }
+    } else {
+        // No backslash found, use filename only
+        strncpy(buffer, "lwsr_config.ini", size - 1);
         buffer[size - 1] = '\0';
     }
 }
@@ -163,10 +180,35 @@ void Config_Load(AppConfig* config) {
             "LastCapture", "Bottom", 0, configPath);
         config->lastMode = (CaptureMode)GetPrivateProfileIntA(
             "LastCapture", "Mode", MODE_AREA, configPath);
+        
+        // Validate/clamp loaded values to prevent corrupted INI from causing issues
+        if (config->outputFormat < 0 || config->outputFormat >= FORMAT_COUNT)
+            config->outputFormat = FORMAT_MP4;
+        if (config->quality < QUALITY_LOW || config->quality > QUALITY_LOSSLESS)
+            config->quality = QUALITY_HIGH;
+        if (config->replayDuration < REPLAY_DURATION_MIN_SECS)
+            config->replayDuration = REPLAY_DURATION_MIN_SECS;
+        if (config->replayDuration > REPLAY_DURATION_MAX_SECS)
+            config->replayDuration = REPLAY_DURATION_MAX_SECS;
+        if (config->replayFPS != 30 && config->replayFPS != 60)
+            config->replayFPS = DEFAULT_FPS;
+        if (config->audioVolume1 < 0) config->audioVolume1 = 0;
+        if (config->audioVolume1 > 100) config->audioVolume1 = 100;
+        if (config->audioVolume2 < 0) config->audioVolume2 = 0;
+        if (config->audioVolume2 > 100) config->audioVolume2 = 100;
+        if (config->audioVolume3 < 0) config->audioVolume3 = 0;
+        if (config->audioVolume3 > 100) config->audioVolume3 = 100;
     }
     
-    // Ensure save directory exists
-    CreateDirectoryA(config->savePath, NULL);
+    // Ensure save directory exists (ignore ERROR_ALREADY_EXISTS)
+    if (!CreateDirectoryA(config->savePath, NULL)) {
+        DWORD err = GetLastError();
+        if (err != ERROR_ALREADY_EXISTS && err != ERROR_SUCCESS) {
+            // Directory creation failed - path may be invalid
+            // Fall back to current directory
+            strncpy(config->savePath, ".", sizeof(config->savePath) - 1);
+        }
+    }
 }
 
 void Config_Save(const AppConfig* config) {
