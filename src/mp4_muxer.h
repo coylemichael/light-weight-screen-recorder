@@ -1,6 +1,6 @@
 /*
  * MP4 Muxer
- * Writes H.264 encoded samples to MP4 file using IMFSinkWriter passthrough
+ * Writes HEVC (H.265) encoded samples to MP4 file using IMFSinkWriter passthrough
  * Separated from sample buffer for single responsibility
  */
 
@@ -12,7 +12,7 @@
 
 // Sample data for muxing (copies data from buffer)
 typedef struct {
-    BYTE* data;             // H.264 NAL unit data
+    BYTE* data;             // HEVC NAL unit data
     DWORD size;             // Size in bytes
     LONGLONG timestamp;     // Sample time (100-ns units)
     LONGLONG duration;      // Sample duration (100-ns units)
@@ -47,7 +47,7 @@ typedef struct {
 } MuxerAudioConfig;
 
 // Write an array of samples to an MP4 file (video only)
-// Uses H.264 passthrough muxing (no re-encoding)
+// Uses HEVC passthrough muxing (no re-encoding)
 // Returns TRUE on success
 BOOL MP4Muxer_WriteFile(
     const char* outputPath,
