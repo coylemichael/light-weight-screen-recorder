@@ -12,6 +12,7 @@
 #include "border.h"
 #include "constants.h"
 #include <stdlib.h>
+#include <windowsx.h>  // GET_X_LPARAM, GET_Y_LPARAM
 
 /* ============================================================================
  * RECORDING BORDER STATE
@@ -89,9 +90,17 @@ void Border_Shutdown(void) {
 static void UpdateBorderBitmap(int width, int height) {
     if (!g_recording.wnd || width < 1 || height < 1) return;
     
+    HDC screenDC = NULL;
+    HDC memDC = NULL;
+    HBITMAP hBitmap = NULL;
+    HBITMAP oldBitmap = NULL;
+    
     // Create a compatible DC
-    HDC screenDC = GetDC(NULL);
-    HDC memDC = CreateCompatibleDC(screenDC);
+    screenDC = GetDC(NULL);
+    if (!screenDC) return;
+    
+    memDC = CreateCompatibleDC(screenDC);
+    if (!memDC) goto cleanup;
     
     // Create a 32-bit DIB section
     BITMAPINFO bmi = {0};
@@ -103,15 +112,10 @@ static void UpdateBorderBitmap(int width, int height) {
     bmi.bmiHeader.biCompression = BI_RGB;
     
     BYTE* pixels = NULL;
-    HBITMAP hBitmap = CreateDIBSection(memDC, &bmi, DIB_RGB_COLORS, (void**)&pixels, NULL, 0);
+    hBitmap = CreateDIBSection(memDC, &bmi, DIB_RGB_COLORS, (void**)&pixels, NULL, 0);
+    if (!hBitmap || !pixels) goto cleanup;
     
-    if (!hBitmap || !pixels) {
-        DeleteDC(memDC);
-        ReleaseDC(NULL, screenDC);
-        return;
-    }
-    
-    HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, hBitmap);
+    oldBitmap = (HBITMAP)SelectObject(memDC, hBitmap);
     
     // Clear to transparent
     memset(pixels, 0, width * height * BYTES_PER_PIXEL_BGRA);
@@ -149,11 +153,11 @@ static void UpdateBorderBitmap(int width, int height) {
     
     UpdateLayeredWindow(g_recording.wnd, screenDC, &ptDst, &sizeWnd, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
     
-    // Cleanup
-    SelectObject(memDC, oldBitmap);
-    DeleteObject(hBitmap);
-    DeleteDC(memDC);
-    ReleaseDC(NULL, screenDC);
+cleanup:
+    if (oldBitmap) SelectObject(memDC, oldBitmap);
+    if (hBitmap) DeleteObject(hBitmap);
+    if (memDC) DeleteDC(memDC);
+    if (screenDC) ReleaseDC(NULL, screenDC);
 }
 
 void Border_Show(RECT captureRect) {
@@ -221,8 +225,16 @@ static PreviewBorderState g_preview = {0};
 static void UpdatePreviewBorderBitmap(int width, int height) {
     if (!g_preview.wnd || width < 1 || height < 1) return;
     
-    HDC screenDC = GetDC(NULL);
-    HDC memDC = CreateCompatibleDC(screenDC);
+    HDC screenDC = NULL;
+    HDC memDC = NULL;
+    HBITMAP hBitmap = NULL;
+    HBITMAP oldBitmap = NULL;
+    
+    screenDC = GetDC(NULL);
+    if (!screenDC) return;
+    
+    memDC = CreateCompatibleDC(screenDC);
+    if (!memDC) goto cleanup;
     
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -233,15 +245,10 @@ static void UpdatePreviewBorderBitmap(int width, int height) {
     bmi.bmiHeader.biCompression = BI_RGB;
     
     BYTE* pixels = NULL;
-    HBITMAP hBitmap = CreateDIBSection(memDC, &bmi, DIB_RGB_COLORS, (void**)&pixels, NULL, 0);
+    hBitmap = CreateDIBSection(memDC, &bmi, DIB_RGB_COLORS, (void**)&pixels, NULL, 0);
+    if (!hBitmap || !pixels) goto cleanup;
     
-    if (!hBitmap || !pixels) {
-        DeleteDC(memDC);
-        ReleaseDC(NULL, screenDC);
-        return;
-    }
-    
-    HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, hBitmap);
+    oldBitmap = (HBITMAP)SelectObject(memDC, hBitmap);
     memset(pixels, 0, width * height * 4);
     
     // Draw red border - BGRA format
@@ -269,10 +276,11 @@ static void UpdatePreviewBorderBitmap(int width, int height) {
     
     UpdateLayeredWindow(g_preview.wnd, screenDC, &ptDst, &sizeWnd, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
     
-    SelectObject(memDC, oldBitmap);
-    DeleteObject(hBitmap);
-    DeleteDC(memDC);
-    ReleaseDC(NULL, screenDC);
+cleanup:
+    if (oldBitmap) SelectObject(memDC, oldBitmap);
+    if (hBitmap) DeleteObject(hBitmap);
+    if (memDC) DeleteDC(memDC);
+    if (screenDC) ReleaseDC(NULL, screenDC);
 }
 
 BOOL PreviewBorder_Init(HINSTANCE hInstance) {
@@ -452,8 +460,8 @@ static LRESULT CALLBACK AreaSelectorWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             // Don't allow dragging if locked
             if (g_area.locked) return 0;
             
-            int x = LOWORD(lParam);
-            int y = HIWORD(lParam);
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
             
             g_area.resizeEdge = GetResizeEdge(hwnd, x, y);
             g_area.dragging = TRUE;
@@ -563,6 +571,7 @@ void AreaSelector_Show(RECT initialRect, BOOL allowMove) {
             g_area.rect.bottom - g_area.rect.top,
             NULL, NULL, GetModuleHandle(NULL), NULL
         );
+        if (!g_area.wnd) return;
     } else {
         SetWindowPos(g_area.wnd, HWND_TOPMOST, 
                     g_area.rect.left, g_area.rect.top,
@@ -573,9 +582,7 @@ void AreaSelector_Show(RECT initialRect, BOOL allowMove) {
         InvalidateRect(g_area.wnd, NULL, TRUE);
     }
     
-    // Make it semi-transparent
-    SetLayeredWindowAttributes(g_area.wnd, 0, 128, LWA_ALPHA);
-    // Need to add WS_EX_LAYERED for transparency
+    // Make it semi-transparent (need WS_EX_LAYERED first)
     SetWindowLongPtr(g_area.wnd, GWL_EXSTYLE, 
                      GetWindowLongPtr(g_area.wnd, GWL_EXSTYLE) | WS_EX_LAYERED);
     SetLayeredWindowAttributes(g_area.wnd, 0, 100, LWA_ALPHA);
