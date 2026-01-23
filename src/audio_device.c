@@ -70,7 +70,8 @@ static int EnumerateDeviceType(AudioDeviceList* list, EDataFlow dataFlow, AudioD
     if (FAILED(hr)) goto cleanup;
     
     UINT count = 0;
-    collection->lpVtbl->GetCount(collection, &count);
+    hr = collection->lpVtbl->GetCount(collection, &count);
+    if (FAILED(hr)) goto cleanup;
     
     // Get default device ID for comparison
     char defaultId[128] = {0};
@@ -83,8 +84,8 @@ static int EnumerateDeviceType(AudioDeviceList* list, EDataFlow dataFlow, AudioD
     
     if (SUCCEEDED(hr) && defaultDevice) {
         LPWSTR wideId = NULL;
-        defaultDevice->lpVtbl->GetId(defaultDevice, &wideId);
-        if (wideId) {
+        HRESULT hrId = defaultDevice->lpVtbl->GetId(defaultDevice, &wideId);
+        if (SUCCEEDED(hrId) && wideId) {
             Util_WideToUtf8(wideId, defaultId, sizeof(defaultId));
             CoTaskMemFree(wideId);
         }
@@ -99,8 +100,8 @@ static int EnumerateDeviceType(AudioDeviceList* list, EDataFlow dataFlow, AudioD
         
         // Get device ID
         LPWSTR wideId = NULL;
-        device->lpVtbl->GetId(device, &wideId);
-        if (wideId) {
+        HRESULT hrId = device->lpVtbl->GetId(device, &wideId);
+        if (SUCCEEDED(hrId) && wideId) {
             Util_WideToUtf8(wideId, info->id, sizeof(info->id));
             CoTaskMemFree(wideId);
         }
@@ -161,19 +162,81 @@ int AudioDevice_Enumerate(AudioDeviceList* list) {
 }
 
 BOOL AudioDevice_GetById(const char* deviceId, AudioDeviceInfo* info) {
-    if (!deviceId || !info) return FALSE;
+    if (!deviceId || !info || !g_deviceEnumerator) return FALSE;
     
-    AudioDeviceList list;
-    AudioDevice_Enumerate(&list);
-    
-    for (int i = 0; i < list.count; i++) {
-        if (strcmp(list.devices[i].id, deviceId) == 0) {
-            *info = list.devices[i];
-            return TRUE;
-        }
+    // Auto-initialize if needed
+    if (!g_deviceEnumerator) {
+        if (!AudioDevice_Init()) return FALSE;
     }
     
-    return FALSE;
+    // Convert device ID to wide string for COM API
+    WCHAR wideId[128];
+    if (MultiByteToWideChar(CP_UTF8, 0, deviceId, -1, wideId, 128) == 0) {
+        return FALSE;
+    }
+    
+    // Direct lookup via GetDevice (much faster than enumerating all)
+    IMMDevice* device = NULL;
+    HRESULT hr = g_deviceEnumerator->lpVtbl->GetDevice(g_deviceEnumerator, wideId, &device);
+    if (FAILED(hr) || !device) return FALSE;
+    
+    // Copy device ID
+    strncpy(info->id, deviceId, sizeof(info->id) - 1);
+    info->id[sizeof(info->id) - 1] = '\0';
+    
+    // Get friendly name from properties
+    IPropertyStore* props = NULL;
+    hr = device->lpVtbl->OpenPropertyStore(device, STGM_READ, &props);
+    if (SUCCEEDED(hr) && props) {
+        PROPVARIANT varName;
+        PropVariantInit(&varName);
+        hr = props->lpVtbl->GetValue(props, &PKEY_Device_FriendlyName, &varName);
+        if (SUCCEEDED(hr) && varName.vt == VT_LPWSTR) {
+            Util_WideToUtf8(varName.pwszVal, info->name, sizeof(info->name));
+        } else {
+            strncpy(info->name, deviceId, sizeof(info->name) - 1);
+        }
+        PropVariantClear(&varName);
+        props->lpVtbl->Release(props);
+    } else {
+        // Fallback to device ID as name
+        strncpy(info->name, deviceId, sizeof(info->name) - 1);
+    }
+    info->name[sizeof(info->name) - 1] = '\0';
+    
+    // Determine device type by checking endpoint data flow
+    IMMEndpoint* endpoint = NULL;
+    hr = device->lpVtbl->QueryInterface(device, &IID_IMMEndpoint, (void**)&endpoint);
+    if (SUCCEEDED(hr) && endpoint) {
+        EDataFlow dataFlow;
+        hr = endpoint->lpVtbl->GetDataFlow(endpoint, &dataFlow);
+        if (SUCCEEDED(hr)) {
+            info->type = (dataFlow == eRender) ? AUDIO_DEVICE_OUTPUT : AUDIO_DEVICE_INPUT;
+        } else {
+            info->type = AUDIO_DEVICE_OUTPUT;  // Default assumption
+        }
+        endpoint->lpVtbl->Release(endpoint);
+    } else {
+        info->type = AUDIO_DEVICE_OUTPUT;
+    }
+    
+    // Check if this is the default device
+    info->isDefault = FALSE;
+    IMMDevice* defaultDevice = NULL;
+    EDataFlow flow = (info->type == AUDIO_DEVICE_OUTPUT) ? eRender : eCapture;
+    hr = g_deviceEnumerator->lpVtbl->GetDefaultAudioEndpoint(g_deviceEnumerator, flow, eConsole, &defaultDevice);
+    if (SUCCEEDED(hr) && defaultDevice) {
+        LPWSTR defaultWideId = NULL;
+        hr = defaultDevice->lpVtbl->GetId(defaultDevice, &defaultWideId);
+        if (SUCCEEDED(hr) && defaultWideId) {
+            info->isDefault = (wcscmp(wideId, defaultWideId) == 0);
+            CoTaskMemFree(defaultWideId);
+        }
+        defaultDevice->lpVtbl->Release(defaultDevice);
+    }
+    
+    device->lpVtbl->Release(device);
+    return TRUE;
 }
 
 BOOL AudioDevice_GetDefaultOutput(char* deviceId, int maxLen) {
@@ -189,15 +252,17 @@ BOOL AudioDevice_GetDefaultOutput(char* deviceId, int maxLen) {
     
     if (FAILED(hr) || !device) return FALSE;
     
+    BOOL success = FALSE;
     LPWSTR wideId = NULL;
-    device->lpVtbl->GetId(device, &wideId);
-    if (wideId) {
+    hr = device->lpVtbl->GetId(device, &wideId);
+    if (SUCCEEDED(hr) && wideId) {
         Util_WideToUtf8(wideId, deviceId, maxLen);
         CoTaskMemFree(wideId);
+        success = TRUE;
     }
     
     device->lpVtbl->Release(device);
-    return TRUE;
+    return success;
 }
 
 BOOL AudioDevice_GetDefaultInput(char* deviceId, int maxLen) {
@@ -213,13 +278,15 @@ BOOL AudioDevice_GetDefaultInput(char* deviceId, int maxLen) {
     
     if (FAILED(hr) || !device) return FALSE;
     
+    BOOL success = FALSE;
     LPWSTR wideId = NULL;
-    device->lpVtbl->GetId(device, &wideId);
-    if (wideId) {
+    hr = device->lpVtbl->GetId(device, &wideId);
+    if (SUCCEEDED(hr) && wideId) {
         Util_WideToUtf8(wideId, deviceId, maxLen);
         CoTaskMemFree(wideId);
+        success = TRUE;
     }
     
     device->lpVtbl->Release(device);
-    return TRUE;
+    return success;
 }
