@@ -188,6 +188,11 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     
     // Create mutex for this instance
     g_mutex = CreateMutexA(NULL, TRUE, MUTEX_NAME);
+    if (!g_mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
+        // Another instance won the race between OpenMutex and CreateMutex
+        if (g_mutex) CloseHandle(g_mutex);
+        return 0;
+    }
     
     // Initialize COM
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
@@ -221,6 +226,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     // Initialize capture system
     if (!Capture_Init(&g_capture)) {
         MessageBoxA(NULL, "Failed to initialize screen capture", "Error", MB_OK | MB_ICONERROR);
+        GdiplusAPI_Shutdown(&g_gdip);
         MFShutdown();
         CoUninitialize();
         return 1;
@@ -230,6 +236,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     if (!Overlay_Create(hInstance)) {
         MessageBoxA(NULL, "Failed to create overlay", "Error", MB_OK | MB_ICONERROR);
         Capture_Shutdown(&g_capture);
+        GdiplusAPI_Shutdown(&g_gdip);
         MFShutdown();
         CoUninitialize();
         return 1;
@@ -257,9 +264,12 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
             snprintf(logFilename, sizeof(logFilename), "%s\\lwsr_log_%04d%02d%02d_%02d%02d%02d.txt",
                     debugFolder, (int)st.wYear, (int)st.wMonth, (int)st.wDay, (int)st.wHour, (int)st.wMinute, (int)st.wSecond);
             Logger_Init(logFilename, "w");
-            Logger_Log("Debug logging enabled\n");
-            Logger_Log("Debug mode: %s\n", g_debugMode ? "YES" : "NO");
+        } else {
+            // Fallback: use current directory
+            Logger_Init("lwsr_log.txt", "w");
         }
+        Logger_Log("Debug logging enabled\n");
+        Logger_Log("Debug mode: %s\n", g_debugMode ? "YES" : "NO");
     }
     
     // Start replay buffer if enabled in config
