@@ -24,8 +24,25 @@ typedef struct {
 // Callback for encoded samples
 typedef void (*AACEncoderCallback)(const AACSample* sample, void* userData);
 
-// Create AAC encoder
+// Error codes for AAC encoder creation
+typedef enum {
+    AAC_OK = 0,                    // Success
+    AAC_ERR_MEMORY,                // Memory allocation failed
+    AAC_ERR_ENCODER_NOT_FOUND,     // No AAC encoder available (codec not installed)
+    AAC_ERR_TYPE_NEGOTIATION,      // Failed to set input/output types
+    AAC_ERR_START_STREAM,          // Failed to start encoder stream
+    AAC_ERR_UNKNOWN                // Unknown error
+} AACEncoderError;
+
+// Check if AAC encoder is available (quick check for UI validation)
+BOOL AACEncoder_IsAvailable(void);
+
+// Create AAC encoder (legacy - no error info)
 AACEncoder* AACEncoder_Create(void);
+
+// Create AAC encoder with error reporting
+// Returns NULL on failure, error code in *outError if non-NULL
+AACEncoder* AACEncoder_CreateEx(AACEncoderError* outError);
 
 // Destroy encoder
 void AACEncoder_Destroy(AACEncoder* encoder);

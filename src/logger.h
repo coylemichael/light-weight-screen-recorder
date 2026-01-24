@@ -27,7 +27,8 @@ typedef enum {
 } ThreadId;
 
 // Initialize the async logger (starts logging thread)
-void Logger_Init(const char* filename, const char* mode);
+// Returns TRUE on success, FALSE on failure (file open, thread creation, etc.)
+BOOL Logger_Init(const char* filename, const char* mode);
 
 // Shutdown the logger (flushes queue, stops thread)
 void Logger_Shutdown(void);

@@ -37,7 +37,7 @@
 
 #include "replay_buffer.h"
 #include "nvenc_encoder.h"
-#include "sample_buffer.h"
+#include "frame_buffer.h"
 #include "capture.h"
 #include "config.h"
 #include "util.h"
@@ -78,7 +78,7 @@
  */
 typedef struct ReplayVideoState {
     NVENCEncoder* encoder;              /* NVENC hardware encoder instance */
-    SampleBuffer sampleBuffer;          /* Circular buffer of encoded frames */
+    FrameBuffer frameBuffer;            /* Circular buffer of encoded frames */
     BYTE seqHeader[MAX_SEQ_HEADER_SIZE];/* HEVC VPS/SPS/PPS for muxing */
     DWORD seqHeaderSize;                /* Size of sequence header */
 } ReplayVideoState;
@@ -129,9 +129,9 @@ static DWORD WINAPI BufferThreadProc(LPVOID param);
 /* Callback for draining completed encoded frames into sample buffer */
 /* Called from NVENC output thread - must be thread-safe */
 static void DrainCallback(EncodedFrame* frame, void* userData) {
-    SampleBuffer* buffer = (SampleBuffer*)userData;
+    FrameBuffer* buffer = (FrameBuffer*)userData;
     if (frame && frame->data && buffer) {
-        SampleBuffer_Add(buffer, frame);
+        FrameBuffer_Add(buffer, frame);
     }
 }
 
@@ -339,6 +339,7 @@ BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
     /* Reset state machine */
     InterlockedExchange(&state->state, REPLAY_STATE_STARTING);
     InterlockedExchange(&state->framesCaptured, 0);
+    InterlockedExchange(&state->audioError, AAC_OK);  // Reset audio error
     state->saveSuccess = FALSE;
     state->savePath[0] = '\0';
     
@@ -482,12 +483,19 @@ BOOL ReplayBuffer_Save(ReplayBufferState* state, const char* outputPath) {
     ResetEvent(state->hSaveCompleteEvent);
     SetEvent(state->hSaveRequestEvent);
     
-    // Wait for completion (max 30 sec for muxing large buffers)
-    DWORD waitResult = WaitForSingleObject(state->hSaveCompleteEvent, 30000);
+    // Wait for completion - 120 sec timeout to handle slow disk/network drives
+    // (OneDrive, NAS, USB drives can be very slow during MP4 finalization)
+    DWORD startTick = GetTickCount();
+    DWORD waitResult = WaitForSingleObject(state->hSaveCompleteEvent, 120000);
+    DWORD elapsed = GetTickCount() - startTick;
     
     if (waitResult != WAIT_OBJECT_0) {
-        ReplayLog("Save timeout after 30 seconds\n");
+        ReplayLog("Save timeout after %u ms (120 sec limit)\n", elapsed);
         return FALSE;
+    }
+    
+    if (elapsed > 5000) {
+        ReplayLog("Save completed in %u ms (consider using a local/fast drive)\n", elapsed);
     }
     
     return state->saveSuccess;
@@ -503,8 +511,8 @@ void ReplayBuffer_GetStatus(ReplayBufferState* state, char* buffer, int bufferSi
     
     if (state->isBuffering) {
         ReplayVideoState* video = &g_internal.video;
-        double duration = SampleBuffer_GetDuration(&video->sampleBuffer);
-        size_t memMB = SampleBuffer_GetMemoryUsage(&video->sampleBuffer) / (1024 * 1024);
+        double duration = FrameBuffer_GetDuration(&video->frameBuffer);
+        size_t memMB = FrameBuffer_GetMemoryUsage(&video->frameBuffer) / (1024 * 1024);
         snprintf(buffer, bufferSize, "Replay: %.0fs (%zuMB)", duration, memMB);
     } else {
         strncpy(buffer, "Replay: OFF", bufferSize - 1);
@@ -634,10 +642,10 @@ static BOOL InitVideoPipeline(CaptureState* capture, ReplayVideoState* video,
         video->seqHeaderSize = 0;
     }
     
-    /* Initialize sample buffer */
-    if (!SampleBuffer_Init(&video->sampleBuffer, g_config.replayDuration, fps, 
-                           width, height, g_config.quality)) {
-        ReplayLog("SampleBuffer_Init failed\n");
+    /* Initialize frame buffer */
+    if (!FrameBuffer_Init(&video->frameBuffer, g_config.replayDuration, fps, 
+                          width, height, g_config.quality)) {
+        ReplayLog("FrameBuffer_Init failed\n");
         NVENCEncoder_Destroy(video->encoder);
         video->encoder = NULL;
         GPUConverter_Shutdown(gpuConverter);
@@ -645,14 +653,14 @@ static BOOL InitVideoPipeline(CaptureState* capture, ReplayVideoState* video,
     }
     
     /* Set encoder callback for async mode */
-    NVENCEncoder_SetCallback(video->encoder, DrainCallback, &video->sampleBuffer);
+    NVENCEncoder_SetCallback(video->encoder, DrainCallback, &video->frameBuffer);
     
-    /* Pass sequence header to sample buffer */
+    /* Pass sequence header to frame buffer */
     if (video->seqHeaderSize > 0) {
-        SampleBuffer_SetSequenceHeader(&video->sampleBuffer, video->seqHeader, video->seqHeaderSize);
+        FrameBuffer_SetSequenceHeader(&video->frameBuffer, video->seqHeader, video->seqHeaderSize);
     }
     
-    ReplayLog("Sample buffer initialized (max %ds)\n", g_config.replayDuration);
+    ReplayLog("Frame buffer initialized (max %ds)\n", g_config.replayDuration);
     return TRUE;
 }
 
@@ -662,9 +670,12 @@ static BOOL InitVideoPipeline(CaptureState* capture, ReplayVideoState* video,
  * 
  * @param state Replay buffer state with audio configuration
  * @param audio Audio state to initialize
+ * @param outAudioError [out] Receives AAC encoder error code if encoder fails (may be NULL)
  * @return TRUE if audio is active and ready
  */
-static BOOL InitAudioPipeline(ReplayBufferState* state, ReplayAudioState* audio) {
+static BOOL InitAudioPipeline(ReplayBufferState* state, ReplayAudioState* audio, AACEncoderError* outAudioError) {
+    if (outAudioError) *outAudioError = AAC_OK;
+    
     if (!state->audioEnabled) return FALSE;
     if (!state->audioSource1[0] && !state->audioSource2[0] && !state->audioSource3[0]) return FALSE;
     
@@ -684,9 +695,11 @@ static BOOL InitAudioPipeline(ReplayBufferState* state, ReplayAudioState* audio)
         return FALSE;
     }
     
-    audio->encoder = AACEncoder_Create();
+    AACEncoderError aacErr = AAC_OK;
+    audio->encoder = AACEncoder_CreateEx(&aacErr);
     if (!audio->encoder) {
-        ReplayLog("AACEncoder_Create failed\n");
+        ReplayLog("AACEncoder_Create failed (error=%d)\n", (int)aacErr);
+        if (outAudioError) *outAudioError = aacErr;
         AudioCapture_Destroy(audio->capture);
         audio->capture = NULL;
         return FALSE;
@@ -745,13 +758,13 @@ static void ShutdownVideoPipeline(ReplayVideoState* video, GPUConverter* gpuConv
         /* Flush remaining frames */
         EncodedFrame flushed = {0};
         while (NVENCEncoder_Flush(video->encoder, &flushed)) {
-            SampleBuffer_Add(&video->sampleBuffer, &flushed);
+            FrameBuffer_Add(&video->frameBuffer, &flushed);
         }
         
         NVENCEncoder_Destroy(video->encoder);
         video->encoder = NULL;
     }
-    SampleBuffer_Shutdown(&video->sampleBuffer);
+    FrameBuffer_Shutdown(&video->frameBuffer);
 }
 
 /**
@@ -849,20 +862,20 @@ static BOOL HandleSaveRequest(ReplayBufferState* state, ReplayVideoState* video,
     MuxerSample* videoSamples = NULL;
     int videoCount = 0;
     
-    if (!SampleBuffer_GetSamplesForMuxing(&video->sampleBuffer, &videoSamples, &videoCount)) {
-        ReplayLog("  SampleBuffer_GetSamplesForMuxing failed\n");
+    if (!FrameBuffer_GetFramesForMuxing(&video->frameBuffer, &videoSamples, &videoCount)) {
+        ReplayLog("  FrameBuffer_GetFramesForMuxing failed\n");
         FreeAudioSampleCopies(audioCopy, audioCount);
         return FALSE;
     }
     
     /* Build video config */
     MuxerConfig videoConfig;
-    videoConfig.width = video->sampleBuffer.width;
-    videoConfig.height = video->sampleBuffer.height;
-    videoConfig.fps = video->sampleBuffer.fps;
-    videoConfig.quality = video->sampleBuffer.quality;
-    videoConfig.seqHeader = video->sampleBuffer.seqHeaderSize > 0 ? video->sampleBuffer.seqHeader : NULL;
-    videoConfig.seqHeaderSize = video->sampleBuffer.seqHeaderSize;
+    videoConfig.width = video->frameBuffer.width;
+    videoConfig.height = video->frameBuffer.height;
+    videoConfig.fps = video->frameBuffer.fps;
+    videoConfig.quality = video->frameBuffer.quality;
+    videoConfig.seqHeader = video->frameBuffer.seqHeaderSize > 0 ? video->frameBuffer.seqHeader : NULL;
+    videoConfig.seqHeaderSize = video->frameBuffer.seqHeaderSize;
     
     /* Mux to file */
     if (audioCopy && audioCount > 0) {
@@ -974,7 +987,13 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     
     /* Initialize audio capture if enabled */
     ReplayAudioState* audio = &g_internal.audio;
-    BOOL audioActive = InitAudioPipeline(state, audio);
+    AACEncoderError audioErr = AAC_OK;
+    BOOL audioActive = InitAudioPipeline(state, audio, &audioErr);
+    
+    /* Store audio error for caller to check */
+    if (state->audioEnabled && !audioActive && audioErr != AAC_OK) {
+        InterlockedExchange(&state->audioError, (LONG)audioErr);
+    }
     
     // Timing - use floating point for precise frame intervals
     double frameIntervalMs = 1000.0 / (double)fps;  // 16.667ms for 60fps
@@ -1023,8 +1042,8 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
         
         if (waitResult == WAIT_OBJECT_0 + 1) {
             /* Save request event signaled */
-            double duration = SampleBuffer_GetDuration(&video->sampleBuffer);
-            int count = SampleBuffer_GetCount(&video->sampleBuffer);
+            double duration = FrameBuffer_GetDuration(&video->frameBuffer);
+            int count = FrameBuffer_GetCount(&video->frameBuffer);
             
             /* Calculate actual capture stats for diagnostics */
             LARGE_INTEGER nowTime;
@@ -1199,14 +1218,21 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                 int encFrames = 0;
                 double avgEncMs = 0;
                 NVENCEncoder_GetStats(video->encoder, &encFrames, &avgEncMs);
+                int currentQP = NVENCEncoder_GetQP(video->encoder);
                 
-                double duration = SampleBuffer_GetDuration(&video->sampleBuffer);
-                int bufCount = SampleBuffer_GetCount(&video->sampleBuffer);
-                size_t memMB = SampleBuffer_GetMemoryUsage(&video->sampleBuffer) / (1024 * 1024);
-                size_t memKB = SampleBuffer_GetMemoryUsage(&video->sampleBuffer) / 1024;
+                /* Get frame size stats to detect quality drift */
+                UINT32 lastFrameSize = 0, minFrameSize = 0, maxFrameSize = 0, avgFrameSize = 0;
+                NVENCEncoder_GetFrameSizeStats(video->encoder, &lastFrameSize, &minFrameSize, &maxFrameSize, &avgFrameSize);
+                
+                double duration = FrameBuffer_GetDuration(&video->frameBuffer);
+                int bufCount = FrameBuffer_GetCount(&video->frameBuffer);
+                size_t memMB = FrameBuffer_GetMemoryUsage(&video->frameBuffer) / (1024 * 1024);
+                size_t memKB = FrameBuffer_GetMemoryUsage(&video->frameBuffer) / 1024;
                 int avgKBPerFrame = bufCount > 0 ? (int)(memKB / bufCount) : 0;
-                ReplayLog("Status: %d/%d frames in %.1fs (encode=%.1f fps, attempt=%.1f fps, target=%d fps), buffer=%.1fs (%d samples, %zu MB, %d KB/frame)\n", 
-                          frameCount, attemptCount, realElapsedSec, actualFPS, attemptFPS, fps, duration, bufCount, memMB, avgKBPerFrame);
+                ReplayLog("Status: %d/%d frames in %.1fs (encode=%.1f fps, attempt=%.1f fps, target=%d fps), buffer=%.1fs (%d samples, %zu MB, %d KB/frame, QP=%d)\n", 
+                          frameCount, attemptCount, realElapsedSec, actualFPS, attemptFPS, fps, duration, bufCount, memMB, avgKBPerFrame, currentQP);
+                ReplayLog("  Frame sizes: last=%u, min=%u, max=%u, avg=%u bytes\n",
+                          lastFrameSize, minFrameSize, maxFrameSize, avgFrameSize);
                 
                 /* Log failure breakdown if any */
                 if (captureNullCount + convertNullCount + encodeFailCount > 0) {

@@ -53,6 +53,12 @@ BOOL NVENCEncoder_GetSequenceHeader(NVENCEncoder* enc, BYTE* buffer, DWORD buffe
 // Stats
 void NVENCEncoder_GetStats(NVENCEncoder* enc, int* framesEncoded, double* avgEncodeTimeMs);
 
+// Get current QP value (for diagnostics)
+int NVENCEncoder_GetQP(NVENCEncoder* enc);
+
+// Get frame size stats (for quality monitoring)
+void NVENCEncoder_GetFrameSizeStats(NVENCEncoder* enc, UINT32* lastSize, UINT32* minSize, UINT32* maxSize, UINT32* avgSize);
+
 // Cleanup
 void NVENCEncoder_Destroy(NVENCEncoder* enc);
 

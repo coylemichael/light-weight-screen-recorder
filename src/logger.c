@@ -216,19 +216,19 @@ static DWORD WINAPI LoggerThreadProc(LPVOID param) {
 // Public API
 // ============================================================================
 
-void Logger_Init(const char* filename, const char* mode) {
+BOOL Logger_Init(const char* filename, const char* mode) {
     // Preconditions
     assert(filename != NULL && "Logger_Init: filename cannot be NULL");
     assert(mode != NULL && "Logger_Init: mode cannot be NULL");
     
-    if (!filename || !mode) return;
+    if (!filename || !mode) return FALSE;
     
     // Thread-safe check
-    if (InterlockedCompareExchange(&g_log.initialized, 0, 0)) return;
+    if (InterlockedCompareExchange(&g_log.initialized, 0, 0)) return TRUE; // Already initialized
     
     // Open log file
     g_log.file = fopen(filename, mode);
-    if (!g_log.file) return;
+    if (!g_log.file) return FALSE;
     
     // Initialize state
     g_log.startTime = GetTickCount64();
@@ -242,7 +242,7 @@ void Logger_Init(const char* filename, const char* mode) {
     if (!g_log.event) {
         fclose(g_log.file);
         g_log.file = NULL;
-        return;
+        return FALSE;
     }
     
     // Start logger thread - use atomic write
@@ -254,7 +254,7 @@ void Logger_Init(const char* filename, const char* mode) {
         fclose(g_log.file);
         g_log.file = NULL;
         InterlockedExchange(&g_log.running, FALSE);
-        return;
+        return FALSE;
     }
     
     // Set high priority so logging doesn't get starved
@@ -268,6 +268,8 @@ void Logger_Init(const char* filename, const char* mode) {
     Logger_Log("=== LWSR Log Started %04d-%02d-%02d %02d:%02d:%02d ===\n",
                st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, st.wSecond);
     Logger_Log("Logger thread started (async, queue=%d entries)\n", LOG_QUEUE_SIZE);
+    
+    return TRUE;
 }
 
 void Logger_Shutdown(void) {

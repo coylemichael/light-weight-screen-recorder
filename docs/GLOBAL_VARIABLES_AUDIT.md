@@ -67,7 +67,7 @@ These are initialized at compile time and never modified:
 #### replay_buffer.c - ReplayInternalState
 ```c
 typedef struct ReplayInternalState {
-    ReplayVideoState video;   /* encoder, sampleBuffer, seqHeader */
+    ReplayVideoState video;   /* encoder, frameBuffer, seqHeader */
     ReplayAudioState audio;   /* capture, encoder, samples, lock */
 } ReplayInternalState;
 

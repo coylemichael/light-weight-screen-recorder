@@ -1,6 +1,6 @@
 /*
- * Sample Buffer Implementation
- * Thread-safe circular buffer for H.264 encoded frames
+ * Frame Buffer Implementation
+ * Thread-safe circular buffer for encoded video frames
  * Muxing responsibility delegated to mp4_muxer module
  *
  * ERROR HANDLING PATTERN:
@@ -11,7 +11,7 @@
  * - Returns BOOL to propagate errors; callers must check
  */
 
-#include "sample_buffer.h"
+#include "frame_buffer.h"
 #include "mp4_muxer.h"
 #include "util.h"
 #include "logger.h"
@@ -21,29 +21,29 @@
 // Alias for logging
 #define BufLog Logger_Log
 
-// Free a single sample
-static void FreeSample(BufferedSample* sample) {
-    LWSR_ASSERT(sample != NULL);
-    if (sample->data) {
-        free(sample->data);
-        sample->data = NULL;
+// Free a single frame
+static void FreeFrame(BufferedFrame* frame) {
+    LWSR_ASSERT(frame != NULL);
+    if (frame->data) {
+        free(frame->data);
+        frame->data = NULL;
     }
-    sample->size = 0;
-    sample->timestamp = 0;
-    sample->duration = 0;
-    sample->isKeyframe = FALSE;
+    frame->size = 0;
+    frame->timestamp = 0;
+    frame->duration = 0;
+    frame->isKeyframe = FALSE;
 }
 
-// Evict oldest samples until buffer duration is under maxDuration
+// Evict oldest frames until buffer duration is under maxDuration
 // Uses real timestamps: newest_timestamp - oldest_timestamp
-static void EvictOldSamples(SampleBuffer* buf, LONGLONG newTimestamp) {
+static void EvictOldFrames(FrameBuffer* buf, LONGLONG newTimestamp) {
     if (buf->count == 0) return;
     
     int evicted = 0;
     
     // Keep evicting while (newest - oldest) > maxDuration
     while (buf->count > 0) {
-        BufferedSample* oldest = &buf->samples[buf->tail];
+        BufferedFrame* oldest = &buf->frames[buf->tail];
         
         // Calculate current buffer span using real timestamps
         LONGLONG bufferSpan = newTimestamp - oldest->timestamp;
@@ -52,8 +52,8 @@ static void EvictOldSamples(SampleBuffer* buf, LONGLONG newTimestamp) {
             break;  // Within limit, stop evicting
         }
         
-        // Evict oldest sample
-        FreeSample(oldest);
+        // Evict oldest frame
+        FreeFrame(oldest);
         buf->tail = (buf->tail + 1) % buf->capacity;
         buf->count--;
         evicted++;
@@ -61,8 +61,8 @@ static void EvictOldSamples(SampleBuffer* buf, LONGLONG newTimestamp) {
     
     // Also check capacity limit
     while (buf->count >= buf->capacity) {
-        BufferedSample* oldest = &buf->samples[buf->tail];
-        FreeSample(oldest);
+        BufferedFrame* oldest = &buf->frames[buf->tail];
+        FreeFrame(oldest);
         buf->tail = (buf->tail + 1) % buf->capacity;
         buf->count--;
         evicted++;
@@ -72,14 +72,14 @@ static void EvictOldSamples(SampleBuffer* buf, LONGLONG newTimestamp) {
     static int evictLogCounter = 0;
     evictLogCounter++;
     if (evicted > 0 && (evictLogCounter % EVICT_LOG_INTERVAL) == 0 && buf->count > 0) {
-        double span = (double)(newTimestamp - buf->samples[buf->tail].timestamp) / 10000000.0;
-        BufLog("Eviction: removed %d samples, count now %d, span=%.2fs\n", 
+        double span = (double)(newTimestamp - buf->frames[buf->tail].timestamp) / 10000000.0;
+        BufLog("Eviction: removed %d frames, count now %d, span=%.2fs\n", 
                evicted, buf->count, span);
     }
 }
 
-BOOL SampleBuffer_Init(SampleBuffer* buf, int durationSeconds, int fps,
-                        int width, int height, QualityPreset quality) {
+BOOL FrameBuffer_Init(FrameBuffer* buf, int durationSeconds, int fps,
+                      int width, int height, QualityPreset quality) {
     // Preconditions
     LWSR_ASSERT(buf != NULL);
     LWSR_ASSERT(durationSeconds > 0);
@@ -90,7 +90,7 @@ BOOL SampleBuffer_Init(SampleBuffer* buf, int durationSeconds, int fps,
     if (!buf) return FALSE;
     if (durationSeconds <= 0 || fps <= 0 || width <= 0 || height <= 0) return FALSE;
     
-    ZeroMemory(buf, sizeof(SampleBuffer));
+    ZeroMemory(buf, sizeof(FrameBuffer));
     
     // Calculate capacity: frames for 1.5x duration (headroom)
     // Use size_t to prevent overflow during calculation
@@ -107,15 +107,15 @@ BOOL SampleBuffer_Init(SampleBuffer* buf, int durationSeconds, int fps,
     }
     
     // Verify allocation won't overflow
-    size_t allocSize = (size_t)capacity * sizeof(BufferedSample);
-    if (allocSize / sizeof(BufferedSample) != (size_t)capacity) {
-        BufLog("SampleBuffer_Init: allocation size overflow\n");
+    size_t allocSize = (size_t)capacity * sizeof(BufferedFrame);
+    if (allocSize / sizeof(BufferedFrame) != (size_t)capacity) {
+        BufLog("FrameBuffer_Init: allocation size overflow\n");
         return FALSE;
     }
     
-    buf->samples = (BufferedSample*)calloc(capacity, sizeof(BufferedSample));
-    if (!buf->samples) {
-        BufLog("Failed to allocate %d samples\n", capacity);
+    buf->frames = (BufferedFrame*)calloc(capacity, sizeof(BufferedFrame));
+    if (!buf->frames) {
+        BufLog("Failed to allocate %d frames\n", capacity);
         return FALSE;
     }
     
@@ -132,25 +132,25 @@ BOOL SampleBuffer_Init(SampleBuffer* buf, int durationSeconds, int fps,
     InitializeCriticalSection(&buf->lock);
     buf->initialized = TRUE;
     
-    BufLog("SampleBuffer_Init: capacity=%d, maxDuration=%llds\n", 
+    BufLog("FrameBuffer_Init: capacity=%d, maxDuration=%llds\n", 
            capacity, buf->maxDuration / 10000000LL);
     
     return TRUE;
 }
 
-void SampleBuffer_Shutdown(SampleBuffer* buf) {
+void FrameBuffer_Shutdown(FrameBuffer* buf) {
     if (!buf) return;
     
     if (buf->initialized) {
         EnterCriticalSection(&buf->lock);
         
-        // Free all samples
+        // Free all frames
         for (int i = 0; i < buf->capacity; i++) {
-            FreeSample(&buf->samples[i]);
+            FreeFrame(&buf->frames[i]);
         }
         
-        free(buf->samples);
-        buf->samples = NULL;
+        free(buf->frames);
+        buf->frames = NULL;
         
         LeaveCriticalSection(&buf->lock);
         DeleteCriticalSection(&buf->lock);
@@ -161,7 +161,7 @@ void SampleBuffer_Shutdown(SampleBuffer* buf) {
     // Log cleanup is handled by replay_buffer.c
 }
 
-BOOL SampleBuffer_Add(SampleBuffer* buf, EncodedFrame* frame) {
+BOOL FrameBuffer_Add(FrameBuffer* buf, EncodedFrame* frame) {
     // Preconditions
     LWSR_ASSERT(buf != NULL);
     LWSR_ASSERT(frame != NULL);
@@ -176,11 +176,11 @@ BOOL SampleBuffer_Add(SampleBuffer* buf, EncodedFrame* frame) {
     
     EnterCriticalSection(&buf->lock);
     
-    // Evict old samples based on timestamp (keeps last maxDuration seconds)
-    EvictOldSamples(buf, frame->timestamp);
+    // Evict old frames based on timestamp (keeps last maxDuration seconds)
+    EvictOldFrames(buf, frame->timestamp);
     
     // Add to buffer (take ownership of data)
-    BufferedSample* slot = &buf->samples[buf->head];
+    BufferedFrame* slot = &buf->frames[buf->head];
     
     // Free any existing data in slot (shouldn't happen after eviction)
     if (slot->data) {
@@ -205,7 +205,7 @@ BOOL SampleBuffer_Add(SampleBuffer* buf, EncodedFrame* frame) {
     return TRUE;
 }
 
-double SampleBuffer_GetDuration(SampleBuffer* buf) {
+double FrameBuffer_GetDuration(FrameBuffer* buf) {
     // Precondition
     LWSR_ASSERT(buf != NULL);
     
@@ -215,8 +215,8 @@ double SampleBuffer_GetDuration(SampleBuffer* buf) {
     
     // Calculate duration from timestamps: newest - oldest
     int newestIdx = (buf->head - 1 + buf->capacity) % buf->capacity;
-    BufferedSample* newest = &buf->samples[newestIdx];
-    BufferedSample* oldest = &buf->samples[buf->tail];
+    BufferedFrame* newest = &buf->frames[newestIdx];
+    BufferedFrame* oldest = &buf->frames[buf->tail];
     
     double duration = (double)(newest->timestamp - oldest->timestamp) / 10000000.0;
     
@@ -225,7 +225,7 @@ double SampleBuffer_GetDuration(SampleBuffer* buf) {
     return duration;
 }
 
-int SampleBuffer_GetCount(SampleBuffer* buf) {
+int FrameBuffer_GetCount(FrameBuffer* buf) {
     // Precondition
     LWSR_ASSERT(buf != NULL);
     
@@ -238,7 +238,7 @@ int SampleBuffer_GetCount(SampleBuffer* buf) {
     return count;
 }
 
-size_t SampleBuffer_GetMemoryUsage(SampleBuffer* buf) {
+size_t FrameBuffer_GetMemoryUsage(FrameBuffer* buf) {
     // Precondition
     LWSR_ASSERT(buf != NULL);
     
@@ -249,7 +249,7 @@ size_t SampleBuffer_GetMemoryUsage(SampleBuffer* buf) {
     size_t total = 0;
     int idx = buf->tail;
     for (int i = 0; i < buf->count; i++) {
-        total += buf->samples[idx].size;
+        total += buf->frames[idx].size;
         idx = (idx + 1) % buf->capacity;
     }
     
@@ -258,13 +258,13 @@ size_t SampleBuffer_GetMemoryUsage(SampleBuffer* buf) {
     return total;
 }
 
-void SampleBuffer_Clear(SampleBuffer* buf) {
+void FrameBuffer_Clear(FrameBuffer* buf) {
     if (!buf || !buf->initialized) return;
     
     EnterCriticalSection(&buf->lock);
     
     for (int i = 0; i < buf->capacity; i++) {
-        FreeSample(&buf->samples[i]);
+        FreeFrame(&buf->frames[i]);
     }
     
     buf->head = 0;
@@ -274,10 +274,10 @@ void SampleBuffer_Clear(SampleBuffer* buf) {
     LeaveCriticalSection(&buf->lock);
 }
 
-// Write buffered samples to MP4 file using muxer module
+// Write buffered frames to MP4 file using muxer module
 // Deep copies all data under lock to prevent use-after-free from eviction,
 // then releases lock before muxing (which can be slow)
-BOOL SampleBuffer_WriteToFile(SampleBuffer* buf, const char* outputPath) {
+BOOL FrameBuffer_WriteToFile(FrameBuffer* buf, const char* outputPath) {
     // Preconditions
     LWSR_ASSERT(buf != NULL);
     LWSR_ASSERT(outputPath != NULL);
@@ -296,66 +296,88 @@ BOOL SampleBuffer_WriteToFile(SampleBuffer* buf, const char* outputPath) {
     
     int count = buf->count;
     
-    // Calculate duration from timestamps
-    double bufDuration = 0.0;
-    int newestIdx = (buf->head - 1 + buf->capacity) % buf->capacity;
-    bufDuration = (double)(buf->samples[newestIdx].timestamp - buf->samples[buf->tail].timestamp) / 10000000.0;
-    BufLog("WriteToFile: %d samples, %.1fs to %s\n", count, bufDuration, outputPath);
-    
-    // Allocate sample array with overflow check
-    size_t allocSize = (size_t)count * sizeof(MuxerSample);
-    // Check for multiplication overflow: if allocSize / count != sizeof(MuxerSample), overflow occurred
-    if (count > 0 && allocSize / (size_t)count != sizeof(MuxerSample)) {
-        LeaveCriticalSection(&buf->lock);
-        BufLog("WriteToFile: allocation size overflow\n");
-        return FALSE;
-    }
-    BufLog("WriteToFile: allocating %d samples (%zu bytes)\n", count, allocSize);
-    MuxerSample* samples = (MuxerSample*)malloc(allocSize);
-    if (!samples) {
-        LeaveCriticalSection(&buf->lock);
-        BufLog("WriteToFile: failed to allocate samples array\n");
-        return FALSE;
-    }
-    // Zero-initialize to prevent uninitialized memory access in cleanup
-    memset(samples, 0, allocSize);
-    
-    // Find first timestamp for normalization
-    LONGLONG firstTimestamp = 0;
+    // CRITICAL FIX: Find the first keyframe (IDR) to start the clip
+    // Without this, clips extracted after long encoding sessions have invalid
+    // POC (Picture Order Count) references and decode with severe artifacts.
+    int startOffset = 0;
     for (int i = 0; i < count; i++) {
-        BufferedSample* src = &buf->samples[(buf->tail + i) % buf->capacity];
-        if (src->data && src->size > 0) {
-            firstTimestamp = src->timestamp;
+        BufferedFrame* src = &buf->frames[(buf->tail + i) % buf->capacity];
+        if (src->data && src->size > 0 && src->isKeyframe) {
+            startOffset = i;
+            if (startOffset > 0) {
+                BufLog("WriteToFile: Starting at keyframe offset %d (skipped %d frames)\n", 
+                       startOffset, startOffset);
+            }
             break;
         }
     }
     
-    // Deep copy all samples while holding lock (prevents use-after-free)
-    BufLog("WriteToFile: deep copying samples...\n");
+    // Adjust count to start from keyframe
+    int actualCount = count - startOffset;
+    if (actualCount <= 0) {
+        LeaveCriticalSection(&buf->lock);
+        BufLog("WriteToFile: No keyframe found in buffer!\n");
+        return FALSE;
+    }
+    
+    // Calculate duration from timestamps (from keyframe)
+    double bufDuration = 0.0;
+    int newestIdx = (buf->head - 1 + buf->capacity) % buf->capacity;
+    int startIdx = (buf->tail + startOffset) % buf->capacity;
+    bufDuration = (double)(buf->frames[newestIdx].timestamp - buf->frames[startIdx].timestamp) / 10000000.0;
+    BufLog("WriteToFile: %d frames, %.1fs to %s\n", actualCount, bufDuration, outputPath);
+    
+    // Allocate frame array with overflow check
+    size_t allocSize = (size_t)actualCount * sizeof(MuxerSample);
+    // Check for multiplication overflow: if allocSize / count != sizeof(MuxerSample), overflow occurred
+    if (actualCount > 0 && allocSize / (size_t)actualCount != sizeof(MuxerSample)) {
+        LeaveCriticalSection(&buf->lock);
+        BufLog("WriteToFile: allocation size overflow\n");
+        return FALSE;
+    }
+    BufLog("WriteToFile: allocating %d frames (%zu bytes)\n", actualCount, allocSize);
+    MuxerSample* frames = (MuxerSample*)malloc(allocSize);
+    if (!frames) {
+        LeaveCriticalSection(&buf->lock);
+        BufLog("WriteToFile: failed to allocate frames array\n");
+        return FALSE;
+    }
+    // Zero-initialize to prevent uninitialized memory access in cleanup
+    memset(frames, 0, allocSize);
+    
+    // Find first timestamp for normalization (from keyframe)
+    LONGLONG firstTimestamp = 0;
+    BufferedFrame* firstSrc = &buf->frames[startIdx];
+    if (firstSrc->data && firstSrc->size > 0) {
+        firstTimestamp = firstSrc->timestamp;
+    }
+    
+    // Deep copy all frames starting from keyframe while holding lock (prevents use-after-free)
+    BufLog("WriteToFile: deep copying frames...\n");
     int copiedCount = 0;
     size_t totalBytes = 0;
-    for (int i = 0; i < count; i++) {
-        BufferedSample* src = &buf->samples[(buf->tail + i) % buf->capacity];
+    for (int i = startOffset; i < count; i++) {
+        BufferedFrame* src = &buf->frames[(buf->tail + i) % buf->capacity];
         if (src->data && src->size > 0) {
-            samples[copiedCount].data = (BYTE*)malloc(src->size);
-            if (samples[copiedCount].data) {
-                memcpy(samples[copiedCount].data, src->data, src->size);
-                samples[copiedCount].size = src->size;
-                samples[copiedCount].timestamp = src->timestamp - firstTimestamp;
-                samples[copiedCount].duration = src->duration;
-                samples[copiedCount].isKeyframe = src->isKeyframe;
+            frames[copiedCount].data = (BYTE*)malloc(src->size);
+            if (frames[copiedCount].data) {
+                memcpy(frames[copiedCount].data, src->data, src->size);
+                frames[copiedCount].size = src->size;
+                frames[copiedCount].timestamp = src->timestamp - firstTimestamp;
+                frames[copiedCount].duration = src->duration;
+                frames[copiedCount].isKeyframe = src->isKeyframe;
                 totalBytes += src->size;
                 copiedCount++;
             }
         }
     }
-    BufLog("WriteToFile: copied %d samples (%zu bytes total)\n", copiedCount, totalBytes);
+    BufLog("WriteToFile: copied %d frames (%zu bytes total)\n", copiedCount, totalBytes);
     
-    // If no samples were copied, free the array and return failure
+    // If no frames were copied, free the array and return failure
     if (copiedCount == 0) {
-        free(samples);
+        free(frames);
         LeaveCriticalSection(&buf->lock);
-        BufLog("WriteToFile: no samples could be copied\n");
+        BufLog("WriteToFile: no frames could be copied\n");
         return FALSE;
     }
     
@@ -373,31 +395,32 @@ BOOL SampleBuffer_WriteToFile(SampleBuffer* buf, const char* outputPath) {
     // Lock released! All data is now in our own deep-copied memory
     
     // Mux to file (this can be slow, but we're not holding the lock)
-    BOOL success = MP4Muxer_WriteFile(outputPath, samples, copiedCount, &config);
+    BOOL success = MP4Muxer_WriteFile(outputPath, frames, copiedCount, &config);
     BufLog("WriteToFile: muxer returned %s\n", success ? "OK" : "FAILED");
     
-    // Free deep-copied sample data
-    BufLog("WriteToFile: freeing sample copies...\n");
+    // Free deep-copied frame data
+    BufLog("WriteToFile: freeing frame copies...\n");
     for (int i = 0; i < copiedCount; i++) {
-        if (samples[i].data) free(samples[i].data);
+        if (frames[i].data) free(frames[i].data);
     }
-    free(samples);
+    free(frames);
     BufLog("WriteToFile: done\n");
     
     return success;
 }
 
-// Get copies of samples for external muxing (caller must free)
+// Get copies of frames for external muxing (caller must free)
 // Deep copies all data under lock to prevent use-after-free from eviction
-BOOL SampleBuffer_GetSamplesForMuxing(SampleBuffer* buf, MuxerSample** outSamples, int* outCount) {
+// CRITICAL: Always starts from the first keyframe to ensure valid HEVC decoding
+BOOL FrameBuffer_GetFramesForMuxing(FrameBuffer* buf, MuxerSample** outFrames, int* outCount) {
     // Preconditions
     LWSR_ASSERT(buf != NULL);
-    LWSR_ASSERT(outSamples != NULL);
+    LWSR_ASSERT(outFrames != NULL);
     LWSR_ASSERT(outCount != NULL);
     
-    if (!buf || !buf->initialized || !outSamples || !outCount) return FALSE;
+    if (!buf || !buf->initialized || !outFrames || !outCount) return FALSE;
     
-    *outSamples = NULL;
+    *outFrames = NULL;
     *outCount = 0;
     
     EnterCriticalSection(&buf->lock);
@@ -408,40 +431,60 @@ BOOL SampleBuffer_GetSamplesForMuxing(SampleBuffer* buf, MuxerSample** outSample
         return FALSE;
     }
     
-    // Allocate output array with overflow check
-    size_t allocSize = (size_t)count * sizeof(MuxerSample);
-    if (count > 0 && allocSize / (size_t)count != sizeof(MuxerSample)) {
-        LeaveCriticalSection(&buf->lock);
-        return FALSE;  // Overflow
-    }
-    MuxerSample* samples = (MuxerSample*)malloc(allocSize);
-    if (!samples) {
-        LeaveCriticalSection(&buf->lock);
-        return FALSE;
-    }
-    
-    // Find first timestamp for normalization
-    LONGLONG firstTimestamp = 0;
+    // CRITICAL FIX: Find the first keyframe (IDR) to start the clip
+    // Without this, clips extracted after long encoding sessions have invalid
+    // POC (Picture Order Count) references and decode with severe artifacts.
+    // The decoder expects the clip to start with an IDR that resets POC.
+    int startOffset = 0;
     for (int i = 0; i < count; i++) {
-        BufferedSample* src = &buf->samples[(buf->tail + i) % buf->capacity];
-        if (src->data && src->size > 0) {
-            firstTimestamp = src->timestamp;
+        BufferedFrame* src = &buf->frames[(buf->tail + i) % buf->capacity];
+        if (src->data && src->size > 0 && src->isKeyframe) {
+            startOffset = i;
+            BufLog("GetFramesForMuxing: Starting at keyframe offset %d (skipped %d frames)\n", 
+                   startOffset, startOffset);
             break;
         }
     }
     
-    // Deep copy all samples while holding lock (prevents use-after-free)
+    // Calculate actual frame count after skipping to keyframe
+    int actualCount = count - startOffset;
+    if (actualCount <= 0) {
+        LeaveCriticalSection(&buf->lock);
+        BufLog("GetFramesForMuxing: No keyframe found in buffer!\n");
+        return FALSE;
+    }
+    
+    // Allocate output array with overflow check
+    size_t allocSize = (size_t)actualCount * sizeof(MuxerSample);
+    if (actualCount > 0 && allocSize / (size_t)actualCount != sizeof(MuxerSample)) {
+        LeaveCriticalSection(&buf->lock);
+        return FALSE;  // Overflow
+    }
+    MuxerSample* frames = (MuxerSample*)malloc(allocSize);
+    if (!frames) {
+        LeaveCriticalSection(&buf->lock);
+        return FALSE;
+    }
+    
+    // Find first timestamp for normalization (from the keyframe we're starting at)
+    LONGLONG firstTimestamp = 0;
+    BufferedFrame* firstFrame = &buf->frames[(buf->tail + startOffset) % buf->capacity];
+    if (firstFrame->data && firstFrame->size > 0) {
+        firstTimestamp = firstFrame->timestamp;
+    }
+    
+    // Deep copy frames starting from keyframe while holding lock (prevents use-after-free)
     int copiedCount = 0;
-    for (int i = 0; i < count; i++) {
-        BufferedSample* src = &buf->samples[(buf->tail + i) % buf->capacity];
+    for (int i = startOffset; i < count; i++) {
+        BufferedFrame* src = &buf->frames[(buf->tail + i) % buf->capacity];
         if (src->data && src->size > 0) {
-            samples[copiedCount].data = (BYTE*)malloc(src->size);
-            if (samples[copiedCount].data) {
-                memcpy(samples[copiedCount].data, src->data, src->size);
-                samples[copiedCount].size = src->size;
-                samples[copiedCount].timestamp = src->timestamp - firstTimestamp;
-                samples[copiedCount].duration = src->duration;
-                samples[copiedCount].isKeyframe = src->isKeyframe;
+            frames[copiedCount].data = (BYTE*)malloc(src->size);
+            if (frames[copiedCount].data) {
+                memcpy(frames[copiedCount].data, src->data, src->size);
+                frames[copiedCount].size = src->size;
+                frames[copiedCount].timestamp = src->timestamp - firstTimestamp;
+                frames[copiedCount].duration = src->duration;
+                frames[copiedCount].isKeyframe = src->isKeyframe;
                 copiedCount++;
             }
         }
@@ -449,18 +492,18 @@ BOOL SampleBuffer_GetSamplesForMuxing(SampleBuffer* buf, MuxerSample** outSample
     
     LeaveCriticalSection(&buf->lock);
     
-    // Free the array if no samples were successfully copied
+    // Free the array if no frames were successfully copied
     if (copiedCount == 0) {
-        free(samples);
+        free(frames);
         return FALSE;
     }
     
-    *outSamples = samples;
+    *outFrames = frames;
     *outCount = copiedCount;
     return TRUE;
 }
 
-void SampleBuffer_SetSequenceHeader(SampleBuffer* buf, const BYTE* header, DWORD size) {
+void FrameBuffer_SetSequenceHeader(FrameBuffer* buf, const BYTE* header, DWORD size) {
     // Preconditions
     LWSR_ASSERT(buf != NULL);
     LWSR_ASSERT(header != NULL);

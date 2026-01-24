@@ -276,6 +276,22 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     if (g_config.replayEnabled) {
         Logger_Log("Starting replay buffer (enabled in config)\n");
         ReplayBuffer_Start(&g_replayBuffer, &g_config);
+        
+        // Check for audio encoder errors
+        if (g_config.audioEnabled) {
+            AACEncoderError audioErr = (AACEncoderError)InterlockedCompareExchange(&g_replayBuffer.audioError, 0, 0);
+            if (audioErr != AAC_OK) {
+                const char* msg = (audioErr == AAC_ERR_ENCODER_NOT_FOUND)
+                    ? "AAC audio encoder not available.\n\n"
+                      "Windows Media Foundation AAC encoder is required for audio recording.\n"
+                      "Audio will be disabled for this session."
+                    : "Audio encoder initialization failed.\n\n"
+                      "Audio will be disabled for this session.";
+                Logger_Log("Audio encoder error at startup: %d\n", (int)audioErr);
+                MessageBoxA(NULL, msg, "Audio Error", MB_OK | MB_ICONWARNING);
+            }
+        }
+        
         // Register global hotkey for saving replay
         BOOL hotkeyOk = RegisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE, 0, g_config.replaySaveKey);
         Logger_Log("RegisterHotKey(HOTKEY_REPLAY_SAVE, key=0x%02X): %s\n", 

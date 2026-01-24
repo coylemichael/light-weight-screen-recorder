@@ -266,6 +266,13 @@ BOOL MP4Muxer_WriteFile(
     int samplesWritten = 0;
     int keyframeCount = 0;
     
+    // VERIFY: First sample must be a keyframe for valid HEVC decoding
+    if (sampleCount > 0 && !samples[0].isKeyframe) {
+        MuxLog("MP4Muxer: WARNING - First sample is NOT a keyframe! POC errors likely.\n");
+    } else if (sampleCount > 0) {
+        MuxLog("MP4Muxer: First sample is keyframe (good)\n");
+    }
+    
     for (int i = 0; i < sampleCount; i++) {
         const MuxerSample* sample = &samples[i];
         
@@ -280,11 +287,16 @@ BOOL MP4Muxer_WriteFile(
     MuxLog("MP4Muxer: Wrote %d/%d samples (%.3fs real-time), keyframes: %d\n", 
            samplesWritten, sampleCount, (double)finalDuration / (double)MF_UNITS_PER_SECOND, keyframeCount);
     
-    // Finalize
+    // Finalize - can be slow on cloud/network drives
     if (beginWritingCalled) {
+        DWORD finalizeStart = GetTickCount();
         hr = writer->lpVtbl->Finalize(writer);
+        DWORD finalizeTime = GetTickCount() - finalizeStart;
+        
         if (FAILED(hr)) {
-            MuxLog("MP4Muxer: Finalize failed with HRESULT 0x%08X\n", hr);
+            MuxLog("MP4Muxer: Finalize failed with HRESULT 0x%08X after %u ms\n", hr, finalizeTime);
+        } else if (finalizeTime > 2000) {
+            MuxLog("MP4Muxer: Finalize took %u ms (slow disk/network?)\n", finalizeTime);
         }
     }
     
@@ -445,11 +457,17 @@ BOOL MP4Muxer_WriteFileWithAudio(
     MuxLog("MP4Muxer: Wrote %d/%d video, %d/%d audio samples\n",
            videoWritten, videoSampleCount, audioWritten, audioSampleCount);
     
-    // Finalize
+    // Finalize - this can be VERY slow on cloud/network drives
+    // because it rewrites the MP4 header (moov atom) with final timing info
     if (beginWritingCalled) {
+        DWORD finalizeStart = GetTickCount();
         hr = writer->lpVtbl->Finalize(writer);
+        DWORD finalizeTime = GetTickCount() - finalizeStart;
+        
         if (FAILED(hr)) {
-            MuxLog("MP4Muxer: Finalize failed with HRESULT 0x%08X\n", hr);
+            MuxLog("MP4Muxer: Finalize failed with HRESULT 0x%08X after %u ms\n", hr, finalizeTime);
+        } else if (finalizeTime > 2000) {
+            MuxLog("MP4Muxer: Finalize took %u ms (slow disk/network?)\n", finalizeTime);
         }
     }
     

@@ -126,6 +126,12 @@ struct NVENCEncoder {
     int pipelineFullCount;
     int mutexTimeoutCount;
     
+    // Frame size tracking for quality monitoring
+    UINT64 totalBytesEncoded;
+    UINT32 lastFrameSize;
+    UINT32 minFrameSize;
+    UINT32 maxFrameSize;
+    
     // Device lost detection
     volatile LONG deviceLost;  // Thread-safe: use InterlockedExchange
     
@@ -366,7 +372,13 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
         goto fail;
     }
     
-    NvLog("NVENCEncoder: HEVC CQP (QP=%d), async mode\n", enc->qp);
+    NvLog("NVENCEncoder: HEVC CQP (QP=%d, I-frame QP=%d), async mode\n", 
+          enc->qp, enc->qp > QP_INTRA_OFFSET ? enc->qp - QP_INTRA_OFFSET : 1);
+    NvLog("NVENCEncoder: Rate control: mode=%d, constQP.qpInterP=%d, qpInterB=%d, qpIntra=%d\n",
+          config.rcParams.rateControlMode, 
+          config.rcParams.constQP.qpInterP,
+          config.rcParams.constQP.qpInterB, 
+          config.rcParams.constQP.qpIntra);
     
     // ========================================================================
     // Step 5: Create input textures (one per buffer slot)
@@ -712,6 +724,22 @@ void NVENCEncoder_GetStats(NVENCEncoder* enc, int* framesEncoded, double* avgEnc
     if (avgEncodeTimeMs) *avgEncodeTimeMs = 0.0;
 }
 
+int NVENCEncoder_GetQP(NVENCEncoder* enc) {
+    return enc ? enc->qp : -1;
+}
+
+void NVENCEncoder_GetFrameSizeStats(NVENCEncoder* enc, UINT32* lastSize, UINT32* minSize, UINT32* maxSize, UINT32* avgSize) {
+    if (!enc) return;
+    if (lastSize) *lastSize = enc->lastFrameSize;
+    if (minSize) *minSize = enc->minFrameSize;
+    if (maxSize) *maxSize = enc->maxFrameSize;
+    if (avgSize && enc->frameNumber > 0) {
+        *avgSize = (UINT32)(enc->totalBytesEncoded / enc->frameNumber);
+    } else if (avgSize) {
+        *avgSize = 0;
+    }
+}
+
 void NVENCEncoder_Destroy(NVENCEncoder* enc) {
     if (!enc) return;
     
@@ -894,7 +922,7 @@ static unsigned __stdcall OutputThreadProc(void* param) {
         }
         
         // ====================================================================
-        // Step 3: Copy encoded data
+        // Step 3: Copy encoded data and track frame sizes
         // ====================================================================
         
         EncodedFrame frame = {0};
@@ -905,6 +933,14 @@ static unsigned __stdcall OutputThreadProc(void* param) {
             frame.timestamp = enc->pendingTimestamps[idx];
             frame.duration = enc->frameDuration;
             frame.isKeyframe = (lockParams.pictureType == NV_ENC_PIC_TYPE_IDR);
+            
+            // Track frame sizes for quality monitoring
+            enc->lastFrameSize = lockParams.bitstreamSizeInBytes;
+            enc->totalBytesEncoded += lockParams.bitstreamSizeInBytes;
+            if (enc->minFrameSize == 0 || lockParams.bitstreamSizeInBytes < enc->minFrameSize)
+                enc->minFrameSize = lockParams.bitstreamSizeInBytes;
+            if (lockParams.bitstreamSizeInBytes > enc->maxFrameSize)
+                enc->maxFrameSize = lockParams.bitstreamSizeInBytes;
         } else {
             NvLog("NVENCEncoder: malloc failed for frame data (%u bytes) - frame dropped\n", lockParams.bitstreamSizeInBytes);
         }

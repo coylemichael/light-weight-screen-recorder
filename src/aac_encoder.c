@@ -171,9 +171,58 @@ static void ProcessOutput(AACEncoder* encoder) {
     }
 }
 
-AACEncoder* AACEncoder_Create(void) {
+// Quick check if AAC encoder is available (for UI validation)
+BOOL AACEncoder_IsAvailable(void) {
+    IMFTransform* transform = NULL;
+    
+    // Try direct CLSID first
+    HRESULT hr = CoCreateInstance(
+        &CLSID_AACEncoder,
+        NULL,
+        CLSCTX_INPROC_SERVER,
+        &IID_IMFTransform,
+        (void**)&transform
+    );
+    
+    if (SUCCEEDED(hr) && transform) {
+        transform->lpVtbl->Release(transform);
+        return TRUE;
+    }
+    
+    // Try MFTEnumEx fallback
+    MFT_REGISTER_TYPE_INFO inputInfo = {MFMediaType_Audio, MFAudioFormat_PCM};
+    MFT_REGISTER_TYPE_INFO outputInfo = {MFMediaType_Audio, MFAudioFormat_AAC};
+    IMFActivate** activates = NULL;
+    UINT32 count = 0;
+    
+    hr = MFTEnumEx(
+        MFT_CATEGORY_AUDIO_ENCODER,
+        MFT_ENUM_FLAG_SYNCMFT | MFT_ENUM_FLAG_SORTANDFILTER,
+        &inputInfo,
+        &outputInfo,
+        &activates,
+        &count
+    );
+    
+    BOOL available = FALSE;
+    if (SUCCEEDED(hr) && activates && count > 0) {
+        available = TRUE;
+        for (UINT32 i = 0; i < count; i++) {
+            activates[i]->lpVtbl->Release(activates[i]);
+        }
+        CoTaskMemFree(activates);
+    }
+    
+    return available;
+}
+
+AACEncoder* AACEncoder_CreateEx(AACEncoderError* outError) {
+    AACEncoderError err = AAC_OK;
     AACEncoder* encoder = (AACEncoder*)calloc(1, sizeof(AACEncoder));
-    if (!encoder) return NULL;
+    if (!encoder) {
+        if (outError) *outError = AAC_ERR_MEMORY;
+        return NULL;
+    }
     
     // AAC-LC: 1024 samples per frame
     encoder->samplesPerFrame = 1024;
@@ -185,7 +234,10 @@ AACEncoder* AACEncoder_Create(void) {
     // Allocate input buffer (hold multiple frames worth)
     encoder->inputBufferSize = encoder->bytesPerFrame * 4;
     encoder->inputBuffer = (BYTE*)malloc(encoder->inputBufferSize);
-    if (!encoder->inputBuffer) goto cleanup_fail;
+    if (!encoder->inputBuffer) {
+        err = AAC_ERR_MEMORY;
+        goto cleanup_fail;
+    }
     
     // Create AAC encoder MFT
     HRESULT hr = CoCreateInstance(
@@ -230,7 +282,10 @@ AACEncoder* AACEncoder_Create(void) {
         }
     }
     
-    if (!encoder->transform) goto cleanup_fail;
+    if (!encoder->transform) {
+        err = AAC_ERR_ENCODER_NOT_FOUND;
+        goto cleanup_fail;
+    }
     
     // Set output type first (AAC encoders often need this)
     encoder->outputType = CreateAACType();
@@ -262,7 +317,10 @@ AACEncoder* AACEncoder_Create(void) {
         }
     }
     
-    if (FAILED(hr)) goto cleanup_fail;
+    if (FAILED(hr)) {
+        err = AAC_ERR_TYPE_NEGOTIATION;
+        goto cleanup_fail;
+    }
     
     // Get AudioSpecificConfig from output type
     UINT32 blobSize = 0;
@@ -298,21 +356,30 @@ AACEncoder* AACEncoder_Create(void) {
     hr = encoder->transform->lpVtbl->ProcessMessage(encoder->transform, MFT_MESSAGE_NOTIFY_BEGIN_STREAMING, 0);
     if (FAILED(hr)) {
         Logger_Log("AACEncoder: BEGIN_STREAMING failed 0x%08X\n", hr);
+        err = AAC_ERR_START_STREAM;
         goto cleanup_fail;
     }
     
     hr = encoder->transform->lpVtbl->ProcessMessage(encoder->transform, MFT_MESSAGE_NOTIFY_START_OF_STREAM, 0);
     if (FAILED(hr)) {
         Logger_Log("AACEncoder: START_OF_STREAM failed 0x%08X\n", hr);
+        err = AAC_ERR_START_STREAM;
         goto cleanup_fail;
     }
     
     encoder->initialized = TRUE;
+    if (outError) *outError = AAC_OK;
     return encoder;
     
 cleanup_fail:
+    if (outError) *outError = (err != AAC_OK) ? err : AAC_ERR_UNKNOWN;
     AACEncoder_Destroy(encoder);
     return NULL;
+}
+
+// Legacy wrapper for backward compatibility
+AACEncoder* AACEncoder_Create(void) {
+    return AACEncoder_CreateEx(NULL);
 }
 
 void AACEncoder_Destroy(AACEncoder* encoder) {

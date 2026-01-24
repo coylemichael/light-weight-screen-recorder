@@ -12,6 +12,7 @@
 
 #include <windows.h>
 #include "config.h"
+#include "aac_encoder.h"  // For AACEncoderError
 
 // Maximum encoded audio samples to store
 #define MAX_AUDIO_SAMPLES 16384
@@ -68,6 +69,7 @@ typedef struct {
     int audioVolume1;
     int audioVolume2;
     int audioVolume3;
+    volatile LONG audioError;  // AACEncoderError if audio init failed
 } ReplayBufferState;
 
 BOOL ReplayBuffer_Init(ReplayBufferState* state);

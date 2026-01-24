@@ -45,6 +45,7 @@ typedef void* GpImage;
 #include "encoder.h"
 #include "config.h"
 #include "replay_buffer.h"
+#include "aac_encoder.h"
 #include "logger.h"
 #include "constants.h"
 
@@ -254,6 +255,45 @@ static void ActionToolbar_OnMinimize(void);
 static void ActionToolbar_OnRecord(void);
 static void ActionToolbar_OnClose(void);
 static void ActionToolbar_OnSettings(void);
+
+/**
+ * Check for audio encoder errors after ReplayBuffer_Start and notify user.
+ * Shows a MessageBox if audio was requested but encoder failed.
+ */
+static void CheckAudioError(void) {
+    if (!g_config.audioEnabled) return;
+    
+    AACEncoderError err = (AACEncoderError)InterlockedCompareExchange(&g_replayBuffer.audioError, 0, 0);
+    if (err == AAC_OK) return;
+    
+    const char* msg = NULL;
+    switch (err) {
+        case AAC_ERR_ENCODER_NOT_FOUND:
+            msg = "AAC audio encoder not available.\n\n"
+                  "Windows Media Foundation AAC encoder is required for audio recording.\n"
+                  "Audio will be disabled for this session.";
+            break;
+        case AAC_ERR_TYPE_NEGOTIATION:
+            msg = "AAC encoder failed to initialize (type negotiation error).\n\n"
+                  "Audio will be disabled for this session.";
+            break;
+        case AAC_ERR_START_STREAM:
+            msg = "AAC encoder failed to start streaming.\n\n"
+                  "Audio will be disabled for this session.";
+            break;
+        case AAC_ERR_MEMORY:
+            msg = "Failed to allocate memory for audio encoder.\n\n"
+                  "Audio will be disabled for this session.";
+            break;
+        default:
+            msg = "Audio encoder initialization failed.\n\n"
+                  "Audio will be disabled for this session.";
+            break;
+    }
+    
+    Logger_Log("Audio encoder error displayed to user: %d\n", (int)err);
+    MessageBoxA(NULL, msg, "Audio Error", MB_OK | MB_ICONWARNING);
+}
 
 // Convert COLORREF to ARGB for GDI+
 static DWORD ColorRefToARGB(COLORREF cr, BYTE alpha) {
@@ -2199,6 +2239,7 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                         ReplayBuffer_Stop(&g_replayBuffer);
                         Sleep(1000);  // Give hung threads time to potentially recover
                         ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                        CheckAudioError();
                         Logger_Log("Replay buffer restarted after stall recovery\n");
                     }
                 }
@@ -3695,6 +3736,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         // Starting replay buffer
                         Logger_Log("Starting replay buffer from settings\n");
                         ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                        CheckAudioError();
                         BOOL ok = RegisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE, 0, g_config.replaySaveKey);
                         Logger_Log("RegisterHotKey from settings: %s (key=0x%02X)\n", ok ? "OK" : "FAILED", g_config.replaySaveKey);
                     } else if (!g_config.replayEnabled && wasEnabled) {
@@ -3789,7 +3831,26 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     break;
                     
                 case ID_CHK_AUDIO_ENABLED:
-                    g_config.audioEnabled = (IsDlgButtonChecked(hwnd, ID_CHK_AUDIO_ENABLED) == BST_CHECKED);
+                    if (IsDlgButtonChecked(hwnd, ID_CHK_AUDIO_ENABLED) == BST_CHECKED) {
+                        // User is trying to enable audio - check if encoder is available
+                        if (!AACEncoder_IsAvailable()) {
+                            MessageBoxA(hwnd,
+                                "AAC audio encoder is not available on this system.\n\n"
+                                "Audio recording requires the Microsoft AAC encoder which is\n"
+                                "included with Windows Media Feature Pack.\n\n"
+                                "On Windows N/KN editions, install the Media Feature Pack from:\n"
+                                "Settings > Apps > Optional features > Add a feature",
+                                "Audio Encoder Not Available",
+                                MB_OK | MB_ICONWARNING);
+                            // Uncheck the checkbox
+                            SendMessage(GetDlgItem(hwnd, ID_CHK_AUDIO_ENABLED), BM_SETCHECK, BST_UNCHECKED, 0);
+                            g_config.audioEnabled = FALSE;
+                        } else {
+                            g_config.audioEnabled = TRUE;
+                        }
+                    } else {
+                        g_config.audioEnabled = FALSE;
+                    }
                     break;
                 
                 case ID_CHK_DEBUG_LOGGING:
@@ -3833,6 +3894,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         if (g_replayBuffer.isBuffering) {
                             ReplayBuffer_Stop(&g_replayBuffer);
                             ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                            CheckAudioError();
                         }
                     }
                     break;
@@ -3850,6 +3912,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         if (g_replayBuffer.isBuffering) {
                             ReplayBuffer_Stop(&g_replayBuffer);
                             ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                            CheckAudioError();
                         }
                     }
                     break;
@@ -3867,6 +3930,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         if (g_replayBuffer.isBuffering) {
                             ReplayBuffer_Stop(&g_replayBuffer);
                             ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                            CheckAudioError();
                         }
                     }
                     break;

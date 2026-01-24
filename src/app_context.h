@@ -112,8 +112,8 @@ typedef struct ReplayVideoContext {
     /* NVENC encoder */
     void* encoder;                  /* NVENCEncoder* */
     
-    /* Sample buffer (circular buffer of encoded frames) */
-    void* sampleBuffer;             /* SampleBuffer* */
+    /* Frame buffer (circular buffer of encoded frames) */
+    void* frameBuffer;              /* FrameBuffer* */
     
     /* HEVC sequence headers */
     BYTE seqHeader[256];            /* VPS/SPS/PPS data */
