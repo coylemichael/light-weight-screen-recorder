@@ -1,5 +1,66 @@
 # Changelog
 
+## [1.2.15] - 2026-01-24
+
+### Improved
+- **Comprehensive line-by-line code review with fixes across 9 files**
+  - Systematic review of error handling, resource management, and thread safety
+  - All identified issues fixed and committed
+
+### Fixed
+
+**logger.c:**
+- Implement missing `Logger_GetHeartbeatAge()` function (was declared but not defined)
+- Fix `Logger_LogThread()` to use atomic read for `g_log.initialized`
+- Add explicit casts for format specifiers in heartbeat status
+
+**config.c:**
+- Check `GetModuleFileNameA` return value, handle truncation
+- Handle `strrchr()` returning NULL (no backslash in path)
+- Check `CreateDirectoryA` result, fallback on failure
+- Validate loaded config values (format, quality, replay duration, FPS, volumes)
+
+**audio_device.c:**
+- Check `GetCount()` HRESULT before using count
+- Check all `GetId()` HRESULTs (5 occurrences)
+- `GetDefaultOutput`/`GetDefaultInput` now return FALSE if GetId fails
+- Replace inefficient `AudioDevice_GetById` (was enumerating all devices) with direct `IMMDeviceEnumerator::GetDevice` lookup
+- Query `IMMEndpoint` for proper device type detection
+- Add `IID_IMMEndpoint` GUID to audio_guids.h
+
+**border.c:**
+- Check `GetDC(NULL)` and `CreateCompatibleDC` return values
+- Use goto cleanup pattern in `UpdateBorderBitmap`/`UpdatePreviewBorderBitmap`
+- Fix duplicate `SetLayeredWindowAttributes` call (first was ineffective without WS_EX_LAYERED)
+- Check `CreateWindowExA` return in `AreaSelector_Show`
+- Use `GET_X_LPARAM`/`GET_Y_LPARAM` for proper signed coordinates
+
+**action_toolbar.c:**
+- Check `GetDC(NULL)` and `CreateCompatibleDC` return values
+- Use goto cleanup pattern in `UpdateToolbarBitmap`
+- Check `RegisterClassExA` return value (allow ERROR_CLASS_ALREADY_EXISTS)
+- Use `GET_X_LPARAM`/`GET_Y_LPARAM` for proper signed coordinates
+- Include `<windowsx.h>` with `#undef DeleteFont` to avoid macro conflict
+
+**gdiplus_api.c:**
+- Add failure checks for manual `GetProcAddress` calls (`BrushDelete`, `PenDelete`, `SetTextRenderingHint`, `DrawRectangle`, `CreatePen1`)
+
+**util.c:**
+- Add defensive division by zero protection in `Util_CalculateTimestamp`
+- Add defensive division by zero protection in `Util_CalculateFrameDuration`
+- `Util_CalculateAspectRect` returns sourceBounds if ratioW/H <= 0 (native mode)
+
+**mem_utils.c:**
+- Add integer overflow check in `MemDebug_Calloc` before `count * size` multiplication
+
+**main.c:**
+- Check `CreateMutexA` for `ERROR_ALREADY_EXISTS` (race condition between instances)
+- Add `GdiplusAPI_Shutdown` to `Capture_Init` failure cleanup path
+- Add `GdiplusAPI_Shutdown` to `Overlay_Create` failure cleanup path
+- Add logger fallback when exe path has no backslash
+
+---
+
 ## [1.2.14] - 2026-01-20
 
 ### Security
