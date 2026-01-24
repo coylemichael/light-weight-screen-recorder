@@ -12,8 +12,13 @@
 
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
+#include <windowsx.h>  // GET_X_LPARAM, GET_Y_LPARAM
 #include <dwmapi.h>
 #include "gdiplus_api.h"
+
+// windowsx.h defines DeleteFont/SelectFont macros that conflict with GDI+ function names
+#undef DeleteFont
+#undef SelectFont
 
 /* Additional GDI+ types needed by this module */
 typedef DWORD ARGB;
@@ -186,6 +191,11 @@ static void UpdateToolbarBitmap(void) {
     int width = TOOLBAR_WIDTH;
     int height = TOOLBAR_HEIGHT;
     
+    HDC screenDC = NULL;
+    HDC memDC = NULL;
+    HBITMAP hBitmap = NULL;
+    HBITMAP oldBitmap = NULL;
+    
     // Create 32-bit DIB
     BITMAPINFO bmi = {0};
     bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
@@ -196,15 +206,16 @@ static void UpdateToolbarBitmap(void) {
     bmi.bmiHeader.biCompression = BI_RGB;
     
     void* bits = NULL;
-    HDC screenDC = GetDC(NULL);
-    HDC memDC = CreateCompatibleDC(screenDC);
-    HBITMAP hBitmap = CreateDIBSection(screenDC, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
-    if (!hBitmap) {
-        DeleteDC(memDC);
-        ReleaseDC(NULL, screenDC);
-        return;
-    }
-    HBITMAP oldBitmap = SelectObject(memDC, hBitmap);
+    screenDC = GetDC(NULL);
+    if (!screenDC) return;
+    
+    memDC = CreateCompatibleDC(screenDC);
+    if (!memDC) goto cleanup;
+    
+    hBitmap = CreateDIBSection(screenDC, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
+    if (!hBitmap) goto cleanup;
+    
+    oldBitmap = SelectObject(memDC, hBitmap);
     
     // Paint using GDI+
     PaintToolbar(memDC, width, height);
@@ -220,10 +231,11 @@ static void UpdateToolbarBitmap(void) {
     
     UpdateLayeredWindow(g_ui.wnd, screenDC, &ptDst, &sizeWnd, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
     
-    SelectObject(memDC, oldBitmap);
-    DeleteObject(hBitmap);
-    DeleteDC(memDC);
-    ReleaseDC(NULL, screenDC);
+cleanup:
+    if (oldBitmap) SelectObject(memDC, oldBitmap);
+    if (hBitmap) DeleteObject(hBitmap);
+    if (memDC) DeleteDC(memDC);
+    if (screenDC) ReleaseDC(NULL, screenDC);
 }
 
 // Hit test to find which button is under the cursor
@@ -273,8 +285,8 @@ static LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         }
         
         case WM_MOUSEMOVE: {
-            int x = LOWORD(lParam);
-            int y = HIWORD(lParam);
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
             int btn = HitTestButton(x, y);
             
             if (btn != g_ui.hoveredButton) {
@@ -296,8 +308,8 @@ static LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             return 0;
         
         case WM_LBUTTONDOWN: {
-            int x = LOWORD(lParam);
-            int y = HIWORD(lParam);
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
             int btn = HitTestButton(x, y);
             if (btn >= 0) {
                 g_ui.pressedButton = btn;
@@ -309,8 +321,8 @@ static LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         
         case WM_LBUTTONUP: {
             ReleaseCapture();
-            int x = LOWORD(lParam);
-            int y = HIWORD(lParam);
+            int x = GET_X_LPARAM(lParam);
+            int y = GET_Y_LPARAM(lParam);
             int btn = HitTestButton(x, y);
             
             if (btn >= 0 && btn == g_ui.pressedButton) {
@@ -354,7 +366,10 @@ BOOL ActionToolbar_Init(HINSTANCE hInstance) {
     wc.hInstance = hInstance;
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.lpszClassName = "LWSRActionToolbar";
-    RegisterClassExA(&wc);
+    
+    if (!RegisterClassExA(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
+        return FALSE;
+    }
     
     // Create layered window
     g_ui.wnd = CreateWindowExA(
