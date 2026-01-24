@@ -61,6 +61,8 @@ LONGLONG Util_CalculateTimestamp(int frameNumber, int fps) {
     LWSR_ASSERT(frameNumber >= 0);
     LWSR_ASSERT(fps > 0);
     
+    if (fps <= 0) return 0;  // Defensive: avoid division by zero
+    
     // Using exact division: (frame * 10000000) / fps
     // This avoids cumulative rounding errors that occur with additive timing
     return (LONGLONG)frameNumber * MF_UNITS_PER_SECOND / fps;
@@ -71,6 +73,8 @@ LONGLONG Util_CalculateFrameDuration(int frameNumber, int fps) {
     // Preconditions
     LWSR_ASSERT(frameNumber >= 0);
     LWSR_ASSERT(fps > 0);
+    
+    if (fps <= 0) return 0;  // Defensive: avoid division by zero
     
     // Duration = next_timestamp - this_timestamp
     LONGLONG thisTime = Util_CalculateTimestamp(frameNumber, fps);
@@ -102,6 +106,9 @@ void Util_GetAspectRatioDimensions(int aspectIndex, int* ratioW, int* ratioH) {
 
 // Calculate aspect ratio crop rectangle centered on source bounds
 RECT Util_CalculateAspectRect(RECT sourceBounds, int ratioW, int ratioH) {
+    // Native mode (ratioW/H == 0) means no crop - return source as-is
+    if (ratioW <= 0 || ratioH <= 0) return sourceBounds;
+    
     int sourceW = sourceBounds.right - sourceBounds.left;
     int sourceH = sourceBounds.bottom - sourceBounds.top;
     
