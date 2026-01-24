@@ -51,7 +51,9 @@ BOOL GdiplusAPI_Init(GdiplusFunctions* gdi) {
     LOAD_GDIP_FUNC(CreateSolidFill);
     /* Load with explicit names to avoid Windows macro conflict */
     gdi->BrushDelete = (fn_GdipDeleteBrush)GetProcAddress(gdi->module, "GdipDeleteBrush");
+    if (!gdi->BrushDelete) { Logger_Log("GDI+: Failed to load GdipDeleteBrush\n"); failed = TRUE; }
     gdi->PenDelete = (fn_GdipDeletePen)GetProcAddress(gdi->module, "GdipDeletePen");
+    if (!gdi->PenDelete) { Logger_Log("GDI+: Failed to load GdipDeletePen\n"); failed = TRUE; }
     LOAD_GDIP_FUNC(CreatePath);
     LOAD_GDIP_FUNC(DeletePath);
     LOAD_GDIP_FUNC(AddPathArc);
@@ -74,8 +76,11 @@ BOOL GdiplusAPI_Init(GdiplusFunctions* gdi) {
     
     /* These have slightly different names - load manually */
     gdi->SetTextRenderingHint = (fn_GdipSetTextRenderingHint)GetProcAddress(gdi->module, "GdipSetTextRenderingHint");
+    if (!gdi->SetTextRenderingHint) { Logger_Log("GDI+: Failed to load GdipSetTextRenderingHint\n"); failed = TRUE; }
     gdi->DrawRectangle = (fn_GdipDrawRectangle)GetProcAddress(gdi->module, "GdipDrawRectangle");
+    if (!gdi->DrawRectangle) { Logger_Log("GDI+: Failed to load GdipDrawRectangle\n"); failed = TRUE; }
     gdi->CreatePen1 = (fn_GdipCreatePen1)GetProcAddress(gdi->module, "GdipCreatePen1");
+    if (!gdi->CreatePen1) { Logger_Log("GDI+: Failed to load GdipCreatePen1\n"); failed = TRUE; }
     
     if (failed) {
         Logger_Log("GDI+: Some functions failed to load\n");
