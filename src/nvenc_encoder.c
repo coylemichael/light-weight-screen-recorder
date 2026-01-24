@@ -202,11 +202,12 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
             goto fail;
         }
         hr = dxgiDevice->lpVtbl->GetAdapter(dxgiDevice, &adapter);
-        dxgiDevice->lpVtbl->Release(dxgiDevice);
         if (FAILED(hr)) {
             NvLog("NVENCEncoder: GetAdapter failed (0x%08X)\n", hr);
+            dxgiDevice->lpVtbl->Release(dxgiDevice);
             goto fail;
         }
+        dxgiDevice->lpVtbl->Release(dxgiDevice);
         
         D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_0 };
         D3D_FEATURE_LEVEL featureLevel;
@@ -1025,6 +1026,7 @@ static BOOL CreateInputTextures(NVENCEncoder* enc) {
                                                       NULL, &enc->stagingTextures[i]);
         if (FAILED(hr)) {
             NvLog("NVENCEncoder: CreateTexture2D staging[%d] failed (0x%08X)\n", i, hr);
+            DestroyInputTextures(enc);  // Clean up partial allocations
             return FALSE;
         }
         
@@ -1033,6 +1035,7 @@ static BOOL CreateInputTextures(NVENCEncoder* enc) {
             enc->stagingTextures[i], &IID_IDXGIKeyedMutex, (void**)&enc->srcMutex[i]);
         if (FAILED(hr)) {
             NvLog("NVENCEncoder: QueryInterface IDXGIKeyedMutex src[%d] failed\n", i);
+            DestroyInputTextures(enc);  // Clean up partial allocations
             return FALSE;
         }
         
@@ -1042,12 +1045,14 @@ static BOOL CreateInputTextures(NVENCEncoder* enc) {
             enc->stagingTextures[i], &IID_IDXGIResource, (void**)&dxgiRes);
         if (FAILED(hr)) {
             NvLog("NVENCEncoder: QueryInterface IDXGIResource[%d] failed\n", i);
+            DestroyInputTextures(enc);  // Clean up partial allocations
             return FALSE;
         }
         hr = dxgiRes->lpVtbl->GetSharedHandle(dxgiRes, &enc->sharedHandles[i]);
         dxgiRes->lpVtbl->Release(dxgiRes);
         if (FAILED(hr)) {
             NvLog("NVENCEncoder: GetSharedHandle[%d] failed\n", i);
+            DestroyInputTextures(enc);  // Clean up partial allocations
             return FALSE;
         }
         
@@ -1059,6 +1064,7 @@ static BOOL CreateInputTextures(NVENCEncoder* enc) {
             (void**)&enc->inputTextures[i]);
         if (FAILED(hr)) {
             NvLog("NVENCEncoder: OpenSharedResource[%d] failed (0x%08X)\n", i, hr);
+            DestroyInputTextures(enc);  // Clean up partial allocations
             return FALSE;
         }
         
@@ -1067,6 +1073,7 @@ static BOOL CreateInputTextures(NVENCEncoder* enc) {
             enc->inputTextures[i], &IID_IDXGIKeyedMutex, (void**)&enc->encMutex[i]);
         if (FAILED(hr)) {
             NvLog("NVENCEncoder: QueryInterface IDXGIKeyedMutex enc[%d] failed\n", i);
+            DestroyInputTextures(enc);  // Clean up partial allocations
             return FALSE;
         }
         
@@ -1087,6 +1094,7 @@ static BOOL CreateInputTextures(NVENCEncoder* enc) {
         NVENCSTATUS st = enc->fn.nvEncRegisterResource(enc->encoder, &regParams);
         if (st != NV_ENC_SUCCESS) {
             NvLog("NVENCEncoder: RegisterResource[%d] failed (%d)\n", i, st);
+            DestroyInputTextures(enc);  // Clean up partial allocations
             return FALSE;
         }
         enc->registeredResources[i] = regParams.registeredResource;

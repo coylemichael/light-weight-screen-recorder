@@ -255,10 +255,10 @@ BOOL ReplayBuffer_Init(ReplayBufferState* state) {
     if (!state->hReadyEvent || !state->hSaveRequestEvent || 
         !state->hSaveCompleteEvent || !state->hStopEvent) {
         ReplayLog("Failed to create synchronization events\n");
-        if (state->hReadyEvent) CloseHandle(state->hReadyEvent);
-        if (state->hSaveRequestEvent) CloseHandle(state->hSaveRequestEvent);
-        if (state->hSaveCompleteEvent) CloseHandle(state->hSaveCompleteEvent);
-        if (state->hStopEvent) CloseHandle(state->hStopEvent);
+        if (state->hReadyEvent) { CloseHandle(state->hReadyEvent); state->hReadyEvent = NULL; }
+        if (state->hSaveRequestEvent) { CloseHandle(state->hSaveRequestEvent); state->hSaveRequestEvent = NULL; }
+        if (state->hSaveCompleteEvent) { CloseHandle(state->hSaveCompleteEvent); state->hSaveCompleteEvent = NULL; }
+        if (state->hStopEvent) { CloseHandle(state->hStopEvent); state->hStopEvent = NULL; }
         return FALSE;
     }
     

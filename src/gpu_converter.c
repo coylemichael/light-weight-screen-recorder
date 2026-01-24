@@ -36,7 +36,7 @@ BOOL GPUConverter_Init(GPUConverter* conv, ID3D11Device* device, int width, int 
     device->lpVtbl->GetImmediateContext(device, &conv->context);
     if (!conv->context) {
         GPULog("GPUConverter: Failed to get device context\n");
-        return FALSE;
+        goto fail;  // Use goto for consistent cleanup pattern
     }
     
     // Get video device interface

@@ -1171,7 +1171,14 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
         NULL, NULL, hInstance, NULL
     );
     
-    if (!g_overlayWnd) return FALSE;
+    if (!g_overlayWnd) {
+        // Clean up settings icon on failure
+        if (g_settingsImage) {
+            FreePNGImage(g_settingsImage);
+            g_settingsImage = NULL;
+        }
+        return FALSE;
+    }
     
     // Initial overlay bitmap will be set by UpdateOverlayBitmap when mode is selected
     
@@ -1194,6 +1201,12 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     
     if (!g_controlWnd) {
         DestroyWindow(g_overlayWnd);
+        g_overlayWnd = NULL;
+        // Clean up settings icon on failure
+        if (g_settingsImage) {
+            FreePNGImage(g_settingsImage);
+            g_settingsImage = NULL;
+        }
         return FALSE;
     }
     
@@ -1209,6 +1222,18 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
         -9999, -9999, CROSSHAIR_SIZE, CROSSHAIR_SIZE,  // Start off-screen
         NULL, NULL, hInstance, NULL
     );
+    
+    if (!g_windows.crosshairWnd) {
+        DestroyWindow(g_controlWnd);
+        g_controlWnd = NULL;
+        DestroyWindow(g_overlayWnd);
+        g_overlayWnd = NULL;
+        if (g_settingsImage) {
+            FreePNGImage(g_settingsImage);
+            g_settingsImage = NULL;
+        }
+        return FALSE;
+    }
     
     SetLayeredWindowAttributes(g_windows.crosshairWnd, RGB(0, 0, 0), 200, LWA_ALPHA);
     
@@ -1368,6 +1393,7 @@ void Recording_Start(void) {
     g_recording.thread = CreateThread(NULL, 0, RecordingThread, NULL, 0, NULL);
     if (!g_recording.thread) {
         Logger_Log("Recording_Start: CreateThread failed\n");
+        Encoder_Finalize(&g_recording.encoder);  // Clean up encoder on thread failure
         InterlockedExchange(&g_isRecording, FALSE);
         Overlay_SetRecordingState(FALSE);
         Border_Hide();

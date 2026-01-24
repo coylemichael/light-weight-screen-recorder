@@ -217,6 +217,7 @@ BOOL AudioDevice_GetById(const char* deviceId, AudioDeviceInfo* info) {
         }
         endpoint->lpVtbl->Release(endpoint);
     } else {
+        // QueryInterface failed - device is still valid, continue with default type
         info->type = AUDIO_DEVICE_OUTPUT;
     }
     

@@ -198,7 +198,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     if (FAILED(hr)) {
         MessageBoxA(NULL, "Failed to initialize COM", "Error", MB_OK | MB_ICONERROR);
-        return 1;
+        goto cleanup_mutex;
     }
     
     // Set AppUserModelID for taskbar pinning
@@ -208,8 +208,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     hr = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
     if (FAILED(hr)) {
         MessageBoxA(NULL, "Failed to initialize Media Foundation", "Error", MB_OK | MB_ICONERROR);
-        CoUninitialize();
-        return 1;
+        goto cleanup_com;
     }
     
     // Load configuration
@@ -218,28 +217,19 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     // Initialize shared GDI+ (used by overlay and action_toolbar)
     if (!GdiplusAPI_Init(&g_gdip)) {
         MessageBoxA(NULL, "Failed to initialize GDI+", "Error", MB_OK | MB_ICONERROR);
-        MFShutdown();
-        CoUninitialize();
-        return 1;
+        goto cleanup_mf;
     }
     
     // Initialize capture system
     if (!Capture_Init(&g_capture)) {
         MessageBoxA(NULL, "Failed to initialize screen capture", "Error", MB_OK | MB_ICONERROR);
-        GdiplusAPI_Shutdown(&g_gdip);
-        MFShutdown();
-        CoUninitialize();
-        return 1;
+        goto cleanup_gdi;
     }
     
     // Create and show overlay
     if (!Overlay_Create(hInstance)) {
         MessageBoxA(NULL, "Failed to create overlay", "Error", MB_OK | MB_ICONERROR);
-        Capture_Shutdown(&g_capture);
-        GdiplusAPI_Shutdown(&g_gdip);
-        MFShutdown();
-        CoUninitialize();
-        return 1;
+        goto cleanup_capture;
     }
     
     // Initialize replay buffer
@@ -354,4 +344,21 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     }
     
     return (int)msg.wParam;
+    
+    // Error cleanup labels - reverse order of initialization
+cleanup_capture:
+    Capture_Shutdown(&g_capture);
+cleanup_gdi:
+    GdiplusAPI_Shutdown(&g_gdip);
+cleanup_mf:
+    MFShutdown();
+cleanup_com:
+    CoUninitialize();
+cleanup_mutex:
+    if (g_mutex) {
+        ReleaseMutex(g_mutex);
+        CloseHandle(g_mutex);
+    }
+    CrashHandler_Shutdown();
+    return 1;
 }

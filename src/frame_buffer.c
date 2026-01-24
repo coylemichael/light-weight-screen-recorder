@@ -356,7 +356,8 @@ BOOL FrameBuffer_WriteToFile(FrameBuffer* buf, const char* outputPath) {
     BufLog("WriteToFile: deep copying frames...\n");
     int copiedCount = 0;
     size_t totalBytes = 0;
-    for (int i = startOffset; i < count; i++) {
+    BOOL allocFailed = FALSE;
+    for (int i = startOffset; i < count && !allocFailed; i++) {
         BufferedFrame* src = &buf->frames[(buf->tail + i) % buf->capacity];
         if (src->data && src->size > 0) {
             frames[copiedCount].data = (BYTE*)malloc(src->size);
@@ -368,16 +369,21 @@ BOOL FrameBuffer_WriteToFile(FrameBuffer* buf, const char* outputPath) {
                 frames[copiedCount].isKeyframe = src->isKeyframe;
                 totalBytes += src->size;
                 copiedCount++;
+            } else {
+                allocFailed = TRUE;
             }
         }
     }
     BufLog("WriteToFile: copied %d frames (%zu bytes total)\n", copiedCount, totalBytes);
     
-    // If no frames were copied, free the array and return failure
-    if (copiedCount == 0) {
+    // If no frames were copied or allocation failed, clean up and return failure
+    if (copiedCount == 0 || allocFailed) {
+        for (int i = 0; i < copiedCount; i++) {
+            if (frames[i].data) free(frames[i].data);
+        }
         free(frames);
         LeaveCriticalSection(&buf->lock);
-        BufLog("WriteToFile: no frames could be copied\n");
+        BufLog("WriteToFile: %s\n", allocFailed ? "malloc failed during copy" : "no frames could be copied");
         return FALSE;
     }
     
@@ -473,9 +479,13 @@ BOOL FrameBuffer_GetFramesForMuxing(FrameBuffer* buf, MuxerSample** outFrames, i
         firstTimestamp = firstFrame->timestamp;
     }
     
+    // Zero-initialize to ensure safe cleanup on partial allocation failure
+    memset(frames, 0, allocSize);
+    
     // Deep copy frames starting from keyframe while holding lock (prevents use-after-free)
     int copiedCount = 0;
-    for (int i = startOffset; i < count; i++) {
+    BOOL allocFailed = FALSE;
+    for (int i = startOffset; i < count && !allocFailed; i++) {
         BufferedFrame* src = &buf->frames[(buf->tail + i) % buf->capacity];
         if (src->data && src->size > 0) {
             frames[copiedCount].data = (BYTE*)malloc(src->size);
@@ -486,14 +496,21 @@ BOOL FrameBuffer_GetFramesForMuxing(FrameBuffer* buf, MuxerSample** outFrames, i
                 frames[copiedCount].duration = src->duration;
                 frames[copiedCount].isKeyframe = src->isKeyframe;
                 copiedCount++;
+            } else {
+                // Allocation failed - will clean up after releasing lock
+                allocFailed = TRUE;
             }
         }
     }
     
     LeaveCriticalSection(&buf->lock);
     
-    // Free the array if no frames were successfully copied
-    if (copiedCount == 0) {
+    // Free the array if no frames were successfully copied or allocation failed
+    if (copiedCount == 0 || allocFailed) {
+        // Free any frames that were copied before failure
+        for (int i = 0; i < copiedCount; i++) {
+            if (frames[i].data) free(frames[i].data);
+        }
         free(frames);
         return FALSE;
     }

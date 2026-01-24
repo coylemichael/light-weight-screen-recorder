@@ -508,14 +508,17 @@ AudioCaptureContext* AudioCapture_Create(
     AudioCaptureContext* ctx = (AudioCaptureContext*)calloc(1, sizeof(AudioCaptureContext));
     if (!ctx) return NULL;
     
+    BOOL csInitialized = FALSE;
+    
     InitializeCriticalSection(&ctx->mixLock);
+    csInitialized = TRUE;
     QueryPerformanceFrequency(&ctx->perfFreq);
     
     // Allocate mix buffer
     ctx->mixBufferSize = MIX_BUFFER_SIZE;
     ctx->mixBuffer = (BYTE*)malloc(ctx->mixBufferSize);
     if (!ctx->mixBuffer) {
-        DeleteCriticalSection(&ctx->mixLock);
+        if (csInitialized) DeleteCriticalSection(&ctx->mixLock);
         free(ctx);
         return NULL;
     }
@@ -895,6 +898,22 @@ BOOL AudioCapture_Start(AudioCaptureContext* ctx) {
     if (!ctx->captureThread) {
         Logger_Log("AudioCapture: CreateThread failed for mix thread\n");
         InterlockedExchange(&ctx->running, FALSE);
+        
+        // Clean up source threads that were started
+        for (int i = 0; i < ctx->sourceCount; i++) {
+            AudioCaptureSource* src = ctx->sources[i];
+            if (!src) continue;
+            
+            InterlockedExchange(&src->active, FALSE);
+            if (src->audioClient) {
+                src->audioClient->lpVtbl->Stop(src->audioClient);
+            }
+            if (src->captureThread) {
+                WaitForSingleObject(src->captureThread, 1000);
+                CloseHandle(src->captureThread);
+                src->captureThread = NULL;
+            }
+        }
         return FALSE;
     }
     
