@@ -145,6 +145,13 @@ void* MemDebug_Malloc(size_t size, const char* file, int line) {
 }
 
 void* MemDebug_Calloc(size_t count, size_t size, const char* file, int line) {
+    // Check for integer overflow before multiplication
+    if (count != 0 && size > SIZE_MAX / count) {
+        Logger_Log("MemDebug: Calloc overflow at %s:%d (count=%zu, size=%zu)\n",
+                   GetFilename(file), line, count, size);
+        return NULL;
+    }
+    
     size_t total = count * size;
     void* ptr = MemDebug_Malloc(total, file, line);
     if (ptr) {
