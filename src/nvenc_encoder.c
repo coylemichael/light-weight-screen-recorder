@@ -698,6 +698,9 @@ BOOL NVENCEncoder_GetSequenceHeader(NVENCEncoder* enc, BYTE* buffer, DWORD buffe
     LWSR_ASSERT(bufferSize > 0);
     LWSR_ASSERT(outSize != NULL);
     
+    // Initialize output before early returns
+    if (outSize) *outSize = 0;
+    
     if (!enc || !enc->initialized || !buffer || !outSize) return FALSE;
     
     uint32_t payloadSize = 0;

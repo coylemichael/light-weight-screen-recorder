@@ -269,12 +269,12 @@ static int FindOutputForRegion(IDXGIAdapter* adapter, RECT region) {
         IDXGIOutput* output = NULL;
         if (FAILED(adapter->lpVtbl->EnumOutputs(adapter, i, &output))) break;
         
-        DXGI_OUTPUT_DESC desc;
+        DXGI_OUTPUT_DESC desc = {0};
         HRESULT hr = output->lpVtbl->GetDesc(output, &desc);
         output->lpVtbl->Release(output);
         if (FAILED(hr)) continue;
         
-        RECT overlap;
+        RECT overlap = {0};
         if (IntersectRect(&overlap, &region, &desc.DesktopCoordinates)) {
             int overlapArea = (overlap.right - overlap.left) * (overlap.bottom - overlap.top);
             if (overlapArea > bestOverlap) {
@@ -453,7 +453,7 @@ BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
     if (!state || !state->initialized || !state->duplication) return NULL;
     
     IDXGIResource* desktopResource = NULL;
-    DXGI_OUTDUPL_FRAME_INFO frameInfo;
+    DXGI_OUTDUPL_FRAME_INFO frameInfo = {0};
     
     // Try to acquire next frame - wait up to 16ms for vsync
     HRESULT hr = state->duplication->lpVtbl->AcquireNextFrame(
@@ -491,7 +491,7 @@ BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
     }
     
     // Create or update staging texture
-    D3D11_TEXTURE2D_DESC desc;
+    D3D11_TEXTURE2D_DESC desc = {0};
     desktopTexture->lpVtbl->GetDesc(desktopTexture, &desc);
     
     if (!state->stagingTexture) {
@@ -516,7 +516,7 @@ BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
     }
     
     // Copy region to staging texture
-    D3D11_BOX srcBox;
+    D3D11_BOX srcBox = {0};
     srcBox.left = state->captureRect.left - state->outputDesc.DesktopCoordinates.left;
     srcBox.top = state->captureRect.top - state->outputDesc.DesktopCoordinates.top;
     srcBox.right = srcBox.left + state->captureWidth;
@@ -533,7 +533,7 @@ BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
     desktopTexture->lpVtbl->Release(desktopTexture);
     
     // Map staging texture to CPU memory
-    D3D11_MAPPED_SUBRESOURCE mapped;
+    D3D11_MAPPED_SUBRESOURCE mapped = {0};
     hr = state->context->lpVtbl->Map(state->context, (ID3D11Resource*)state->stagingTexture,
                                       0, D3D11_MAP_READ, 0, &mapped);
     
@@ -575,7 +575,7 @@ ID3D11Texture2D* Capture_GetFrameTexture(CaptureState* state, UINT64* timestamp)
     if (!state || !state->initialized || !state->duplication) return NULL;
     
     IDXGIResource* desktopResource = NULL;
-    DXGI_OUTDUPL_FRAME_INFO frameInfo;
+    DXGI_OUTDUPL_FRAME_INFO frameInfo = {0};
     
     // Use 0ms timeout - caller handles frame pacing, don't wait here
     HRESULT hr = state->duplication->lpVtbl->AcquireNextFrame(
@@ -620,7 +620,7 @@ ID3D11Texture2D* Capture_GetFrameTexture(CaptureState* state, UINT64* timestamp)
     
     // Create or reuse GPU texture (stays on GPU, no CPU access)
     if (!state->gpuTexture) {
-        D3D11_TEXTURE2D_DESC desc;
+        D3D11_TEXTURE2D_DESC desc = {0};
         desktopTexture->lpVtbl->GetDesc(desktopTexture, &desc);
         
         D3D11_TEXTURE2D_DESC gpuDesc = {0};
@@ -644,7 +644,7 @@ ID3D11Texture2D* Capture_GetFrameTexture(CaptureState* state, UINT64* timestamp)
     }
     
     // Copy region to GPU texture (GPU to GPU copy)
-    D3D11_BOX srcBox;
+    D3D11_BOX srcBox = {0};
     srcBox.left = state->captureRect.left - state->outputDesc.DesktopCoordinates.left;
     srcBox.top = state->captureRect.top - state->outputDesc.DesktopCoordinates.top;
     srcBox.right = srcBox.left + state->captureWidth;

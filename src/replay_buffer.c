@@ -506,7 +506,7 @@ BOOL ReplayBuffer_Save(ReplayBufferState* state, const char* outputPath) {
         }
         
         // Pump messages to keep UI responsive and prevent "not responding"
-        MSG msg;
+        MSG msg = {0};
         while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
             // Don't process WM_QUIT - let the main loop handle it
             if (msg.message == WM_QUIT) {
@@ -883,6 +883,9 @@ static BOOL CopyAudioSamplesForMuxing(ReplayAudioState* audio, MuxerAudioSample*
     MuxerAudioSample* audioCopy = (MuxerAudioSample*)malloc(allocSize);
     if (!audioCopy) return TRUE;
     
+    /* Zero-initialize to ensure safe cleanup on partial allocation failure */
+    memset(audioCopy, 0, allocSize);
+    
     LONGLONG firstAudioTs = audio->samples[0].timestamp;
     int copiedCount = 0;
     
@@ -1132,7 +1135,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
             int count = FrameBuffer_GetCount(&video->frameBuffer);
             
             /* Calculate actual capture stats for diagnostics */
-            LARGE_INTEGER nowTime;
+            LARGE_INTEGER nowTime = {0};
             QueryPerformanceCounter(&nowTime);
             double realElapsedSec = (double)(nowTime.QuadPart - captureStartTime.QuadPart) / perfFreq.QuadPart;
             double actualFPS = (realElapsedSec > 0) ? frameCount / realElapsedSec : 0;
@@ -1173,7 +1176,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
         }
         
         /* === FRAME CAPTURE (GPU PATH) === */
-        LARGE_INTEGER currentTime;
+        LARGE_INTEGER currentTime = {0};
         QueryPerformanceCounter(&currentTime);
         double frameElapsedMs = (double)(currentTime.QuadPart - lastFrameTime.QuadPart) * 1000.0 / perfFreq.QuadPart;
         
@@ -1308,7 +1311,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
             
             /* Periodic log with actual FPS calculation */
             if (frameCount - lastLogFrame >= fps * 5) {
-                LARGE_INTEGER nowTime;
+                LARGE_INTEGER nowTime = {0};
                 QueryPerformanceCounter(&nowTime);
                 double logElapsedSec = (double)(nowTime.QuadPart - captureStartTime.QuadPart) / perfFreq.QuadPart;
                 double actualFPS = frameCount / logElapsedSec;
