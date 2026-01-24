@@ -149,9 +149,15 @@ Main Thread                    Buffer Thread
      │                              │
      ├── ReplayBuffer_Start() ─────▶│ (spawn)
      │                              ├── Capture → Encode → Buffer (loop)
-     ├── ReplayBuffer_Save() ──────▶│ (signal) → WriteToFile()
+     ├── ReplayBuffer_SaveAsync() ─▶│ (signal) → WriteToFile() → PostMessage()
      └── ReplayBuffer_Stop() ──────▶│ (terminate)
 ```
+
+**Async Save API (January 2026):** To prevent UI hangs during slow disk/network writes (e.g., OneDrive sync), save is asynchronous:
+- `ReplayBuffer_SaveAsync()` returns immediately after signaling the buffer thread
+- Buffer thread performs MP4 muxing, then posts `WM_REPLAY_SAVE_COMPLETE` to notify completion
+- Main thread remains responsive (heartbeats, message pumping) during save
+- Legacy `ReplayBuffer_Save()` retained for testing (uses message pumping while waiting)
 
 ---
 

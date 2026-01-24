@@ -108,9 +108,9 @@ static volatile LONG g_watchdogRunning = FALSE;
 
 /*
  * Crash handler initialized flag.
- * Thread Access: [Main thread writes, Any thread reads]
+ * Thread Access: [Any thread - uses atomic operations]
  */
-static BOOL g_crashHandlerInitialized = FALSE;
+static volatile LONG g_crashHandlerInitialized = FALSE;
 
 /*
  * Reserved memory for stack overflow handling.
@@ -548,7 +548,8 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
 // ============================================================================
 
 void CrashHandler_Init(void) {
-    if (g_crashHandlerInitialized) return;
+    /* Thread-safe check using atomic compare-exchange */
+    if (InterlockedCompareExchange(&g_crashHandlerInitialized, FALSE, FALSE)) return;
     
     InitializeCriticalSection(&g_crashLock);
     
@@ -575,11 +576,12 @@ void CrashHandler_Init(void) {
     g_stackOverflowGuard = VirtualAlloc(NULL, STACK_OVERFLOW_RESERVE, 
                                          MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
     
-    g_crashHandlerInitialized = TRUE;
+    InterlockedExchange(&g_crashHandlerInitialized, TRUE);
 }
 
 void CrashHandler_StartWatchdog(void) {
-    if (!g_crashHandlerInitialized) return;
+    /* Thread-safe check using atomic read */
+    if (!InterlockedCompareExchange(&g_crashHandlerInitialized, FALSE, FALSE)) return;
     if (g_watchdogThread) return;  // Already running
     
     InterlockedExchange(&g_watchdogRunning, TRUE);
@@ -605,7 +607,8 @@ void CrashHandler_Heartbeat(void) {
 }
 
 void CrashHandler_Shutdown(void) {
-    if (!g_crashHandlerInitialized) return;
+    /* Thread-safe check using atomic read */
+    if (!InterlockedCompareExchange(&g_crashHandlerInitialized, FALSE, FALSE)) return;
     
     // Stop watchdog
     CrashHandler_StopWatchdog();
@@ -628,7 +631,7 @@ void CrashHandler_Shutdown(void) {
     }
     
     DeleteCriticalSection(&g_crashLock);
-    g_crashHandlerInitialized = FALSE;
+    InterlockedExchange(&g_crashHandlerInitialized, FALSE);
 }
 
 // Force crash for testing (debug only)

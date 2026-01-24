@@ -49,10 +49,11 @@ typedef struct AllocEntry {
  * ============================================================================
  * Protected by g_allocLock critical section.
  * Thread Access: [Any thread - uses critical section]
+ * Note: g_initialized uses InterlockedCompareExchange for thread-safe init.
  */
 static AllocEntry* g_allocTable[ALLOC_TABLE_SIZE] = {0};
 static CRITICAL_SECTION g_allocLock;
-static BOOL g_initialized = FALSE;
+static volatile LONG g_initialized = FALSE;  /* Thread-safe: use InterlockedCompareExchange */
 static size_t g_totalAllocated = 0;
 static size_t g_totalFreed = 0;
 static size_t g_peakUsage = 0;
@@ -77,20 +78,35 @@ static const char* GetFilename(const char* path) {
  * ============================================================================ */
 
 void MemDebug_Init(void) {
-    if (g_initialized) return;
-    InitializeCriticalSection(&g_allocLock);
-    memset(g_allocTable, 0, sizeof(g_allocTable));
-    g_totalAllocated = 0;
-    g_totalFreed = 0;
-    g_peakUsage = 0;
-    g_allocCount = 0;
-    g_freeCount = 0;
-    g_initialized = TRUE;
-    Logger_Log("MemDebug: Initialized allocation tracking\n");
+    /* Thread-safe initialization using atomic compare-exchange */
+    if (InterlockedCompareExchange(&g_initialized, FALSE, FALSE)) return;
+    
+    /* Use a static INIT_ONCE to ensure single initialization */
+    static INIT_ONCE s_initOnce = INIT_ONCE_STATIC_INIT;
+    static volatile LONG s_initStarted = FALSE;
+    
+    /* Prevent multiple threads from initializing simultaneously */
+    if (InterlockedCompareExchange(&s_initStarted, TRUE, FALSE) == FALSE) {
+        InitializeCriticalSection(&g_allocLock);
+        memset(g_allocTable, 0, sizeof(g_allocTable));
+        g_totalAllocated = 0;
+        g_totalFreed = 0;
+        g_peakUsage = 0;
+        g_allocCount = 0;
+        g_freeCount = 0;
+        InterlockedExchange(&g_initialized, TRUE);
+        Logger_Log("MemDebug: Initialized allocation tracking\n");
+    } else {
+        /* Another thread is initializing - spin until done */
+        while (!InterlockedCompareExchange(&g_initialized, FALSE, FALSE)) {
+            Sleep(1);
+        }
+    }
 }
 
 void MemDebug_Shutdown(void) {
-    if (!g_initialized) return;
+    /* Thread-safe check using atomic read */
+    if (!InterlockedCompareExchange(&g_initialized, FALSE, FALSE)) return;
     
     /* Free any remaining entries (they're leaks, but clean up anyway) */
     for (int i = 0; i < ALLOC_TABLE_SIZE; i++) {
@@ -104,11 +120,12 @@ void MemDebug_Shutdown(void) {
     }
     
     DeleteCriticalSection(&g_allocLock);
-    g_initialized = FALSE;
+    InterlockedExchange(&g_initialized, FALSE);
 }
 
 void* MemDebug_Malloc(size_t size, const char* file, int line) {
-    if (!g_initialized) MemDebug_Init();
+    /* Thread-safe initialization check using atomic read */
+    if (!InterlockedCompareExchange(&g_initialized, FALSE, FALSE)) MemDebug_Init();
     
     void* ptr = malloc(size);
     if (!ptr) return NULL;
@@ -226,7 +243,8 @@ void* MemDebug_Realloc(void* ptr, size_t size, const char* file, int line) {
 
 void MemDebug_Free(void* ptr, const char* file, int line) {
     if (!ptr) return;
-    if (!g_initialized) {
+    /* Thread-safe check using atomic read */
+    if (!InterlockedCompareExchange(&g_initialized, FALSE, FALSE)) {
         free(ptr);  /* Not tracking, just free */
         return;
     }
@@ -263,7 +281,8 @@ void MemDebug_Free(void* ptr, const char* file, int line) {
 }
 
 void MemDebug_ReportLeaks(void) {
-    if (!g_initialized) return;
+    /* Thread-safe check using atomic read */
+    if (!InterlockedCompareExchange(&g_initialized, FALSE, FALSE)) return;
     
     EnterCriticalSection(&g_allocLock);
     

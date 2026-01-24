@@ -286,17 +286,17 @@ void Logger_Log(const char* fmt, ...);
  * functionality like NVIDIA ShadowPlay's Instant Replay.
  * 
  * REPLAY_DURATION_*: Bounds for how much history to keep.
- *   - Minimum 60 seconds ensures enough content to be useful
+ *   - Minimum 1 second allows short clips if desired
  *   - Maximum 1200 seconds (20 minutes) prevents excessive RAM usage
- *   - Default 60 seconds balances usefulness with memory consumption
+ *   - Default 15 seconds provides quick saves with minimal RAM usage
  * 
  * Memory usage depends heavily on video settings. At 1080p60 high quality,
  * expect roughly 100-150 MB per minute of buffer. A 20-minute buffer could
  * use 2-3 GB of RAM.
  */
-#define REPLAY_DURATION_MIN_SECS    60
+#define REPLAY_DURATION_MIN_SECS    1
 #define REPLAY_DURATION_MAX_SECS    1200
-#define REPLAY_DURATION_DEFAULT     60
+#define REPLAY_DURATION_DEFAULT     15
 
 /* ============================================================================
  * TIMEOUT VALUES - Thread Synchronization and Waiting

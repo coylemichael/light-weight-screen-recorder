@@ -70,13 +70,29 @@ typedef struct {
     int audioVolume2;
     int audioVolume3;
     volatile LONG audioError;  // AACEncoderError if audio init failed
+    
+    // Async save completion notification
+    HWND notifyWindow;          // Window to receive WM_REPLAY_SAVE_COMPLETE
+    UINT notifyMessage;         // Custom message ID (WM_USER + N)
 } ReplayBufferState;
 
 BOOL ReplayBuffer_Init(ReplayBufferState* state);
 void ReplayBuffer_Shutdown(ReplayBufferState* state);
 BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config);
 void ReplayBuffer_Stop(ReplayBufferState* state);
+
+// Synchronous save (blocks until complete - use for testing only)
 BOOL ReplayBuffer_Save(ReplayBufferState* state, const char* outputPath);
+
+// Asynchronous save (returns immediately, posts notifyMessage when done)
+// wParam = success (BOOL), lParam = 0
+// Returns FALSE if save cannot be started (not ready, already saving)
+BOOL ReplayBuffer_SaveAsync(ReplayBufferState* state, const char* outputPath,
+                            HWND notifyWindow, UINT notifyMessage);
+
+// Check if a save is currently in progress
+BOOL ReplayBuffer_IsSaving(ReplayBufferState* state);
+
 int ReplayBuffer_EstimateRAMUsage(int durationSeconds, int width, int height, int fps);
 void ReplayBuffer_GetStatus(ReplayBufferState* state, char* buffer, int bufferSize);
 

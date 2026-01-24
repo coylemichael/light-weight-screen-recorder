@@ -56,6 +56,9 @@ typedef void* GpImage;
 // Hotkey ID for replay save (must match main.c)
 #define HOTKEY_REPLAY_SAVE 1
 
+// Custom window message for async replay save completion
+#define WM_REPLAY_SAVE_COMPLETE (WM_USER + 200)
+
 // External globals from main.c
 extern AppConfig g_config;
 extern CaptureState g_capture;
@@ -2512,20 +2515,32 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     (int)st.wHour, (int)st.wMinute, (int)st.wSecond);
                 
                 Logger_Log("Generated filename: %s\n", filename);
-                Logger_Log("Calling ReplayBuffer_Save...\n");
+                Logger_Log("Calling ReplayBuffer_SaveAsync...\n");
                 
-                // Save the replay
-                BOOL success = ReplayBuffer_Save(&g_replayBuffer, filename);
+                // Request async save - will post WM_REPLAY_SAVE_COMPLETE when done
+                BOOL started = ReplayBuffer_SaveAsync(&g_replayBuffer, filename,
+                                                      hwnd, WM_REPLAY_SAVE_COMPLETE);
                 
-                Logger_Log("ReplayBuffer_Save returned: %d\n", success);
-                
-                // Show notification
-                if (success) {
-                    MessageBeep(MB_OK);  // Success audio feedback
+                if (started) {
+                    Logger_Log("Async save started\n");
+                    // Could show a "saving..." indicator here
                 } else {
-                    // Not enough frames yet or save failed
-                    MessageBeep(MB_ICONERROR);
+                    Logger_Log("Failed to start async save\n");
+                    MessageBeep(MB_ICONWARNING);
                 }
+            }
+            return 0;
+        }
+        
+        case WM_REPLAY_SAVE_COMPLETE: {
+            // Async save completed - wParam contains success status
+            BOOL success = (BOOL)wParam;
+            Logger_Log("WM_REPLAY_SAVE_COMPLETE received: success=%d\n", success);
+            
+            if (success) {
+                MessageBeep(MB_OK);  // Success audio feedback
+            } else {
+                MessageBeep(MB_ICONERROR);  // Failure audio feedback
             }
             return 0;
         }

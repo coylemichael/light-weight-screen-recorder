@@ -483,11 +483,49 @@ BOOL ReplayBuffer_Save(ReplayBufferState* state, const char* outputPath) {
     ResetEvent(state->hSaveCompleteEvent);
     SetEvent(state->hSaveRequestEvent);
     
-    // Wait for completion - 120 sec timeout to handle slow disk/network drives
-    // (OneDrive, NAS, USB drives can be very slow during MP4 finalization)
+    // Wait for completion with message pumping to prevent UI hang
+    // This allows the watchdog heartbeat and window messages to be processed
+    // while waiting for the potentially slow disk/network save operation.
+    // Timeout: 120 sec for slow cloud drives (OneDrive, Dropbox, NAS)
     DWORD startTick = GetTickCount();
-    DWORD waitResult = WaitForSingleObject(state->hSaveCompleteEvent, 120000);
-    DWORD elapsed = GetTickCount() - startTick;
+    DWORD elapsed = 0;
+    DWORD waitResult;
+    const DWORD SAVE_TIMEOUT_MS = 120000;
+    const DWORD PUMP_INTERVAL_MS = 100;  // Check every 100ms
+    
+    // Log heartbeat during wait so watchdog doesn't trigger
+    int heartbeatCounter = 0;
+    
+    while (elapsed < SAVE_TIMEOUT_MS) {
+        // Wait with short timeout to allow message pumping
+        waitResult = WaitForSingleObject(state->hSaveCompleteEvent, PUMP_INTERVAL_MS);
+        
+        if (waitResult == WAIT_OBJECT_0) {
+            // Save completed!
+            break;
+        }
+        
+        // Pump messages to keep UI responsive and prevent "not responding"
+        MSG msg;
+        while (PeekMessage(&msg, NULL, 0, 0, PM_REMOVE)) {
+            // Don't process WM_QUIT - let the main loop handle it
+            if (msg.message == WM_QUIT) {
+                PostQuitMessage((int)msg.wParam);
+                ReplayLog("Save interrupted by WM_QUIT\n");
+                return FALSE;
+            }
+            TranslateMessage(&msg);
+            DispatchMessage(&msg);
+        }
+        
+        // Send heartbeat every ~500ms to prevent watchdog from triggering
+        heartbeatCounter++;
+        if (heartbeatCounter % 5 == 0) {
+            Logger_Heartbeat(THREAD_MAIN);
+        }
+        
+        elapsed = GetTickCount() - startTick;
+    }
     
     if (waitResult != WAIT_OBJECT_0) {
         ReplayLog("Save timeout after %u ms (120 sec limit)\n", elapsed);
@@ -499,6 +537,54 @@ BOOL ReplayBuffer_Save(ReplayBufferState* state, const char* outputPath) {
     }
     
     return state->saveSuccess;
+}
+
+BOOL ReplayBuffer_SaveAsync(ReplayBufferState* state, const char* outputPath,
+                            HWND notifyWindow, UINT notifyMessage) {
+    // Preconditions
+    LWSR_ASSERT(state != NULL);
+    LWSR_ASSERT(outputPath != NULL);
+    
+    if (!state || !outputPath || !state->isBuffering) {
+        ReplayLog("SaveAsync rejected: state=%p, path=%s, buffering=%d\n", 
+                  state, outputPath ? outputPath : "NULL", state ? state->isBuffering : 0);
+        return FALSE;
+    }
+    
+    // Check state machine - must be in CAPTURING state
+    LONG currentState = InterlockedCompareExchange(&state->state, REPLAY_STATE_CAPTURING, REPLAY_STATE_CAPTURING);
+    if (currentState != REPLAY_STATE_CAPTURING) {
+        ReplayLog("SaveAsync rejected: state=%d (expected CAPTURING=%d)\n", 
+                  currentState, REPLAY_STATE_CAPTURING);
+        return FALSE;
+    }
+    
+    // Check minimum frames requirement
+    LONG frames = InterlockedCompareExchange(&state->framesCaptured, 0, 0);
+    if (frames < MIN_FRAMES_FOR_SAVE) {
+        ReplayLog("SaveAsync rejected: only %d frames captured (need %d)\n", frames, MIN_FRAMES_FOR_SAVE);
+        return FALSE;
+    }
+    
+    // Set up save parameters and notification target
+    strncpy(state->savePath, outputPath, MAX_PATH - 1);
+    state->savePath[MAX_PATH - 1] = '\0';
+    state->saveSuccess = FALSE;
+    state->notifyWindow = notifyWindow;
+    state->notifyMessage = notifyMessage;
+    
+    // Signal save request - buffer thread will handle it and post notification when done
+    SetEvent(state->hSaveRequestEvent);
+    
+    ReplayLog("SaveAsync: Save requested, will notify hwnd=%p msg=%u\n", 
+              (void*)notifyWindow, notifyMessage);
+    return TRUE;
+}
+
+BOOL ReplayBuffer_IsSaving(ReplayBufferState* state) {
+    if (!state) return FALSE;
+    // Check if save request event is signaled (pending) or we're between request and complete
+    return WaitForSingleObject(state->hSaveRequestEvent, 0) == WAIT_OBJECT_0;
 }
 
 void ReplayBuffer_GetStatus(ReplayBufferState* state, char* buffer, int bufferSize) {
@@ -1058,7 +1144,21 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
             
             /* Use helper function for save operation */
             state->saveSuccess = HandleSaveRequest(state, video, audio);
+            
+            /* Signal completion event (for sync API) */
             SetEvent(state->hSaveCompleteEvent);
+            
+            /* Post async notification if window was specified */
+            if (state->notifyWindow && state->notifyMessage) {
+                PostMessage(state->notifyWindow, state->notifyMessage, 
+                           (WPARAM)state->saveSuccess, 0);
+                ReplayLog("Posted save completion to hwnd=%p msg=%u success=%d\n",
+                          (void*)state->notifyWindow, state->notifyMessage, state->saveSuccess);
+                /* Clear notification target to prevent duplicate posts */
+                state->notifyWindow = NULL;
+                state->notifyMessage = 0;
+            }
+            
             continue;  /* Skip frame capture this iteration */
         }
         
