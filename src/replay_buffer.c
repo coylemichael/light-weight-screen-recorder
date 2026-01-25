@@ -47,6 +47,7 @@
 #include "mp4_muxer.h"
 #include "gpu_converter.h"
 #include "constants.h"
+#include "leak_tracker.h"
 #include <stdio.h>
 #include <mmsystem.h>  /* For timeBeginPeriod/timeEndPeriod */
 #include <objbase.h>   /* For CoInitializeEx/CoUninitialize */
@@ -156,6 +157,7 @@ static void AudioEncoderCallback(const AACSample* sample, void* userData) {
             
             /* Evict oldest sample */
             if (audio->samples[0].data) {
+                LEAK_TRACK_AAC_SAMPLE_FREE();
                 free(audio->samples[0].data);
             }
             memmove(audio->samples, audio->samples + 1, 
@@ -189,6 +191,7 @@ static void AudioEncoderCallback(const AACSample* sample, void* userData) {
             
             for (int i = 0; i < toRemove && i < audio->sampleCount; i++) {
                 if (audio->samples[i].data) {
+                    LEAK_TRACK_AAC_SAMPLE_FREE();
                     free(audio->samples[i].data);
                 }
             }
@@ -221,6 +224,7 @@ static void AudioEncoderCallback(const AACSample* sample, void* userData) {
         MuxerAudioSample* dst = &audio->samples[audio->sampleCount];
         dst->data = (BYTE*)malloc(sample->size);
         if (dst->data) {
+            LEAK_TRACK_AAC_SAMPLE_ALLOC();
             memcpy(dst->data, sample->data, sample->size);
             dst->size = sample->size;
             dst->timestamp = sample->timestamp;
@@ -384,6 +388,9 @@ BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
 
 void ReplayBuffer_Stop(ReplayBufferState* state) {
     if (!state || !state->isBuffering) return;
+    
+    /* Log final leak tracker status before shutdown */
+    LeakTracker_LogStatusForced();
     
     /* Signal stop via event (proper cross-thread communication) */
     (void)InterlockedExchange(&state->state, REPLAY_STATE_STOPPING);
@@ -1334,6 +1341,9 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                 int avgKBPerFrame = bufCount > 0 ? (int)(memKB / bufCount) : 0;
                 ReplayLog("Status: %d/%d frames in %.1fs (encode=%.1f fps, attempt=%.1f fps, target=%d fps), buffer=%.1fs (%d samples, %zu MB, %d KB/frame, QP=%d)\n", 
                           frameCount, attemptCount, realElapsedSec, actualFPS, attemptFPS, fps, duration, bufCount, memMB, avgKBPerFrame, currentQP);
+                
+                /* Log leak tracker status if enabled (rate-limited internally) */
+                LeakTracker_LogStatus();
                 ReplayLog("  Frame sizes: last=%u, min=%u, max=%u, avg=%u bytes\n",
                           lastFrameSize, minFrameSize, maxFrameSize, avgFrameSize);
                 

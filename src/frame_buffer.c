@@ -16,6 +16,7 @@
 #include "util.h"
 #include "logger.h"
 #include "constants.h"
+#include "leak_tracker.h"
 #include <stdio.h>
 
 // Alias for logging
@@ -25,6 +26,7 @@
 static void FreeFrame(BufferedFrame* frame) {
     LWSR_ASSERT(frame != NULL);
     if (frame->data) {
+        LEAK_TRACK_FRAME_BUFFER_FREE();
         free(frame->data);
         frame->data = NULL;
     }
@@ -180,12 +182,19 @@ BOOL FrameBuffer_Add(FrameBuffer* buf, EncodedFrame* frame) {
     EvictOldFrames(buf, frame->timestamp);
     
     // Add to buffer (take ownership of data)
+    // Note: This transfers ownership from NVENC (allocated there) to FrameBuffer
+    // Track as: NVENC free (releasing) + FrameBuffer alloc (acquiring)
     BufferedFrame* slot = &buf->frames[buf->head];
     
     // Free any existing data in slot (shouldn't happen after eviction)
     if (slot->data) {
+        LEAK_TRACK_FRAME_BUFFER_FREE();
         free(slot->data);
     }
+    
+    // Transfer ownership: NVENC releases, FrameBuffer acquires
+    LEAK_TRACK_NVENC_FRAME_FREE();
+    LEAK_TRACK_FRAME_BUFFER_ALLOC();
     
     slot->data = frame->data;
     slot->size = frame->size;

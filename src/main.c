@@ -74,6 +74,7 @@
 #include "replay_buffer.h"
 #include "logger.h"
 #include "crash_handler.h"
+#include "leak_tracker.h"
 #include "gdiplus_api.h"
 #include "constants.h"
 
@@ -213,6 +214,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     
     // Load configuration
     Config_Load(&g_config);
+    
+    // Initialize leak tracker (runtime-controlled via config)
+    LeakTracker_Init();
     
     // Initialize shared GDI+ (used by overlay and action_toolbar)
     if (!GdiplusAPI_Init(&g_gdip)) {

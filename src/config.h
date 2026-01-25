@@ -67,7 +67,7 @@ typedef struct {
     char savePath[MAX_PATH];
     
     // Debug/logging settings
-    BOOL debugLogging;               // Enable debug logging to file
+    BOOL debugLogging;               // Enable debug logging to file (includes leak tracking)
     
     // Last capture area (for quick re-record)
     RECT lastCaptureRect;

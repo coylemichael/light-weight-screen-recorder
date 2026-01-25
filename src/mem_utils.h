@@ -113,6 +113,60 @@
     } while (0)
 
 /* ============================================================================
+ * COM/HRESULT ERROR CHECKING
+ * ============================================================================
+ * 
+ * CHECK_HR: Verify HRESULT succeeded, goto cleanup label if not.
+ * This enables consistent error handling for COM/Media Foundation calls.
+ * 
+ * PATTERN FOR MFCreate* CALLS:
+ *   1. Always check HRESULT before using the created object
+ *   2. Initialize all COM pointers to NULL at function start
+ *   3. Release in reverse order of creation in cleanup
+ *   4. Use SAFE_RELEASE which checks for NULL
+ * 
+ * USAGE:
+ *   HRESULT hr = MFCreateMediaType(&type);
+ *   CHECK_HR(hr, cleanup);  // Jumps to 'cleanup' label if FAILED
+ *   
+ *   hr = MFCreateSample(&sample);
+ *   CHECK_HR_LOG(hr, cleanup, "MFCreateSample");  // Also logs on failure
+ */
+
+#define CHECK_HR(hr, cleanupLabel) \
+    do { \
+        if (FAILED(hr)) { \
+            goto cleanupLabel; \
+        } \
+    } while (0)
+
+#define CHECK_HR_LOG(hr, cleanupLabel, context) \
+    do { \
+        if (FAILED(hr)) { \
+            Logger_Log("%s failed (0x%08X)\n", context, hr); \
+            goto cleanupLabel; \
+        } \
+    } while (0)
+
+/* Combined: Create and check in one statement */
+#define CHECK_MF_CREATE(createExpr, cleanupLabel) \
+    do { \
+        HRESULT _hr = (createExpr); \
+        if (FAILED(_hr)) { \
+            goto cleanupLabel; \
+        } \
+    } while (0)
+
+#define CHECK_MF_CREATE_LOG(createExpr, cleanupLabel, context) \
+    do { \
+        HRESULT _hr = (createExpr); \
+        if (FAILED(_hr)) { \
+            Logger_Log("%s failed (0x%08X)\n", context, _hr); \
+            goto cleanupLabel; \
+        } \
+    } while (0)
+
+/* ============================================================================
  * DEBUG MEMORY TRACKING (Optional)
  * ============================================================================
  * 
@@ -159,31 +213,58 @@ void  MemDebug_Shutdown(void);
  * acquire multiple resources. It ensures all resources are freed on any
  * error path without code duplication.
  * 
- * PATTERN:
+ * PATTERN FOR COM/MEDIA FOUNDATION:
+ * 
+ *   BOOL CreateMediaResources(void) {
+ *       BOOL result = FALSE;
+ *       IMFMediaType* typeA = NULL;
+ *       IMFMediaType* typeB = NULL;
+ *       IMFSample* sample = NULL;
+ *       IMFMediaBuffer* buffer = NULL;
+ *       
+ *       // CREATE AND CHECK - never use object before checking
+ *       HRESULT hr = MFCreateMediaType(&typeA);
+ *       CHECK_HR_LOG(hr, cleanup, "MFCreateMediaType(A)");
+ *       
+ *       hr = MFCreateMediaType(&typeB);
+ *       CHECK_HR_LOG(hr, cleanup, "MFCreateMediaType(B)");
+ *       
+ *       // For buffer+sample pairs, check each before proceeding
+ *       hr = MFCreateMemoryBuffer(size, &buffer);
+ *       CHECK_HR(hr, cleanup);
+ *       
+ *       hr = MFCreateSample(&sample);
+ *       CHECK_HR(hr, cleanup);
+ *       
+ *       // ... use the objects ...
+ *       
+ *       result = TRUE;
+ *       
+ *   cleanup:
+ *       // RELEASE IN REVERSE ORDER of creation
+ *       SAFE_RELEASE(sample);
+ *       SAFE_RELEASE(buffer);
+ *       SAFE_RELEASE(typeB);
+ *       SAFE_RELEASE(typeA);
+ *       return result;
+ *   }
+ * 
+ * PATTERN FOR REGULAR ALLOCATIONS:
  * 
  *   BOOL DoSomething(void) {
  *       BOOL result = FALSE;
  *       ResourceA* a = NULL;
  *       ResourceB* b = NULL;
- *       ResourceC* c = NULL;
  *       
  *       a = CreateResourceA();
- *       if (!a) goto cleanup;
+ *       CHECK_ALLOC(a, cleanup);
  *       
  *       b = CreateResourceB();
- *       if (!b) goto cleanup;
+ *       CHECK_ALLOC(b, cleanup);
  *       
- *       c = CreateResourceC();
- *       if (!c) goto cleanup;
- *       
- *       // ... do work with a, b, c ...
- *       
- *       result = TRUE;  // Success!
+ *       result = TRUE;
  *       
  *   cleanup:
- *       // These are safe because pointers were initialized to NULL
- *       // and SAFE_FREE/SAFE_RELEASE check for NULL
- *       SAFE_FREE(c);
  *       SAFE_FREE(b);
  *       SAFE_FREE(a);
  *       return result;
@@ -191,10 +272,11 @@ void  MemDebug_Shutdown(void);
  * 
  * KEY PRINCIPLES:
  *   1. Initialize ALL resource pointers to NULL at function start
- *   2. Use a single cleanup label at the end
- *   3. Cleanup in reverse order of acquisition
- *   4. Use SAFE_* macros that check for NULL
- *   5. Set success flag only after all operations complete
+ *   2. ALWAYS check creation result before using the object
+ *   3. Use a single cleanup label at the end
+ *   4. Cleanup in REVERSE ORDER of acquisition
+ *   5. Use SAFE_* macros that check for NULL
+ *   6. Set success flag only after all operations complete
  *
  * See main.c for project-wide error handling standards.
  */

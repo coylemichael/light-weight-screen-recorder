@@ -4,9 +4,11 @@
  *
  * ERROR HANDLING PATTERN:
  * - Goto-cleanup for functions with multiple resource allocations
- * - HRESULT checks use FAILED()/SUCCEEDED() macros exclusively
+ * - Uses CHECK_HR/CHECK_HR_LOG macros from mem_utils.h for HRESULT checks
+ * - HRESULT checks use FAILED()/SUCCEEDED() macros in hot paths
  * - All MF errors are logged with HRESULT values
  * - Returns BOOL to propagate errors; callers must check
+ * - "Always check creation, release in reverse order" (see mem_utils.h)
  */
 
 #include "encoder.h"
@@ -14,6 +16,7 @@
 #include "constants.h"
 #include "mem_utils.h"
 #include "logger.h"
+#include "leak_tracker.h"
 #include <mferror.h>
 #include <stdio.h>
 #include <time.h>
@@ -90,10 +93,7 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     
     // Create sink writer attributes
     HRESULT hr = MFCreateAttributes(&attributes, 3);
-    if (FAILED(hr)) {
-        Logger_Log("Encoder_Init: MFCreateAttributes failed (0x%08X)\n", hr);
-        goto cleanup;
-    }
+    CHECK_HR_LOG(hr, cleanup, "Encoder_Init: MFCreateAttributes");
     
     // Enable hardware encoding (NVENC, Intel QSV, AMD VCE)
     attributes->lpVtbl->SetUINT32(attributes, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
@@ -103,17 +103,11 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     
     // Create sink writer
     hr = MFCreateSinkWriterFromURL(wPath, NULL, attributes, &state->sinkWriter);
-    if (FAILED(hr)) {
-        Logger_Log("Encoder_Init: MFCreateSinkWriterFromURL failed (0x%08X)\n", hr);
-        goto cleanup;
-    }
+    CHECK_HR_LOG(hr, cleanup, "Encoder_Init: MFCreateSinkWriterFromURL");
     
     // Configure output media type (encoded)
     hr = MFCreateMediaType(&outputType);
-    if (FAILED(hr)) {
-        Logger_Log("Encoder_Init: MFCreateMediaType (output) failed (0x%08X)\n", hr);
-        goto cleanup;
-    }
+    CHECK_HR_LOG(hr, cleanup, "Encoder_Init: MFCreateMediaType (output)");
     
     GUID videoFormat = GetVideoFormat(format);
     UINT32 bitrate = Util_CalculateBitrate(width, height, fps, quality);
@@ -150,10 +144,7 @@ BOOL Encoder_Init(EncoderState* state, const char* outputPath,
     
     // Configure input media type (raw BGRA)
     hr = MFCreateMediaType(&inputType);
-    if (FAILED(hr)) {
-        Logger_Log("Encoder_Init: MFCreateMediaType (input) failed (0x%08X)\n", hr);
-        goto cleanup;
-    }
+    CHECK_HR_LOG(hr, cleanup, "Encoder_Init: MFCreateMediaType (input)");
     
     inputType->lpVtbl->SetGUID(inputType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
     inputType->lpVtbl->SetGUID(inputType, &MF_MT_SUBTYPE, &MFVideoFormat_RGB32);
@@ -223,6 +214,7 @@ BOOL Encoder_WriteFrame(EncoderState* state, const BYTE* frameData, UINT64 times
     DWORD bufferSize = (DWORD)frameSize;
     HRESULT hr = MFCreateMemoryBuffer(bufferSize, &buffer);
     if (FAILED(hr)) goto cleanup;
+    LEAK_TRACK_MF_BUFFER_CREATE();
     
     // Lock buffer and copy frame data
     hr = buffer->lpVtbl->Lock(buffer, &bufferData, NULL, NULL);
@@ -246,6 +238,7 @@ BOOL Encoder_WriteFrame(EncoderState* state, const BYTE* frameData, UINT64 times
     // Create sample
     hr = MFCreateSample(&sample);
     if (FAILED(hr)) goto cleanup;
+    LEAK_TRACK_MF_SAMPLE_CREATE();
     
     hr = sample->lpVtbl->AddBuffer(sample, buffer);
     if (FAILED(hr)) goto cleanup;
@@ -264,8 +257,8 @@ BOOL Encoder_WriteFrame(EncoderState* state, const BYTE* frameData, UINT64 times
     
 cleanup:
     if (bufferData && buffer) buffer->lpVtbl->Unlock(buffer);
-    SAFE_RELEASE(sample);
-    SAFE_RELEASE(buffer);
+    if (sample) { LEAK_TRACK_MF_SAMPLE_RELEASE(); SAFE_RELEASE(sample); }
+    if (buffer) { LEAK_TRACK_MF_BUFFER_RELEASE(); SAFE_RELEASE(buffer); }
     
     return result;
 }

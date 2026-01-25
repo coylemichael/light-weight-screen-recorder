@@ -4,10 +4,11 @@
  *
  * ERROR HANDLING PATTERN:
  * - Goto-cleanup for functions with multiple resource allocations
- * - HRESULT checks use FAILED()/SUCCEEDED() macros exclusively
+ * - Uses CHECK_HR/CHECK_HR_LOG macros from mem_utils.h for HRESULT checks
  * - Continue-on-error for individual samples in loops (best effort)
  * - All MF errors are logged with HRESULT values
  * - Returns BOOL to propagate errors; callers must check
+ * - "Always check creation, release in reverse order" (see mem_utils.h)
  */
 
 #include "mp4_muxer.h"
@@ -222,16 +223,13 @@ BOOL MP4Muxer_WriteFile(
     
     // Create SinkWriter with hardware acceleration enabled
     HRESULT hr = MFCreateAttributes(&attrs, 2);
-    if (SUCCEEDED(hr)) {
-        attrs->lpVtbl->SetUINT32(attrs, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-        attrs->lpVtbl->SetUINT32(attrs, &MF_LOW_LATENCY, TRUE);
-    }
+    CHECK_HR_LOG(hr, cleanup, "MP4Muxer: MFCreateAttributes");
+    
+    attrs->lpVtbl->SetUINT32(attrs, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+    attrs->lpVtbl->SetUINT32(attrs, &MF_LOW_LATENCY, TRUE);
     
     hr = MFCreateSinkWriterFromURL(wPath, NULL, attrs, &writer);
-    if (FAILED(hr)) {
-        MuxLog("MP4Muxer: MFCreateSinkWriterFromURL failed 0x%08X\n", hr);
-        goto cleanup;
-    }
+    CHECK_HR_LOG(hr, cleanup, "MP4Muxer: MFCreateSinkWriterFromURL");
     
     // Create HEVC media type using helper
     outputType = CreateHEVCMediaType(config);
@@ -355,16 +353,13 @@ BOOL MP4Muxer_WriteFileWithAudio(
     
     // Create SinkWriter
     HRESULT hr = MFCreateAttributes(&attrs, 2);
-    if (SUCCEEDED(hr)) {
-        attrs->lpVtbl->SetUINT32(attrs, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
-        attrs->lpVtbl->SetUINT32(attrs, &MF_LOW_LATENCY, TRUE);
-    }
+    CHECK_HR_LOG(hr, cleanup, "MP4Muxer: MFCreateAttributes");
+    
+    attrs->lpVtbl->SetUINT32(attrs, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+    attrs->lpVtbl->SetUINT32(attrs, &MF_LOW_LATENCY, TRUE);
     
     hr = MFCreateSinkWriterFromURL(wPath, NULL, attrs, &writer);
-    if (FAILED(hr)) {
-        MuxLog("MP4Muxer: MFCreateSinkWriterFromURL failed 0x%08X\n", hr);
-        goto cleanup;
-    }
+    CHECK_HR_LOG(hr, cleanup, "MP4Muxer: MFCreateSinkWriterFromURL");
     
     // === VIDEO STREAM (using helper) ===
     videoType = CreateHEVCMediaType(videoConfig);

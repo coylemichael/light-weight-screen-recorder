@@ -28,6 +28,7 @@
 #include "nvenc_encoder.h"
 #include "logger.h"
 #include "constants.h"
+#include "leak_tracker.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -932,6 +933,7 @@ static unsigned __stdcall OutputThreadProc(void* param) {
         EncodedFrame frame = {0};
         frame.data = (BYTE*)malloc(lockParams.bitstreamSizeInBytes);
         if (frame.data) {
+            LEAK_TRACK_NVENC_FRAME_ALLOC();
             memcpy(frame.data, lockParams.bitstreamBufferPtr, lockParams.bitstreamSizeInBytes);
             frame.size = lockParams.bitstreamSizeInBytes;
             frame.timestamp = enc->pendingTimestamps[idx];

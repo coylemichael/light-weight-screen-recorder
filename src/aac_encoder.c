@@ -4,10 +4,11 @@
  *
  * ERROR HANDLING PATTERN:
  * - Goto-cleanup (cleanup_fail label) for Create with multiple allocations
- * - HRESULT checks use FAILED()/SUCCEEDED() macros exclusively
+ * - Uses CHECK_HR/CHECK_HR_LOG macros from mem_utils.h for HRESULT checks
  * - Continue-on-error for ProcessOutput loop (best effort encoding)
  * - All MF errors allow graceful degradation
  * - Returns NULL to propagate errors; callers must check
+ * - "Always check creation, release in reverse order" (see mem_utils.h)
  */
 
 #include "aac_encoder.h"
