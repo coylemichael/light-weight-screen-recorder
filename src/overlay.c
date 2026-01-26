@@ -773,6 +773,16 @@ static void CaptureToFile(void) {
 // System Tray Functions
 // ============================================================================
 
+// Load icon from ICO file
+static HICON LoadIconFromICO(const char* filename) {
+    int iconWidth = GetSystemMetrics(SM_CXSMICON);
+    int iconHeight = GetSystemMetrics(SM_CYSMICON);
+    
+    HICON hIcon = (HICON)LoadImageA(NULL, filename, IMAGE_ICON, 
+                                     iconWidth, iconHeight, LR_LOADFROMFILE);
+    return hIcon;
+}
+
 // Load icon from PNG file using GDI+ and scale to proper tray icon size
 static HICON LoadIconFromPNG(const char* filename) {
     if (!g_gdip.CreateFromHDC) return NULL;  // GDI+ not loaded
@@ -950,8 +960,8 @@ static void AddTrayIcon(void) {
     g_tray.iconData.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
     g_tray.iconData.uCallbackMessage = WM_TRAYICON;
     
-    // Try to load custom icon from static folder
-    g_trayHIcon = LoadIconFromPNG("static\\lwsr_icon.png");
+    // Try to load custom icon from static folder (prefer .ico for best quality)
+    g_trayHIcon = LoadIconFromICO("static\\lwsr_icon.ico");
     if (!g_trayHIcon) {
         // Try relative to executable
         char exePath[MAX_PATH];
@@ -959,9 +969,9 @@ static void AddTrayIcon(void) {
         char* lastSlash = strrchr(exePath, '\\');
         if (lastSlash) {
             size_t remaining = sizeof(exePath) - (lastSlash + 1 - exePath);
-            strncpy(lastSlash + 1, "..\\static\\lwsr_icon.png", remaining - 1);
+            strncpy(lastSlash + 1, "..\\static\\lwsr_icon.ico", remaining - 1);
             exePath[sizeof(exePath) - 1] = '\0';
-            g_trayHIcon = LoadIconFromPNG(exePath);
+            g_trayHIcon = LoadIconFromICO(exePath);
         }
     }
     
