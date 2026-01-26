@@ -48,6 +48,7 @@ typedef void* GpImage;
 #include "aac_encoder.h"
 #include "logger.h"
 #include "constants.h"
+#include "health_monitor.h"
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -2249,29 +2250,9 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 // Update timer display
                 UpdateTimerDisplay();
             } else if (wParam == ID_TIMER_REPLAY_CHECK) {
-                // Check for replay buffer stall and auto-restart
-                // Detect stall via heartbeats - more reliable than waiting for buffer thread to set state
-                if (g_config.replayEnabled && g_replayBuffer.state == REPLAY_STATE_CAPTURING) {
-                    BOOL bufferStalled = Logger_IsThreadStalled(THREAD_BUFFER);
-                    BOOL nvencStalled = Logger_IsThreadStalled(THREAD_NVENC_OUTPUT);
-                    
-                    if (bufferStalled || nvencStalled) {
-                        Logger_Log("Replay thread stall detected (BUFFER=%s, NVENC=%s) - forcing restart...\n",
-                                   bufferStalled ? "STALLED" : "ok", 
-                                   nvencStalled ? "STALLED" : "ok");
-                        
-                        // Force state to STALLED so Stop() knows threads are hung
-                        InterlockedExchange(&g_replayBuffer.state, REPLAY_STATE_STALLED);
-                        
-                        // Stop will try to signal threads but they may be hung
-                        // It should have a timeout mechanism
-                        ReplayBuffer_Stop(&g_replayBuffer);
-                        Sleep(1000);  // Give hung threads time to potentially recover
-                        ReplayBuffer_Start(&g_replayBuffer, &g_config);
-                        CheckAudioError();
-                        Logger_Log("Replay buffer restarted after stall recovery\n");
-                    }
-                }
+                // Stall detection moved to HealthMonitor thread (health_monitor.c)
+                // This timer is kept for future periodic UI updates if needed
+                // The HealthMonitor posts WM_WORKER_STALLED when recovery is needed
             } else if (wParam == ID_TIMER_HOVER) {
                 // Check which icon button is currently hovered (if any)
                 POINT pt;
@@ -2541,6 +2522,52 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 MessageBeep(MB_OK);  // Success audio feedback
             } else {
                 MessageBeep(MB_ICONERROR);  // Failure audio feedback
+            }
+            return 0;
+        }
+        
+        case WM_WORKER_STALLED: {
+            // Health monitor detected a stalled worker thread
+            StallType stallType = (StallType)wParam;
+            Logger_Log("WM_WORKER_STALLED received: type=%d\n", stallType);
+            
+            // Only recover if replay buffer is supposed to be running
+            if (g_config.replayEnabled && g_replayBuffer.isBuffering) {
+                Logger_Log("Initiating replay buffer recovery...\n");
+                
+                // Duplicate the thread handle BEFORE Stop() closes it
+                // Cleanup thread needs its own handle to wait on
+                HANDLE hungThreadCopy = NULL;
+                if (g_replayBuffer.bufferThread) {
+                    if (!DuplicateHandle(GetCurrentProcess(), g_replayBuffer.bufferThread,
+                                         GetCurrentProcess(), &hungThreadCopy,
+                                         0, FALSE, DUPLICATE_SAME_ACCESS)) {
+                        Logger_Log("DuplicateHandle failed: %u\n", GetLastError());
+                        hungThreadCopy = NULL;
+                    }
+                }
+                
+                // Schedule cleanup of orphaned resources (fire-and-forget thread)
+                // Pass the duplicated handle so cleanup can wait for it (NULL is handled)
+                HealthMonitor_ScheduleCleanup(hungThreadCopy, stallType);
+                
+                // Force state to STALLED so Stop() knows threads are hung
+                InterlockedExchange(&g_replayBuffer.state, REPLAY_STATE_STALLED);
+                
+                // Stop the replay buffer (will timeout on hung thread)
+                ReplayBuffer_Stop(&g_replayBuffer);
+                
+                // Small delay before restart
+                Sleep(500);
+                
+                // Restart the replay buffer
+                ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                CheckAudioError();
+                
+                // Notify health monitor that restart is complete
+                HealthMonitor_NotifyRestart();
+                
+                Logger_Log("Replay buffer restarted after stall recovery\n");
             }
             return 0;
         }

@@ -76,6 +76,7 @@
 #include "crash_handler.h"
 #include "leak_tracker.h"
 #include "gdiplus_api.h"
+#include "health_monitor.h"
 #include "constants.h"
 
 /* ============================================================================
@@ -300,6 +301,14 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     // Start watchdog for hang detection (optional - monitors for frozen app)
     CrashHandler_StartWatchdog();
     
+    // Start health monitor for worker thread stall detection
+    if (g_config.replayEnabled) {
+        if (!HealthMonitor_Start(g_controlWnd)) {
+            Logger_Log("WARNING: Health monitor failed to start (stall detection disabled)\n");
+            // Non-fatal - app continues without health monitoring
+        }
+    }
+    
     // Message loop with heartbeat tracking
     MSG msg;
     DWORD msgCount = 0;
@@ -323,6 +332,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
+    
+    // Stop health monitor before cleanup
+    HealthMonitor_Stop();
     
     // Stop watchdog before cleanup
     CrashHandler_StopWatchdog();
