@@ -48,6 +48,7 @@
 #include "gpu_converter.h"
 #include "constants.h"
 #include "leak_tracker.h"
+#include "mem_utils.h"
 #include <stdio.h>
 #include <mmsystem.h>  /* For timeBeginPeriod/timeEndPeriod */
 #include <objbase.h>   /* For CoInitializeEx/CoUninitialize */
@@ -240,6 +241,12 @@ static void AudioEncoderCallback(const AACSample* sample, void* userData) {
  * PUBLIC API
  * ============================================================================ */
 
+/*
+ * MULTI-RESOURCE FUNCTION: ReplayBuffer_Init
+ * Resources: 4 event handles + 1 critical section
+ * Pattern: goto-cleanup with SAFE_CLOSE_HANDLE
+ * Init: ZeroMemory ensures NULL initialization
+ */
 BOOL ReplayBuffer_Init(ReplayBufferState* state) {
     /* Precondition */
     LWSR_ASSERT(state != NULL);
@@ -252,40 +259,41 @@ BOOL ReplayBuffer_Init(ReplayBufferState* state) {
     
     /* Create synchronization events */
     state->hReadyEvent = CreateEvent(NULL, TRUE, FALSE, NULL);  /* Manual reset */
-    state->hSaveRequestEvent = CreateEvent(NULL, FALSE, FALSE, NULL);  /* Auto reset */
-    state->hSaveCompleteEvent = CreateEvent(NULL, FALSE, FALSE, NULL);  /* Auto reset */
-    state->hStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);  /* Manual reset */
+    if (!state->hReadyEvent) goto cleanup;
     
-    if (!state->hReadyEvent || !state->hSaveRequestEvent || 
-        !state->hSaveCompleteEvent || !state->hStopEvent) {
-        ReplayLog("Failed to create synchronization events\n");
-        if (state->hReadyEvent) { CloseHandle(state->hReadyEvent); state->hReadyEvent = NULL; }
-        if (state->hSaveRequestEvent) { CloseHandle(state->hSaveRequestEvent); state->hSaveRequestEvent = NULL; }
-        if (state->hSaveCompleteEvent) { CloseHandle(state->hSaveCompleteEvent); state->hSaveCompleteEvent = NULL; }
-        if (state->hStopEvent) { CloseHandle(state->hStopEvent); state->hStopEvent = NULL; }
-        return FALSE;
-    }
+    state->hSaveRequestEvent = CreateEvent(NULL, FALSE, FALSE, NULL);  /* Auto reset */
+    if (!state->hSaveRequestEvent) goto cleanup;
+    
+    state->hSaveCompleteEvent = CreateEvent(NULL, FALSE, FALSE, NULL);  /* Auto reset */
+    if (!state->hSaveCompleteEvent) goto cleanup;
+    
+    state->hStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);  /* Manual reset */
+    if (!state->hStopEvent) goto cleanup;
     
     /* Initialize audio critical section */
     state->state = REPLAY_STATE_UNINITIALIZED;
     InitializeCriticalSection(&g_internal.audio.lock);
     g_internal.audio.lockInitialized = TRUE;
     return TRUE;
+    
+cleanup:
+    ReplayLog("Failed to create synchronization events\n");
+    SAFE_CLOSE_HANDLE(state->hReadyEvent);
+    SAFE_CLOSE_HANDLE(state->hSaveRequestEvent);
+    SAFE_CLOSE_HANDLE(state->hSaveCompleteEvent);
+    SAFE_CLOSE_HANDLE(state->hStopEvent);
+    return FALSE;
 }
 
 void ReplayBuffer_Shutdown(ReplayBufferState* state) {
     if (!state) return;
     ReplayBuffer_Stop(state);
     
-    /* Close event handles */
-    if (state->hReadyEvent) CloseHandle(state->hReadyEvent);
-    if (state->hSaveRequestEvent) CloseHandle(state->hSaveRequestEvent);
-    if (state->hSaveCompleteEvent) CloseHandle(state->hSaveCompleteEvent);
-    if (state->hStopEvent) CloseHandle(state->hStopEvent);
-    state->hReadyEvent = NULL;
-    state->hSaveRequestEvent = NULL;
-    state->hSaveCompleteEvent = NULL;
-    state->hStopEvent = NULL;
+    /* Close event handles - use SAFE_CLOSE_HANDLE for NULL-check and NULL-set */
+    SAFE_CLOSE_HANDLE(state->hReadyEvent);
+    SAFE_CLOSE_HANDLE(state->hSaveRequestEvent);
+    SAFE_CLOSE_HANDLE(state->hSaveCompleteEvent);
+    SAFE_CLOSE_HANDLE(state->hStopEvent);
     
     /* Clean up audio samples - must be done BEFORE deleting critical section */
     ReplayAudioState* audio = &g_internal.audio;

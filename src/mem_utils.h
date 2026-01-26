@@ -281,4 +281,46 @@ void  MemDebug_Shutdown(void);
  * See main.c for project-wide error handling standards.
  */
 
+/* ============================================================================
+ * MULTI-RESOURCE FUNCTION COMMENT TEMPLATE
+ * ============================================================================
+ * 
+ * Copy this template to document any function that acquires 3+ resources:
+ *
+ * /-*
+ *  * MULTI-RESOURCE FUNCTION: <FunctionName>
+ *  * Resources: <count> - <list of resource types>
+ *  * Pattern: goto-cleanup with SAFE_RELEASE/SAFE_FREE/SAFE_CLOSE_HANDLE
+ *  * Init: <how pointers are initialized to NULL - e.g., ZeroMemory, calloc, explicit>
+ *  *-/
+ *
+ * EXAMPLE:
+ *
+ * /-*
+ *  * MULTI-RESOURCE FUNCTION: CreateMediaPipeline
+ *  * Resources: 5 - IMFMediaType x2, IMFSample, IMFMediaBuffer, HANDLE
+ *  * Pattern: goto-cleanup with SAFE_RELEASE/SAFE_CLOSE_HANDLE
+ *  * Init: Explicit NULL assignment at declaration
+ *  *-/
+ * BOOL CreateMediaPipeline(void) {
+ *     IMFMediaType* inputType = NULL;
+ *     IMFMediaType* outputType = NULL;
+ *     IMFSample* sample = NULL;
+ *     IMFMediaBuffer* buffer = NULL;
+ *     HANDLE event = NULL;
+ *     
+ *     // ... acquisition and use ...
+ *     
+ *     return TRUE;
+ *     
+ * cleanup:
+ *     SAFE_CLOSE_HANDLE(event);
+ *     SAFE_RELEASE(buffer);
+ *     SAFE_RELEASE(sample);
+ *     SAFE_RELEASE(outputType);
+ *     SAFE_RELEASE(inputType);
+ *     return FALSE;
+ * }
+ */
+
 #endif /* MEM_UTILS_H */

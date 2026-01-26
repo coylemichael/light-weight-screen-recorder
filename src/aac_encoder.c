@@ -383,19 +383,22 @@ AACEncoder* AACEncoder_Create(void) {
     return AACEncoder_CreateEx(NULL);
 }
 
+/* Destroy AAC encoder using SAFE_* macros for consistent cleanup */
 void AACEncoder_Destroy(AACEncoder* encoder) {
     if (!encoder) return;
     
+    /* Send end-of-stream before releasing transform */
     if (encoder->transform) {
         encoder->transform->lpVtbl->ProcessMessage(encoder->transform, MFT_MESSAGE_NOTIFY_END_OF_STREAM, 0);
         encoder->transform->lpVtbl->ProcessMessage(encoder->transform, MFT_MESSAGE_COMMAND_DRAIN, 0);
-        encoder->transform->lpVtbl->Release(encoder->transform);
     }
     
-    if (encoder->inputType) encoder->inputType->lpVtbl->Release(encoder->inputType);
-    if (encoder->outputType) encoder->outputType->lpVtbl->Release(encoder->outputType);
-    if (encoder->inputBuffer) free(encoder->inputBuffer);
-    if (encoder->configData) free(encoder->configData);
+    /* Release in reverse order of acquisition */
+    SAFE_RELEASE(encoder->transform);
+    SAFE_RELEASE(encoder->inputType);
+    SAFE_RELEASE(encoder->outputType);
+    SAFE_FREE(encoder->inputBuffer);
+    SAFE_FREE(encoder->configData);
     
     free(encoder);
 }

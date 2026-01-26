@@ -18,6 +18,7 @@
 #include "util.h"
 #include "logger.h"
 #include "constants.h"
+#include "mem_utils.h"
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <functiondiscoverykeys_devpkey.h>
@@ -167,38 +168,28 @@ static AudioCaptureSource* CreateSource(const char* deviceId) {
     return src;
     
 cleanup:
-    // Clean up in reverse order of acquisition
-    // All pointers were initialized to NULL by calloc, so NULL checks are safe
+    /* Clean up in reverse order of acquisition using SAFE_* macros */
+    /* All pointers were initialized to NULL by calloc, so SAFE_* macros are safe */
     if (src) {
-        if (src->buffer) free(src->buffer);
-        if (src->deviceFormat) CoTaskMemFree(src->deviceFormat);
-        if (src->audioClient) src->audioClient->lpVtbl->Release(src->audioClient);
-        if (src->device) src->device->lpVtbl->Release(src->device);
+        SAFE_FREE(src->buffer);
+        SAFE_COTASKMEM_FREE(src->deviceFormat);
+        SAFE_RELEASE(src->audioClient);
+        SAFE_RELEASE(src->device);
         if (csInitialized) DeleteCriticalSection(&src->lock);
         free(src);
     }
     return NULL;
 }
 
-// Destroy a capture source
+/* Destroy a capture source using SAFE_* macros for consistent cleanup */
 static void DestroySource(AudioCaptureSource* src) {
     if (!src) return;
     
-    if (src->captureClient) {
-        src->captureClient->lpVtbl->Release(src->captureClient);
-    }
-    if (src->deviceFormat) {
-        CoTaskMemFree(src->deviceFormat);
-    }
-    if (src->audioClient) {
-        src->audioClient->lpVtbl->Release(src->audioClient);
-    }
-    if (src->device) {
-        src->device->lpVtbl->Release(src->device);
-    }
-    if (src->buffer) {
-        free(src->buffer);
-    }
+    SAFE_RELEASE(src->captureClient);
+    SAFE_COTASKMEM_FREE(src->deviceFormat);
+    SAFE_RELEASE(src->audioClient);
+    SAFE_RELEASE(src->device);
+    SAFE_FREE(src->buffer);
     
     DeleteCriticalSection(&src->lock);
     free(src);

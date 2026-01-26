@@ -12,6 +12,7 @@
 #include "gpu_converter.h"
 #include "logger.h"
 #include "constants.h"
+#include "mem_utils.h"
 #include <dxgi.h>
 
 #define GPULog Logger_Log
@@ -173,37 +174,18 @@ ID3D11Texture2D* GPUConverter_Convert(GPUConverter* conv, ID3D11Texture2D* bgraT
     return conv->outputTexture;
 }
 
+/* Shutdown GPU converter using SAFE_RELEASE for consistent cleanup */
 void GPUConverter_Shutdown(GPUConverter* conv) {
     if (!conv) return;
     
-    if (conv->outputView) {
-        conv->outputView->lpVtbl->Release(conv->outputView);
-        conv->outputView = NULL;
-    }
-    if (conv->outputTexture) {
-        conv->outputTexture->lpVtbl->Release(conv->outputTexture);
-        conv->outputTexture = NULL;
-    }
-    if (conv->videoProcessor) {
-        conv->videoProcessor->lpVtbl->Release(conv->videoProcessor);
-        conv->videoProcessor = NULL;
-    }
-    if (conv->processorEnum) {
-        conv->processorEnum->lpVtbl->Release(conv->processorEnum);
-        conv->processorEnum = NULL;
-    }
-    if (conv->videoContext) {
-        conv->videoContext->lpVtbl->Release(conv->videoContext);
-        conv->videoContext = NULL;
-    }
-    if (conv->videoDevice) {
-        conv->videoDevice->lpVtbl->Release(conv->videoDevice);
-        conv->videoDevice = NULL;
-    }
-    if (conv->context) {
-        conv->context->lpVtbl->Release(conv->context);
-        conv->context = NULL;
-    }
+    /* Release in reverse order of acquisition */
+    SAFE_RELEASE(conv->outputView);
+    SAFE_RELEASE(conv->outputTexture);
+    SAFE_RELEASE(conv->videoProcessor);
+    SAFE_RELEASE(conv->processorEnum);
+    SAFE_RELEASE(conv->videoContext);
+    SAFE_RELEASE(conv->videoDevice);
+    SAFE_RELEASE(conv->context);
     
     conv->initialized = FALSE;
 }
