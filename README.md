@@ -1,6 +1,6 @@
 # Light Weight Screen Recorder
 
-Lightweight screen recorder for Windows with instant replay. Buffer as much as your RAM allows and save replays instantly. Supports 8K, super ultrawide (32:9), and multi-monitor setups. Requires an NVIDIA GPU.
+Lightweight screen recorder for Windows with instant replay and audio capture. Buffer as much as your RAM allows and save replays instantly. Supports 8K, super ultrawide (32:9), and multi-monitor setups. Requires an NVIDIA GPU.
 
 ## Quick Start
 
@@ -9,7 +9,7 @@ Lightweight screen recorder for Windows with instant replay. Buffer as much as y
 
 **To record:** Select capture mode → hit record → stop when done
 
-**To save a replay:** Press F4 (default, changable in settings) anytime (buffer runs in background)
+**To save a replay:** Press F5 (configurable) anytime—the buffer runs in the background
 
 </p>
 
