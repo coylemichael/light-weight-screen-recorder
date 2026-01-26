@@ -159,6 +159,39 @@ Main Thread                    Buffer Thread
 - Main thread remains responsive (heartbeats, message pumping) during save
 - Legacy `ReplayBuffer_Save()` retained for testing (uses message pumping while waiting)
 
+### Health Monitor (`health_monitor.c`)
+
+Dedicated thread monitors worker thread health via heartbeats. Replaces old timer-based detection that blocked the UI thread.
+
+**Architecture:**
+```
+HealthMonitor Thread (500ms interval)
+     │
+     ├── Check buffer thread heartbeat age
+     ├── Check NVENC output thread heartbeat age
+     │
+     ├── Soft threshold (2s): Log warning
+     └── Hard threshold (5s): Post WM_WORKER_STALLED to g_controlWnd
+                                    │
+                                    ▼
+                            ControlWndProc
+                                    │
+                            ├── Duplicate stalled thread handle
+                            ├── Spawn cleanup thread (waits 100ms, terminates)
+                            └── Stop + Restart replay buffer
+```
+
+**Why dedicated thread?** Timer callbacks (`WM_TIMER`) run on the UI thread. If the UI thread is blocked (e.g., modal dialog, save operation), timer-based stall detection won't fire. The HealthMonitor thread is independent - it can detect stalls even if UI is unresponsive.
+
+**Cleanup Thread:** Terminating a thread from the message handler could deadlock if the stalled thread holds a lock the UI thread needs. Instead, we spawn a short-lived cleanup thread that:
+1. Waits 100ms (grace period for natural exit)
+2. Calls `TerminateThread()` if still running
+3. Closes both the original and duplicated handles
+
+**Key Messages:**
+- `WM_WORKER_STALLED` (WM_USER+300): Posted when hard threshold exceeded
+  - wParam: `StallType` enum (BUFFER_ONLY, NVENC_ONLY, BOTH)
+
 ---
 
 ## Debug Logging
