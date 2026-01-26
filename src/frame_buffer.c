@@ -17,6 +17,7 @@
 #include "logger.h"
 #include "constants.h"
 #include "leak_tracker.h"
+#include "mem_utils.h"
 #include <stdio.h>
 
 // Alias for logging
@@ -80,6 +81,12 @@ static void EvictOldFrames(FrameBuffer* buf, LONGLONG newTimestamp) {
     }
 }
 
+/*
+ * MULTI-RESOURCE FUNCTION: FrameBuffer_Init
+ * Resources: 3 - frames array (calloc), critical section, initialized flag
+ * Pattern: goto-cleanup with SAFE_FREE
+ * Init: ZeroMemory ensures NULL initialization
+ */
 BOOL FrameBuffer_Init(FrameBuffer* buf, int durationSeconds, int fps,
                       int width, int height, QualityPreset quality) {
     // Preconditions
@@ -93,6 +100,7 @@ BOOL FrameBuffer_Init(FrameBuffer* buf, int durationSeconds, int fps,
     if (durationSeconds <= 0 || fps <= 0 || width <= 0 || height <= 0) return FALSE;
     
     ZeroMemory(buf, sizeof(FrameBuffer));
+    BOOL csInitialized = FALSE;
     
     // Calculate capacity: frames for 1.5x duration (headroom)
     // Use size_t to prevent overflow during calculation
@@ -112,13 +120,13 @@ BOOL FrameBuffer_Init(FrameBuffer* buf, int durationSeconds, int fps,
     size_t allocSize = (size_t)capacity * sizeof(BufferedFrame);
     if (allocSize / sizeof(BufferedFrame) != (size_t)capacity) {
         BufLog("FrameBuffer_Init: allocation size overflow\n");
-        return FALSE;
+        goto cleanup;
     }
     
     buf->frames = (BufferedFrame*)calloc(capacity, sizeof(BufferedFrame));
     if (!buf->frames) {
         BufLog("Failed to allocate %d frames\n", capacity);
-        return FALSE;
+        goto cleanup;
     }
     
     buf->capacity = capacity;
@@ -132,12 +140,18 @@ BOOL FrameBuffer_Init(FrameBuffer* buf, int durationSeconds, int fps,
     buf->quality = quality;
     
     InitializeCriticalSection(&buf->lock);
+    csInitialized = TRUE;
     buf->initialized = TRUE;
     
     BufLog("FrameBuffer_Init: capacity=%d, maxDuration=%llds\n", 
            capacity, buf->maxDuration / 10000000LL);
     
     return TRUE;
+    
+cleanup:
+    SAFE_FREE(buf->frames);
+    if (csInitialized) DeleteCriticalSection(&buf->lock);
+    return FALSE;
 }
 
 void FrameBuffer_Shutdown(FrameBuffer* buf) {

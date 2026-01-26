@@ -4,7 +4,7 @@
 
 ### Improved
 - **Consolidated goto-cleanup pattern enforcement across codebase**
-  - Audited all functions acquiring 3+ resources
+  - Audited 26 functions acquiring 3+ resources (see summary below)
   - Standardized on `SAFE_RELEASE`, `SAFE_FREE`, `SAFE_CLOSE_HANDLE`, `SAFE_COTASKMEM_FREE` macros
   - All cleanup paths now use SAFE_* macros instead of raw `Release()`/`free()`/`CloseHandle()`
 
@@ -12,11 +12,19 @@
 - **replay_buffer.c**: Refactored `ReplayBuffer_Init` from inline cleanup to proper goto-cleanup pattern
 - **replay_buffer.c**: `ReplayBuffer_Shutdown` now uses `SAFE_CLOSE_HANDLE` for event handles
 - **audio_capture.c**: `CreateSource` and `DestroySource` now use `SAFE_FREE`, `SAFE_RELEASE`, `SAFE_COTASKMEM_FREE`
+- **audio_capture.c**: `AudioCapture_Create` refactored to goto-cleanup pattern with `SAFE_FREE`
+- **audio_capture.c**: `AudioCapture_Destroy` now uses `SAFE_FREE`
 - **gpu_converter.c**: `GPUConverter_Shutdown` now uses `SAFE_RELEASE` for all COM objects
 - **aac_encoder.c**: `AACEncoder_Destroy` now uses `SAFE_FREE` and `SAFE_RELEASE`
+- **frame_buffer.c**: `FrameBuffer_Init` refactored to goto-cleanup pattern with `SAFE_FREE`
 
 ### Added
 - **mem_utils.h**: Multi-resource function comment template for documenting functions with 3+ resources
+
+### Audit Summary
+- 22 functions properly using goto-cleanup with SAFE_* macros ✅
+- 3 functions fixed in this release (FrameBuffer_Init, AudioCapture_Create, AudioCapture_Destroy)
+- 5 GDI/GDI+ functions use manual cleanup (acceptable pattern for these APIs)
 
 ## [1.2.16] - 2026-01-26
 

@@ -487,6 +487,12 @@ static DWORD WINAPI SourceCaptureThread(LPVOID param) {
     return 0;
 }
 
+/*
+ * MULTI-RESOURCE FUNCTION: AudioCapture_Create
+ * Resources: 4 - ctx (calloc), mixLock (CS), mixBuffer (malloc), sources[3]
+ * Pattern: goto-cleanup with SAFE_FREE
+ * Init: calloc ensures NULL initialization
+ */
 AudioCaptureContext* AudioCapture_Create(
     const char* deviceId1, int volume1,
     const char* deviceId2, int volume2,
@@ -508,11 +514,7 @@ AudioCaptureContext* AudioCapture_Create(
     // Allocate mix buffer
     ctx->mixBufferSize = MIX_BUFFER_SIZE;
     ctx->mixBuffer = (BYTE*)malloc(ctx->mixBufferSize);
-    if (!ctx->mixBuffer) {
-        if (csInitialized) DeleteCriticalSection(&ctx->mixLock);
-        free(ctx);
-        return NULL;
-    }
+    if (!ctx->mixBuffer) goto cleanup;
     
     // Create sources and assign volumes to match source index
     // This ensures volumes[i] corresponds to sources[i]
@@ -534,6 +536,12 @@ AudioCaptureContext* AudioCapture_Create(
     }
     
     return ctx;
+    
+cleanup:
+    SAFE_FREE(ctx->mixBuffer);
+    if (csInitialized) DeleteCriticalSection(&ctx->mixLock);
+    free(ctx);
+    return NULL;
 }
 
 void AudioCapture_Destroy(AudioCaptureContext* ctx) {
@@ -545,9 +553,7 @@ void AudioCapture_Destroy(AudioCaptureContext* ctx) {
         DestroySource(ctx->sources[i]);
     }
     
-    if (ctx->mixBuffer) {
-        free(ctx->mixBuffer);
-    }
+    SAFE_FREE(ctx->mixBuffer);
     
     DeleteCriticalSection(&ctx->mixLock);
     free(ctx);
