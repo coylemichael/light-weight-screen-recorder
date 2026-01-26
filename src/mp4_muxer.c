@@ -120,6 +120,12 @@ static BOOL WriteVideoSampleToWriter(IMFSinkWriter* writer, DWORD streamIndex,
         mfBuffer->lpVtbl->Release(mfBuffer);
         return FALSE;
     }
+    LWSR_ASSERT(bufData != NULL);
+    if (!bufData) {
+        mfBuffer->lpVtbl->Unlock(mfBuffer);
+        mfBuffer->lpVtbl->Release(mfBuffer);
+        return FALSE;
+    }
     
     memcpy(bufData, sample->data, sample->size);
     mfBuffer->lpVtbl->Unlock(mfBuffer);
@@ -162,6 +168,12 @@ static BOOL WriteAudioSampleToWriter(IMFSinkWriter* writer, DWORD streamIndex,
     BYTE* bufData = NULL;
     hr = mfBuffer->lpVtbl->Lock(mfBuffer, &bufData, NULL, NULL);
     if (FAILED(hr)) {
+        mfBuffer->lpVtbl->Release(mfBuffer);
+        return FALSE;
+    }
+    LWSR_ASSERT(bufData != NULL);
+    if (!bufData) {
+        mfBuffer->lpVtbl->Unlock(mfBuffer);
         mfBuffer->lpVtbl->Release(mfBuffer);
         return FALSE;
     }

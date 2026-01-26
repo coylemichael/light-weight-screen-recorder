@@ -143,21 +143,23 @@ static void ProcessOutput(AACEncoder* encoder) {
             if (buffer) {
                 BYTE* data = NULL;
                 DWORD dataLen = 0;
-                buffer->lpVtbl->Lock(buffer, &data, NULL, &dataLen);
+                HRESULT lockHr = buffer->lpVtbl->Lock(buffer, &data, NULL, &dataLen);
                 
-                if (data && dataLen > 0 && encoder->callback) {
-                    AACSample sample = {0};
-                    sample.data = data;
-                    sample.size = dataLen;
-                    sample.timestamp = encoder->nextTimestamp;
-                    sample.duration = encoder->frameDuration;
-                    
-                    encoder->callback(&sample, encoder->userData);
-                    
-                    encoder->nextTimestamp += encoder->frameDuration;
+                if (SUCCEEDED(lockHr)) {
+                    LWSR_ASSERT(data != NULL);
+                    if (data && dataLen > 0 && encoder->callback) {
+                        AACSample sample = {0};
+                        sample.data = data;
+                        sample.size = dataLen;
+                        sample.timestamp = encoder->nextTimestamp;
+                        sample.duration = encoder->frameDuration;
+                        
+                        encoder->callback(&sample, encoder->userData);
+                        
+                        encoder->nextTimestamp += encoder->frameDuration;
+                    }
+                    buffer->lpVtbl->Unlock(buffer);
                 }
-                
-                buffer->lpVtbl->Unlock(buffer);
                 buffer->lpVtbl->Release(buffer);
             }
         }
@@ -453,6 +455,13 @@ BOOL AACEncoder_Feed(AACEncoder* encoder, const BYTE* pcmData, int pcmSize, LONG
             BYTE* bufData = NULL;
             hr = buffer->lpVtbl->Lock(buffer, &bufData, NULL, NULL);
             if (FAILED(hr)) {
+                buffer->lpVtbl->Release(buffer);
+                sample->lpVtbl->Release(sample);
+                break;
+            }
+            LWSR_ASSERT(bufData != NULL);
+            if (!bufData) {
+                buffer->lpVtbl->Unlock(buffer);
                 buffer->lpVtbl->Release(buffer);
                 sample->lpVtbl->Release(sample);
                 break;

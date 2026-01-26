@@ -219,6 +219,8 @@ BOOL Encoder_WriteFrame(EncoderState* state, const BYTE* frameData, UINT64 times
     // Lock buffer and copy frame data
     hr = buffer->lpVtbl->Lock(buffer, &bufferData, NULL, NULL);
     if (FAILED(hr)) goto cleanup;
+    LWSR_ASSERT(bufferData != NULL);
+    if (!bufferData) goto cleanup;
     
     // Copy frame data (flip vertically for Media Foundation)
     size_t rowBytes = (size_t)state->width * BYTES_PER_PIXEL_BGRA;

@@ -22,6 +22,7 @@
 
 #include <stdlib.h>
 #include <windows.h>
+#include "constants.h"  /* For LWSR_ASSERT in MF_LOCK_BUFFER macros */
 
 /* ============================================================================
  * SAFE FREE MACROS
@@ -163,6 +164,83 @@
         if (FAILED(_hr)) { \
             Logger_Log("%s failed (0x%08X)\n", context, _hr); \
             goto cleanupLabel; \
+        } \
+    } while (0)
+
+/* ============================================================================
+ * IMFMediaBuffer LOCK/UNLOCK HELPERS
+ * ============================================================================
+ * 
+ * These macros provide safe lock/unlock patterns for IMFMediaBuffer:
+ *   1. Check HRESULT after Lock()
+ *   2. Assert buffer pointer is valid in debug builds
+ *   3. Ensure Unlock() is always called, even on error paths
+ * 
+ * CRITICAL: IMFMediaBuffer::Lock() can succeed but return NULL in edge cases
+ * (e.g., zero-length buffer). Always validate the data pointer before use.
+ * 
+ * USAGE (goto-cleanup pattern):
+ *   BYTE* bufData = NULL;
+ *   BOOL bufLocked = FALSE;
+ *   
+ *   MF_LOCK_BUFFER(buffer, &bufData, NULL, NULL, hr, cleanup, bufLocked);
+ *   // Use bufData safely here - it's validated
+ *   memcpy(bufData, src, size);
+ *   MF_UNLOCK_BUFFER(buffer, bufLocked);
+ *   
+ * cleanup:
+ *   MF_UNLOCK_BUFFER(buffer, bufLocked);  // Safe - checks bufLocked flag
+ *   SAFE_RELEASE(buffer);
+ *   
+ * USAGE (inline pattern for simple cases):
+ *   BYTE* data = NULL;
+ *   hr = buffer->lpVtbl->Lock(buffer, &data, NULL, NULL);
+ *   if (FAILED(hr)) { ... error handling ... }
+ *   LWSR_ASSERT(data != NULL);  // Debug check
+ *   if (!data) { buffer->lpVtbl->Unlock(buffer); ... error handling ... }
+ */
+
+/* Lock buffer with full error checking and debug assertion.
+ * Sets lockFlag to TRUE on success so cleanup knows to unlock.
+ * Uses LWSR_ASSERT for debug builds (defined in constants.h).
+ */
+#define MF_LOCK_BUFFER(buf, pData, pMaxLen, pCurLen, hrVar, cleanupLabel, lockFlag) \
+    do { \
+        (hrVar) = (buf)->lpVtbl->Lock((buf), (pData), (pMaxLen), (pCurLen)); \
+        if (FAILED(hrVar)) { \
+            goto cleanupLabel; \
+        } \
+        (lockFlag) = TRUE; \
+        LWSR_ASSERT(*(pData) != NULL); \
+        if (*(pData) == NULL) { \
+            (hrVar) = E_POINTER; \
+            goto cleanupLabel; \
+        } \
+    } while (0)
+
+/* Lock buffer with logging on failure */
+#define MF_LOCK_BUFFER_LOG(buf, pData, pMaxLen, pCurLen, hrVar, cleanupLabel, lockFlag, context) \
+    do { \
+        (hrVar) = (buf)->lpVtbl->Lock((buf), (pData), (pMaxLen), (pCurLen)); \
+        if (FAILED(hrVar)) { \
+            Logger_Log("%s: Lock failed (0x%08X)\n", context, hrVar); \
+            goto cleanupLabel; \
+        } \
+        (lockFlag) = TRUE; \
+        LWSR_ASSERT(*(pData) != NULL); \
+        if (*(pData) == NULL) { \
+            Logger_Log("%s: Lock succeeded but data pointer is NULL\n", context); \
+            (hrVar) = E_POINTER; \
+            goto cleanupLabel; \
+        } \
+    } while (0)
+
+/* Safe unlock - only unlocks if lockFlag is TRUE, then clears the flag */
+#define MF_UNLOCK_BUFFER(buf, lockFlag) \
+    do { \
+        if ((lockFlag) && (buf)) { \
+            (buf)->lpVtbl->Unlock(buf); \
+            (lockFlag) = FALSE; \
         } \
     } while (0)
 

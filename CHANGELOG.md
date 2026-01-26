@@ -1,5 +1,27 @@
 # Changelog
 
+## [1.2.18] - 2026-01-26
+
+### Added
+- **IMFMediaBuffer Lock/Unlock helper macros in mem_utils.h**
+  - `MF_LOCK_BUFFER()`: Lock with HRESULT check, LWSR_ASSERT, NULL validation, and lock flag tracking
+  - `MF_LOCK_BUFFER_LOG()`: Same as above with logging on failure
+  - `MF_UNLOCK_BUFFER()`: Safe unlock that only unlocks if lock flag is TRUE
+
+### Fixed
+- **aac_encoder.c (ProcessOutput)**: CRITICAL - Lock() return value was not checked; Unlock() was called unconditionally even if Lock() failed
+- **aac_encoder.c (AACEncoder_Feed)**: Added LWSR_ASSERT and defensive NULL check after Lock()
+- **mp4_muxer.c (WriteVideoSampleToWriter)**: Added LWSR_ASSERT and defensive NULL check after Lock() with proper Unlock on error
+- **mp4_muxer.c (WriteAudioSampleToWriter)**: Added LWSR_ASSERT and defensive NULL check after Lock() with proper Unlock on error
+- **encoder.c (Encoder_WriteFrame)**: Added LWSR_ASSERT and defensive NULL check after Lock()
+
+### Improved
+- **Defensive NULL checks after all IMFMediaBuffer::Lock() operations**
+  - All 5 Lock() call sites now verify HRESULT before using buffer pointer
+  - All 5 Lock() call sites have LWSR_ASSERT() for debug builds
+  - All 5 Lock() call sites have runtime NULL checks for release builds
+  - All 5 Lock() call sites have corresponding Unlock() on both success and error paths
+
 ## [1.2.17] - 2026-01-26
 
 ### Improved
