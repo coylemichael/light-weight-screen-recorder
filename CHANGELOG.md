@@ -1,5 +1,21 @@
 # Changelog
 
+## [1.2.16] - 2026-01-26
+
+### Added
+- **Dedicated HealthMonitor thread for stall detection**
+  - New `health_monitor.h/c`: monitors worker thread heartbeats every 500ms
+  - Detects soft stalls (2s warning) and hard stalls (5s critical)
+  - Posts `WM_WORKER_STALLED` to UI thread for safe recovery
+  - Spawns cleanup thread to safely terminate stalled threads
+  - Replaces old timer-based detection that could block UI thread
+
+### Fixed
+- **Stall recovery now works correctly** - `WM_WORKER_STALLED` posted to `g_controlWnd` (where handler lives) instead of `g_overlayWnd`
+
+### Verified
+- 13+ hour continuous run: 2.9M frames @ 60 FPS, zero stalls, stable leak tracker deltas
+
 ## [1.2.15] - 2026-01-24
 
 ### Improved
