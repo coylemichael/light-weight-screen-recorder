@@ -998,16 +998,11 @@ static void MinimizeToTray(void) {
     ActionToolbar_Hide();
     if (g_windows.settingsWnd) ShowWindow(g_windows.settingsWnd, SW_HIDE);
     
-    // Add tray icon
-    AddTrayIcon();
     g_tray.minimizedToTray = TRUE;
 }
 
 static void RestoreFromTray(void) {
     if (!g_tray.minimizedToTray) return;
-    
-    // Remove tray icon
-    RemoveTrayIcon();
     
     // Show control panel
     ShowWindow(g_controlWnd, SW_SHOW);
@@ -1260,10 +1255,15 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     // Only show the control panel at startup
     UpdateWindow(g_controlWnd);
     
+    // Add system tray icon (always visible)
+    AddTrayIcon();
+    
     return TRUE;
 }
 
 void Overlay_Destroy(void) {
+    // Remove tray icon
+    RemoveTrayIcon();
     // Thread-safe check
     if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
         Recording_Stop();
@@ -2611,10 +2611,6 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             return 0;
         
         case WM_DESTROY:
-            // Clean up tray icon if minimized
-            if (g_tray.minimizedToTray) {
-                RemoveTrayIcon();
-            }
             if (g_uiFont) DeleteObject(g_uiFont);
             if (g_iconFont) DeleteObject(g_iconFont);
             return 0;
