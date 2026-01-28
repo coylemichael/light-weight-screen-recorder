@@ -57,6 +57,9 @@ struct AudioCaptureSource {
     /* Device invalidation tracking */
     volatile LONG deviceInvalidated;
     DWORD consecutiveErrors;
+    
+    /* Recovery tracking */
+    LARGE_INTEGER lastRecoveryAttempt;
 };
 
 /*
@@ -194,6 +197,120 @@ static void DestroySource(AudioCaptureSource* src) {
     DeleteCriticalSection(&src->lock);
     free(src);
 }
+
+// Forward declaration for SourceCaptureThread
+static DWORD WINAPI SourceCaptureThread(LPVOID param);
+
+// Forward declaration for InitSourceCapture
+static BOOL InitSourceCapture(AudioCaptureSource* src);
+
+/*
+ * MULTI-RESOURCE FUNCTION: TryRecoverSource
+ * Resources: 4 - device, audioClient, deviceFormat, captureClient (via InitSourceCapture)
+ * Pattern: goto-cleanup with SAFE_*
+ * 
+ * Try to recover an invalidated audio source.
+ * This releases old COM objects and re-acquires them.
+ * Returns TRUE if recovery succeeded.
+ * 
+ * IMPORTANT: Caller must ensure source thread is stopped before calling.
+ */
+static BOOL TryRecoverSource(AudioCaptureSource* src) {
+    if (!src || !g_audioEnumerator) return FALSE;
+    
+    HRESULT hr;
+    BOOL audioStarted = FALSE;
+    
+    Logger_Log("Audio source '%s' attempting recovery...\n", src->deviceId);
+    
+    // Release old COM objects (they're invalid anyway)
+    // SAFE_* macros handle NULL and set to NULL after release
+    SAFE_RELEASE(src->captureClient);
+    SAFE_COTASKMEM_FREE(src->deviceFormat);
+    SAFE_RELEASE(src->audioClient);
+    SAFE_RELEASE(src->device);
+    
+    // Try to reacquire device
+    WCHAR wideId[256];
+    Util_Utf8ToWide(src->deviceId, wideId, 256);
+    
+    hr = g_audioEnumerator->lpVtbl->GetDevice(g_audioEnumerator, wideId, &src->device);
+    if (FAILED(hr)) {
+        Logger_Log("Audio source '%s' recovery failed: device not found (0x%08X)\n", src->deviceId, hr);
+        goto cleanup;
+    }
+    
+    // Activate audio client
+    hr = src->device->lpVtbl->Activate(
+        src->device,
+        &IID_IAudioClient_Shared,
+        CLSCTX_ALL,
+        NULL,
+        (void**)&src->audioClient
+    );
+    if (FAILED(hr)) {
+        Logger_Log("Audio source '%s' recovery failed: Activate (0x%08X)\n", src->deviceId, hr);
+        goto cleanup;
+    }
+    
+    // Get device format
+    hr = src->audioClient->lpVtbl->GetMixFormat(src->audioClient, &src->deviceFormat);
+    if (FAILED(hr)) {
+        Logger_Log("Audio source '%s' recovery failed: GetMixFormat (0x%08X)\n", src->deviceId, hr);
+        goto cleanup;
+    }
+    
+    // Initialize capture (creates captureClient)
+    if (!InitSourceCapture(src)) {
+        Logger_Log("Audio source '%s' recovery failed: InitSourceCapture\n", src->deviceId);
+        goto cleanup;
+    }
+    
+    // Start the audio client
+    hr = src->audioClient->lpVtbl->Start(src->audioClient);
+    if (FAILED(hr)) {
+        Logger_Log("Audio source '%s' recovery failed: Start (0x%08X)\n", src->deviceId, hr);
+        goto cleanup;
+    }
+    audioStarted = TRUE;
+    
+    // Clear invalidation flag and error count (use Interlocked for thread safety)
+    InterlockedExchange(&src->deviceInvalidated, FALSE);
+    src->consecutiveErrors = 0;
+    src->hasReceivedPacket = FALSE;
+    
+    // Clear buffer (protected by critical section)
+    EnterCriticalSection(&src->lock);
+    src->bufferAvailable = 0;
+    src->bufferWritePos = 0;
+    LeaveCriticalSection(&src->lock);
+    
+    // Restart capture thread (use Interlocked for thread safety)
+    InterlockedExchange(&src->active, TRUE);
+    src->captureThread = CreateThread(NULL, 0, SourceCaptureThread, src, 0, NULL);
+    if (!src->captureThread) {
+        Logger_Log("Audio source '%s' recovery failed: CreateThread\n", src->deviceId);
+        InterlockedExchange(&src->active, FALSE);
+        goto cleanup;
+    }
+    
+    Logger_Log("Audio source '%s' recovered successfully!\n", src->deviceId);
+    return TRUE;
+    
+cleanup:
+    // Release in reverse order of acquisition
+    if (audioStarted && src->audioClient) {
+        src->audioClient->lpVtbl->Stop(src->audioClient);
+    }
+    SAFE_RELEASE(src->captureClient);
+    SAFE_COTASKMEM_FREE(src->deviceFormat);
+    SAFE_RELEASE(src->audioClient);
+    SAFE_RELEASE(src->device);
+    return FALSE;
+}
+
+// Recovery interval: try every 5 seconds
+#define AUDIO_RECOVERY_INTERVAL_MS 5000
 
 // Initialize a source for capture
 static BOOL InitSourceCapture(AudioCaptureSource* src) {
@@ -708,12 +825,51 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
     QueryPerformanceCounter(&rateStartTime);
     LONGLONG totalBytesOutput = 0;  // Total bytes we've written to mix buffer
     
+    // Recovery timing
+    LARGE_INTEGER lastRecoveryCheck;
+    QueryPerformanceCounter(&lastRecoveryCheck);
+    
     while (InterlockedCompareExchange(&ctx->running, 0, 0)) {
         // Heartbeat for monitoring
         Logger_Heartbeat(THREAD_AUDIO_MIX);
         
         LARGE_INTEGER now;
         QueryPerformanceCounter(&now);
+        
+        // ====================================================================
+        // Check for invalidated sources and attempt recovery (every 5 seconds)
+        // This is lightweight: just checks a flag and timer, no COM calls
+        // unless we actually need to recover
+        // ====================================================================
+        double msSinceRecoveryCheck = (double)(now.QuadPart - lastRecoveryCheck.QuadPart) * 1000.0 / ctx->perfFreq.QuadPart;
+        if (msSinceRecoveryCheck >= AUDIO_RECOVERY_INTERVAL_MS) {
+            lastRecoveryCheck = now;
+            
+            for (int i = 0; i < ctx->sourceCount; i++) {
+                AudioCaptureSource* src = ctx->sources[i];
+                if (!src) continue;
+                
+                // Check if source is invalidated AND thread has stopped
+                if (InterlockedCompareExchange(&src->deviceInvalidated, 0, 0) &&
+                    !InterlockedCompareExchange(&src->active, 0, 0)) {
+                    
+                    // Check if enough time passed since last recovery attempt for this source
+                    double msSinceLastAttempt = (double)(now.QuadPart - src->lastRecoveryAttempt.QuadPart) * 1000.0 / ctx->perfFreq.QuadPart;
+                    if (msSinceLastAttempt >= AUDIO_RECOVERY_INTERVAL_MS || src->lastRecoveryAttempt.QuadPart == 0) {
+                        src->lastRecoveryAttempt = now;
+                        
+                        // Wait for thread to fully exit if handle exists
+                        if (src->captureThread) {
+                            WaitForSingleObject(src->captureThread, 1000);
+                            CloseHandle(src->captureThread);
+                            src->captureThread = NULL;
+                        }
+                        
+                        TryRecoverSource(src);
+                    }
+                }
+            }
+        }
         
         // Check how much data is available from each source
         int maxBytes = 0;

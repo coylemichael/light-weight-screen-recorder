@@ -93,7 +93,7 @@ BOOL ReplayBuffer_SaveAsync(ReplayBufferState* state, const char* outputPath,
 // Check if a save is currently in progress
 BOOL ReplayBuffer_IsSaving(ReplayBufferState* state);
 
-int ReplayBuffer_EstimateRAMUsage(int durationSeconds, int width, int height, int fps);
+int ReplayBuffer_EstimateRAMUsage(int durationSeconds, int width, int height, int fps, QualityPreset quality);
 void ReplayBuffer_GetStatus(ReplayBufferState* state, char* buffer, int bufferSize);
 
 #endif

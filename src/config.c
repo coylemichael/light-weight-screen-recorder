@@ -19,8 +19,8 @@
  * Read-only after compile time. Used by Config_GetFormatExtension/Name.
  * Thread Access: [ReadOnly - safe for concurrent access]
  */
-static const char* const FORMAT_EXTENSIONS[] = { ".mp4", ".avi", ".wmv" };
-static const char* const FORMAT_NAMES[] = { "MP4 (H.264)", "AVI", "WMV" };
+static const char* const FORMAT_EXTENSIONS[] = { ".mp4", ".mp4", ".avi", ".wmv" };
+static const char* const FORMAT_NAMES[] = { "MP4 (H.264)", "MP4 (H.265)", "AVI", "WMV" };
 
 void Config_GetPath(char* buffer, size_t size) {
     // Preconditions
@@ -190,7 +190,8 @@ void Config_Load(AppConfig* config) {
             config->replayDuration = REPLAY_DURATION_MIN_SECS;
         if (config->replayDuration > REPLAY_DURATION_MAX_SECS)
             config->replayDuration = REPLAY_DURATION_MAX_SECS;
-        if (config->replayFPS != 30 && config->replayFPS != 60)
+        if (config->replayFPS != 30 && config->replayFPS != 60 && 
+            config->replayFPS != 120 && config->replayFPS != 240)
             config->replayFPS = DEFAULT_FPS;
         if (config->audioVolume1 < 0) config->audioVolume1 = 0;
         if (config->audioVolume1 > 100) config->audioVolume1 = 100;

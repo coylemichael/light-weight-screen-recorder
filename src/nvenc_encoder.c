@@ -148,6 +148,247 @@ static BOOL CreateInputTextures(NVENCEncoder* enc);
 static void DestroyInputTextures(NVENCEncoder* enc);
 
 // ============================================================================
+// Global NVENC Session Tracking
+// 
+// NVENC limits concurrent encode sessions per GPU (typically 3-5).
+// When threads stall and leak sessions, we run out. This tracker allows
+// force-destroying leaked sessions before creating new ones.
+//
+// Per NVIDIA SDK docs, proper cleanup requires (in order):
+// 1. Flush encoder (send EOS via NvEncEncodePicture with NULL)
+// 2. Free all input/output buffers
+// 3. Unregister completion events (async mode)
+// 4. Call NvEncDestroyEncoder
+// ============================================================================
+
+#define MAX_TRACKED_SESSIONS 8
+
+typedef struct {
+    void* encoder;                                      // NVENC encoder handle
+    NV_ENCODE_API_FUNCTION_LIST fn;                     // Function pointers for this session
+    HMODULE nvencLib;                                   // Library handle
+    volatile LONG inUse;                                // 1 if active, 0 if leaked/available
+    
+    // Resources needed for proper cleanup (per NVIDIA SDK requirements)
+    NV_ENC_OUTPUT_PTR outputBuffers[NUM_BUFFERS];       // Bitstream buffers
+    HANDLE completionEvents[NUM_BUFFERS];               // Async completion events
+    NV_ENC_REGISTERED_PTR registeredResources[NUM_BUFFERS]; // Registered input resources
+    ID3D11DeviceContext* encContext;                    // For D3D11 Flush before cleanup
+} TrackedSession;
+
+static TrackedSession g_sessions[MAX_TRACKED_SESSIONS];
+static CRITICAL_SECTION g_sessionLock;
+static volatile LONG g_sessionLockInit = 0;
+
+static void InitSessionTracker(void) {
+    if (InterlockedCompareExchange(&g_sessionLockInit, 1, 0) == 0) {
+        InitializeCriticalSection(&g_sessionLock);
+    }
+}
+
+// Register a new session for tracking (called after encoder fully initialized)
+static int TrackSession(void* encoder, NV_ENCODE_API_FUNCTION_LIST* fn, HMODULE lib,
+                        NV_ENC_OUTPUT_PTR* outputBufs, HANDLE* events, 
+                        NV_ENC_REGISTERED_PTR* regResources, ID3D11DeviceContext* ctx) {
+    InitSessionTracker();
+    EnterCriticalSection(&g_sessionLock);
+    
+    int slot = -1;
+    for (int i = 0; i < MAX_TRACKED_SESSIONS; i++) {
+        if (g_sessions[i].encoder == NULL) {
+            g_sessions[i].encoder = encoder;
+            g_sessions[i].fn = *fn;
+            g_sessions[i].nvencLib = lib;
+            g_sessions[i].inUse = 1;
+            g_sessions[i].encContext = ctx;
+            
+            // Copy resource handles for proper cleanup
+            for (int j = 0; j < NUM_BUFFERS; j++) {
+                g_sessions[i].outputBuffers[j] = outputBufs ? outputBufs[j] : NULL;
+                g_sessions[i].completionEvents[j] = events ? events[j] : NULL;
+                g_sessions[i].registeredResources[j] = regResources ? regResources[j] : NULL;
+            }
+            
+            slot = i;
+            NvLog("NVENCEncoder: Tracking session in slot %d (with cleanup resources)\n", i);
+            break;
+        }
+    }
+    
+    LeaveCriticalSection(&g_sessionLock);
+    return slot;
+}
+
+// Unregister a session (normal cleanup - resources already freed by caller)
+static void UntrackSession(void* encoder) {
+    InitSessionTracker();
+    EnterCriticalSection(&g_sessionLock);
+    
+    for (int i = 0; i < MAX_TRACKED_SESSIONS; i++) {
+        if (g_sessions[i].encoder == encoder) {
+            // Clear all tracked data
+            g_sessions[i].encoder = NULL;
+            g_sessions[i].inUse = 0;
+            g_sessions[i].encContext = NULL;
+            for (int j = 0; j < NUM_BUFFERS; j++) {
+                g_sessions[i].outputBuffers[j] = NULL;
+                g_sessions[i].completionEvents[j] = NULL;
+                g_sessions[i].registeredResources[j] = NULL;
+            }
+            NvLog("NVENCEncoder: Untracked session from slot %d\n", i);
+            break;
+        }
+    }
+    
+    LeaveCriticalSection(&g_sessionLock);
+}
+
+// Mark a session as leaked (thread stalled, we lost control)
+static void MarkSessionLeaked(void* encoder) {
+    InitSessionTracker();
+    EnterCriticalSection(&g_sessionLock);
+    
+    for (int i = 0; i < MAX_TRACKED_SESSIONS; i++) {
+        if (g_sessions[i].encoder == encoder) {
+            g_sessions[i].inUse = 0;  // Mark as leaked
+            NvLog("NVENCEncoder: Marked session slot %d as leaked\n", i);
+            break;
+        }
+    }
+    
+    LeaveCriticalSection(&g_sessionLock);
+}
+
+// Force-destroy leaked sessions with PROPER cleanup sequence per NVIDIA SDK
+// This is called when NVENC runs out of sessions (error 21)
+static int ForceCleanupLeakedSessions(void) {
+    InitSessionTracker();
+    EnterCriticalSection(&g_sessionLock);
+    
+    int cleaned = 0;
+    for (int i = 0; i < MAX_TRACKED_SESSIONS; i++) {
+        if (g_sessions[i].encoder != NULL && g_sessions[i].inUse == 0) {
+            void* enc = g_sessions[i].encoder;
+            NV_ENCODE_API_FUNCTION_LIST* fn = &g_sessions[i].fn;
+            
+            NvLog("NVENCEncoder: Force-cleanup leaked session in slot %d (proper sequence)\n", i);
+            
+            // ================================================================
+            // Step 0: Flush D3D11 context to complete pending GPU work
+            // Per NVIDIA: equivalent to cuCtxSynchronize() 
+            // ================================================================
+            if (g_sessions[i].encContext) {
+                NvLog("NVENCEncoder: [Slot %d] Step 0: Flushing D3D11 context\n", i);
+                g_sessions[i].encContext->lpVtbl->Flush(g_sessions[i].encContext);
+            }
+            
+            // ================================================================
+            // Step 1: Send EOS to flush encoder
+            // Per NVIDIA SDK: "must flush the encoder before freeing resources"
+            // ================================================================
+            NvLog("NVENCEncoder: [Slot %d] Step 1: Sending EOS flush\n", i);
+            NV_ENC_PIC_PARAMS picParams = {0};
+            picParams.version = NV_ENC_PIC_PARAMS_VER;
+            picParams.encodePicFlags = NV_ENC_PIC_FLAG_EOS;
+            NVENCSTATUS st = fn->nvEncEncodePicture(enc, &picParams);
+            if (st != NV_ENC_SUCCESS) {
+                NvLog("NVENCEncoder: [Slot %d] EOS flush failed (status=%d) - continuing cleanup\n", i, st);
+            } else {
+                NvLog("NVENCEncoder: [Slot %d] EOS flush succeeded\n", i);
+            }
+            
+            // ================================================================
+            // Step 2: Unregister async completion events
+            // Per NVIDIA SDK: "must unregister events before destroying encoder"
+            // ================================================================
+            NvLog("NVENCEncoder: [Slot %d] Step 2: Unregistering %d events\n", i, NUM_BUFFERS);
+            for (int j = 0; j < NUM_BUFFERS; j++) {
+                if (g_sessions[i].completionEvents[j]) {
+                    NV_ENC_EVENT_PARAMS eventParams = {0};
+                    eventParams.version = NV_ENC_EVENT_PARAMS_VER;
+                    eventParams.completionEvent = g_sessions[i].completionEvents[j];
+                    st = fn->nvEncUnregisterAsyncEvent(enc, &eventParams);
+                    if (st != NV_ENC_SUCCESS) {
+                        NvLog("NVENCEncoder: [Slot %d] Event[%d] unregister failed (%d)\n", i, j, st);
+                    }
+                    // Note: Don't CloseHandle here - the original encoder owns the handle
+                }
+            }
+            
+            // ================================================================
+            // Step 3: Destroy bitstream output buffers
+            // Per NVIDIA SDK: "must free all output buffers before destroying"
+            // ================================================================
+            NvLog("NVENCEncoder: [Slot %d] Step 3: Destroying %d output buffers\n", i, NUM_BUFFERS);
+            for (int j = 0; j < NUM_BUFFERS; j++) {
+                if (g_sessions[i].outputBuffers[j]) {
+                    st = fn->nvEncDestroyBitstreamBuffer(enc, g_sessions[i].outputBuffers[j]);
+                    if (st != NV_ENC_SUCCESS) {
+                        NvLog("NVENCEncoder: [Slot %d] Buffer[%d] destroy failed (%d)\n", i, j, st);
+                    }
+                }
+            }
+            
+            // ================================================================
+            // Step 4: Unregister input resources
+            // Per NVIDIA SDK: "must unregister resources before destroying"
+            // ================================================================
+            NvLog("NVENCEncoder: [Slot %d] Step 4: Unregistering %d input resources\n", i, NUM_BUFFERS);
+            for (int j = 0; j < NUM_BUFFERS; j++) {
+                if (g_sessions[i].registeredResources[j]) {
+                    st = fn->nvEncUnregisterResource(enc, g_sessions[i].registeredResources[j]);
+                    if (st != NV_ENC_SUCCESS) {
+                        NvLog("NVENCEncoder: [Slot %d] Resource[%d] unregister failed (%d)\n", i, j, st);
+                    }
+                }
+            }
+            
+            // ================================================================
+            // Step 5: Destroy encoder session
+            // Now safe to destroy since all resources are freed
+            // ================================================================
+            NvLog("NVENCEncoder: [Slot %d] Step 5: Destroying encoder session\n", i);
+            st = fn->nvEncDestroyEncoder(enc);
+            if (st == NV_ENC_SUCCESS) {
+                NvLog("NVENCEncoder: [Slot %d] Destroy succeeded - session fully cleaned\n", i);
+            } else {
+                NvLog("NVENCEncoder: [Slot %d] Destroy failed (status=%d)\n", i, st);
+            }
+            
+            // Clear slot regardless of result
+            g_sessions[i].encoder = NULL;
+            g_sessions[i].encContext = NULL;
+            for (int j = 0; j < NUM_BUFFERS; j++) {
+                g_sessions[i].outputBuffers[j] = NULL;
+                g_sessions[i].completionEvents[j] = NULL;
+                g_sessions[i].registeredResources[j] = NULL;
+            }
+            cleaned++;
+        }
+    }
+    
+    LeaveCriticalSection(&g_sessionLock);
+    
+    if (cleaned > 0) {
+        NvLog("NVENCEncoder: Force-cleaned %d leaked sessions (proper sequence)\n", cleaned);
+    }
+    
+    return cleaned;
+}
+
+// Public API: Force cleanup all leaked NVENC sessions
+void NVENCEncoder_ForceCleanupLeaked(void) {
+    ForceCleanupLeakedSessions();
+}
+
+// Public API: Mark an encoder as leaked (called when thread stalls)
+void NVENCEncoder_MarkLeaked(NVENCEncoder* enc) {
+    if (enc && enc->encoder) {
+        MarkSessionLeaked(enc->encoder);
+    }
+}
+
+// ============================================================================
 // Public API
 // ============================================================================
 
@@ -275,10 +516,28 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     sessionParams.apiVersion = NVENCAPI_VERSION;
     
     st = enc->fn.nvEncOpenEncodeSessionEx(&sessionParams, &enc->encoder);
+    
+    // Error 21 = NV_ENC_ERR_OUT_OF_MEMORY - often means too many sessions
+    // Try cleaning up leaked sessions and retry once
+    if (st == 21) {
+        NvLog("NVENCEncoder: Session limit reached, attempting to clean leaked sessions...\n");
+        int cleaned = ForceCleanupLeakedSessions();
+        if (cleaned > 0) {
+            // Wait a moment for GPU to release resources
+            Sleep(100);
+            st = enc->fn.nvEncOpenEncodeSessionEx(&sessionParams, &enc->encoder);
+            if (st == NV_ENC_SUCCESS) {
+                NvLog("NVENCEncoder: Retry successful after cleaning %d leaked sessions\n", cleaned);
+            }
+        }
+    }
+    
     if (st != NV_ENC_SUCCESS) {
         NvLog("NVENCEncoder: OpenEncodeSessionEx failed (%d)\n", st);
         goto fail;
     }
+    
+    // Note: We'll track this session later after all resources are allocated
     
     // Log SDK version
     NvLog("NVENCEncoder: SDK API version %d.%d\n",
@@ -441,6 +700,12 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
         NvLog("NVENCEncoder: Failed to create output thread\n");
         goto fail;
     }
+    
+    // Track this session for leak recovery (with all resource handles for proper cleanup)
+    // Must be done AFTER all buffers/events are created per NVIDIA SDK cleanup requirements
+    TrackSession(enc->encoder, &enc->fn, enc->nvencLib,
+                 enc->outputBuffers, enc->completionEvents, 
+                 enc->registeredResources, enc->encContext);
     
     enc->initialized = TRUE;
     NvLog("NVENCEncoder: Ready (%d buffers, async)\n", NUM_BUFFERS);
@@ -770,6 +1035,9 @@ void NVENCEncoder_Destroy(NVENCEncoder* enc) {
     
     // Cleanup NVENC resources
     if (enc->encoder) {
+        // Untrack session before destroying
+        UntrackSession(enc->encoder);
+        
         // Flush D3D11 contexts to ensure all pending GPU work is complete
         // This is the D3D11 equivalent of cuCtxSynchronize() recommended by NVIDIA
         // to prevent NVENC API calls from hanging

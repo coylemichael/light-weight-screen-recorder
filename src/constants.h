@@ -146,6 +146,8 @@ void Logger_Log(const char* fmt, ...);
  */
 #define DEFAULT_REFRESH_RATE        60
 #define DEFAULT_FPS                 60
+#define MIN_FPS                     30
+#define MAX_FPS                     240
 #define LWSR_MAX_MONITORS           8
 #define FRAME_ACQUIRE_TIMEOUT_MS    16
 #define GOP_LENGTH_SECONDS          2
@@ -402,7 +404,7 @@ void Logger_Log(const char* fmt, ...);
 #define MIN_RESOLUTION_SCALE        0.5f
 #define MAX_RESOLUTION_SCALE        2.5f
 #define MIN_FPS_SCALE               0.5f
-#define MAX_FPS_SCALE               2.0f
+#define MAX_FPS_SCALE               4.0f   // Support up to 240fps (240/60 = 4.0)
 #define MIN_BITRATE_BPS             10000000.0
 #define MAX_BITRATE_BPS             150000000.0
 

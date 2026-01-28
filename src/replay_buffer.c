@@ -438,6 +438,8 @@ void ReplayBuffer_Stop(ReplayBufferState* state) {
             ReplayVideoState* video = &g_internal.video;
             if (video->encoder) {
                 ReplayLog("Force-nulling hung encoder (leaked)...\n");
+                /* Mark as leaked so session can be recovered later */
+                NVENCEncoder_MarkLeaked(video->encoder);
                 /* Don't call NVENCEncoder_Destroy - output thread is also hung */
                 video->encoder = NULL;
             }
@@ -449,9 +451,11 @@ void ReplayBuffer_Stop(ReplayBufferState* state) {
             ReplayLog("WARNING: Leaking hung thread resources (ALLOW_TERMINATE_THREAD=0)\n");
             ReplayLog("  To enable forced termination, set ALLOW_TERMINATE_THREAD=1\n");
             
-            /* Null out encoder pointer so we don't try to use it */
+            /* Mark encoder as leaked so session can be recovered later */
             ReplayVideoState* video = &g_internal.video;
             if (video->encoder) {
+                ReplayLog("Marking encoder as leaked for later recovery...\n");
+                NVENCEncoder_MarkLeaked(video->encoder);
                 video->encoder = NULL;  /* Leaked intentionally */
             }
 #endif
@@ -621,23 +625,30 @@ void ReplayBuffer_GetStatus(ReplayBufferState* state, char* buffer, int bufferSi
     }
 }
 
-int ReplayBuffer_EstimateRAMUsage(int durationSec, int w, int h, int fps) {
+int ReplayBuffer_EstimateRAMUsage(int durationSec, int w, int h, int fps, QualityPreset quality) {
     /* Preconditions */
     LWSR_ASSERT(durationSec > 0);
     LWSR_ASSERT(w > 0);
     LWSR_ASSERT(h > 0);
     LWSR_ASSERT(fps > 0);
     
-    /* Estimate based on bitrate
-     * At 90 Mbps, 60 sec = 90 * 60 / 8 = 675 MB */
-    float baseMbps = 75.0f;
+    /* Get base bitrate from quality preset (same as encoder) */
+    float baseMbps;
+    switch (quality) {
+        case QUALITY_LOW:      baseMbps = BITRATE_LOW_MBPS;      break;
+        case QUALITY_MEDIUM:   baseMbps = BITRATE_MEDIUM_MBPS;   break;
+        case QUALITY_HIGH:     baseMbps = BITRATE_HIGH_MBPS;     break;
+        case QUALITY_LOSSLESS: baseMbps = BITRATE_LOSSLESS_MBPS; break;
+        default:               baseMbps = BITRATE_MEDIUM_MBPS;   break;
+    }
+    
     float megapixels = (float)((size_t)w * (size_t)h) / 1000000.0f;
     float resScale = megapixels / 3.7f;
     if (resScale < 0.5f) resScale = 0.5f;
     if (resScale > 2.5f) resScale = 2.5f;
     float fpsScale = (float)fps / 60.0f;
     if (fpsScale < 0.5f) fpsScale = 0.5f;
-    if (fpsScale > 2.0f) fpsScale = 2.0f;
+    if (fpsScale > 4.0f) fpsScale = 4.0f;  // Support up to 240fps
     
     float mbps = baseMbps * resScale * fpsScale;
     float totalMB = (mbps * durationSec) / 8.0f;
@@ -1074,8 +1085,8 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     state->frameHeight = height;
     
     int fps = g_config.replayFPS;
-    if (fps < 30) fps = 30;
-    if (fps > 120) fps = 120;
+    if (fps < MIN_FPS) fps = MIN_FPS;
+    if (fps > MAX_FPS) fps = MAX_FPS;
     
     ReplayLog("Final capture params: %dx%d @ %d FPS, duration=%ds, quality=%d\n", 
               width, height, fps, g_config.replayDuration, g_config.quality);

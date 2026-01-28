@@ -2834,7 +2834,7 @@ static void UpdateReplayRAMEstimate(HWND hwndSettings) {
         }
     }
     
-    int ramMB = ReplayBuffer_EstimateRAMUsage(durationSecs, estWidth, estHeight, fps);
+    int ramMB = ReplayBuffer_EstimateRAMUsage(durationSecs, estWidth, estHeight, fps, g_config.quality);
     
     // Update explanation text
     char explainText[256];
@@ -3016,6 +3016,7 @@ static void CreateOutputSettings(HWND hwnd, SettingsLayout* layout) {
     SendMessage(cmbFormat, WM_SETFONT, (WPARAM)layout->font, TRUE);
     
     SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.264) - Best compatibility");
+    SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.265) - Smaller files, less compatible");
     SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"AVI - Legacy format");
     SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"WMV - Windows Media");
     SendMessage(cmbFormat, CB_SETCURSEL, g_config.outputFormat, 0);
@@ -3032,10 +3033,10 @@ static void CreateOutputSettings(HWND hwnd, SettingsLayout* layout) {
         layout->controlX, layout->y, layout->controlW, 120, hwnd, (HMENU)ID_CMB_QUALITY, g_windows.hInstance, NULL);
     SendMessage(cmbQuality, WM_SETFONT, (WPARAM)layout->font, TRUE);
     
-    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Low - Small file, lower clarity");
-    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Medium - Balanced quality/size");
-    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"High - Sharp video, larger file");
-    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Lossless - Perfect quality, huge file");
+    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Good ~60 Mbps (YouTube, TikTok)");
+    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"High ~75 Mbps (Discord, Twitter/X)");
+    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Ultra ~90 Mbps (Archival, editing)");
+    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Lossless ~130 Mbps (No artifacts)");
     SendMessage(cmbQuality, CB_SETCURSEL, g_config.quality, 0);
     layout->y += layout->rowH + 8;
 }
@@ -3203,6 +3204,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SendMessage(cmbFormat, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.264) - Best compatibility");
+            SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.265) - Smaller files, less compatible");
             SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"AVI - Legacy format");
             SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"WMV - Windows Media");
             SendMessage(cmbFormat, CB_SETCURSEL, g_config.outputFormat, 0);
@@ -3219,10 +3221,10 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 controlX, y, controlW, 120, hwnd, (HMENU)ID_CMB_QUALITY, g_windows.hInstance, NULL);
             SendMessage(cmbQuality, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
-            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Low - Small file, lower clarity");
-            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Medium - Balanced quality/size");
-            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"High - Sharp video, larger file");
-            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Lossless - Perfect quality, huge file");
+            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Good ~60 Mbps (YouTube, TikTok)");
+            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"High ~75 Mbps (Discord, Twitter/X)");
+            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Ultra ~90 Mbps (Archival, editing)");
+            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Lossless ~130 Mbps (No artifacts)");
             SendMessage(cmbQuality, CB_SETCURSEL, g_config.quality, 0);
             y += rowH + 8;
             
@@ -3341,9 +3343,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             y += 14;
             
             // Enable replay checkbox
-            HWND chkReplayEnabled = CreateWindowW(L"BUTTON", L"Enable Instant Replay",
+            HWND chkReplayEnabled = CreateWindowW(L"BUTTON", L"Enable Instant Replay (H.265)",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                labelX, y, 200, 24, hwnd, (HMENU)ID_CHK_REPLAY_ENABLED, g_windows.hInstance, NULL);
+                labelX, y, 250, 24, hwnd, (HMENU)ID_CHK_REPLAY_ENABLED, g_windows.hInstance, NULL);
             SendMessage(chkReplayEnabled, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             CheckDlgButton(hwnd, ID_CHK_REPLAY_ENABLED, g_config.replayEnabled ? BST_CHECKED : BST_UNCHECKED);
             y += 38;
@@ -3430,8 +3432,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"30 FPS");
             SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"60 FPS");
             SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"120 FPS");
+            SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"240 FPS");
             // Set selection based on config
-            int fpsIdx = (g_config.replayFPS >= 120) ? 2 : (g_config.replayFPS >= 60) ? 1 : 0;
+            int fpsIdx = (g_config.replayFPS >= 240) ? 3 : (g_config.replayFPS >= 120) ? 2 : (g_config.replayFPS >= 60) ? 1 : 0;
             SendMessage(cmbFPS, CB_SETCURSEL, fpsIdx, 0);
             y += rowH;
             
@@ -3543,7 +3546,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     }
                 }
                 
-                int ramMB = ReplayBuffer_EstimateRAMUsage(durationSecs, estWidth, estHeight, fps);
+                int ramMB = ReplayBuffer_EstimateRAMUsage(durationSecs, estWidth, estHeight, fps, g_config.quality);
                 
                 // Explanation text
                 char explainText[256];
@@ -3753,6 +3756,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     if (HIWORD(wParam) == CBN_SELCHANGE) {
                         g_config.quality = (QualityPreset)SendMessage(
                             GetDlgItem(hwnd, ID_CMB_QUALITY), CB_GETCURSEL, 0, 0);
+                        // Update RAM estimate since bitrate changed
+                        UpdateReplayRAMEstimate(hwnd);
                     }
                     break;
                     
@@ -3890,7 +3895,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 case ID_CMB_REPLAY_FPS:
                     if (HIWORD(wParam) == CBN_SELCHANGE) {
                         int idx = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_FPS), CB_GETCURSEL, 0, 0);
-                        g_config.replayFPS = (idx == 2) ? 120 : (idx == 1) ? 60 : 30;
+                        int fpsValues[] = { 30, 60, 120, 240 };
+                        g_config.replayFPS = (idx >= 0 && idx < 4) ? fpsValues[idx] : 60;
                         
                         // Update RAM estimate
                         UpdateReplayRAMEstimate(hwnd);

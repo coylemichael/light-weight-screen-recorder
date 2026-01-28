@@ -59,6 +59,12 @@ int NVENCEncoder_GetQP(NVENCEncoder* enc);
 // Get frame size stats (for quality monitoring)
 void NVENCEncoder_GetFrameSizeStats(NVENCEncoder* enc, UINT32* lastSize, UINT32* minSize, UINT32* maxSize, UINT32* avgSize);
 
+// Force cleanup leaked NVENC sessions (call before creating new encoder after stall)
+void NVENCEncoder_ForceCleanupLeaked(void);
+
+// Mark an encoder as leaked (called when thread stalls and encoder can't be destroyed)
+void NVENCEncoder_MarkLeaked(NVENCEncoder* enc);
+
 // Cleanup
 void NVENCEncoder_Destroy(NVENCEncoder* enc);
 
