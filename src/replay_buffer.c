@@ -1129,7 +1129,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     int attemptCount = 0;
     int captureNullCount = 0;
     int convertNullCount = 0;
-    int encodeFailCount = 0;
+    int encodeFailCount = 0;  // Diagnostic counter only (no threshold logic)
     double totalCaptureMs = 0, totalConvertMs = 0, totalSubmitMs = 0;
     int timingCount = 0;
     
@@ -1261,23 +1261,13 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                             totalSubmitMs += (double)(t4.QuadPart - t3.QuadPart) * 1000.0 / perfFreq.QuadPart;
                             timingCount++;
                         } else if (submitResult == -1) {
-                            // Device lost - must restart the entire pipeline
-                            ReplayLog("NVENC DEVICE LOST - buffer needs restart\n");
-                            InterlockedExchange(&state->state, REPLAY_STATE_STALLED);
-                            break;  // Exit capture loop immediately
+                            // Device lost - exit cleanly, HealthMonitor will detect and recover
+                            ReplayLog("NVENC DEVICE LOST - exiting for HealthMonitor recovery\n");
+                            break;
                         } else {
-                            // submitResult == 0: Transient failure
-                            encodeFailCount++;
-                            
-                            // If NVENC fails for 5+ seconds straight, pipeline is stalled
-                            // This can happen when GPU goes to sleep or device is removed
-                            if (encodeFailCount >= fps * 5) {
-                                ReplayLog("NVENC pipeline stalled (%d consecutive failures) - restarting buffer\n", encodeFailCount);
-                                // Signal ourselves to restart by breaking out of the loop
-                                // The buffer will need to be stopped and restarted by the app
-                                InterlockedExchange(&state->state, REPLAY_STATE_STALLED);
-                                break;  // Exit capture loop - app should restart buffer
-                            }
+                            // submitResult == 0: Transient failure (frame dropped)
+                            encodeFailCount++;  // Track for diagnostics
+                            // Don't try to self-recover - HealthMonitor will detect if we get stuck
                         }
                     } else {
                         convertNullCount++;

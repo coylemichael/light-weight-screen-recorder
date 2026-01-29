@@ -60,4 +60,8 @@ BOOL Logger_IsThreadStalled(ThreadId thread);
 // Returns UINT_MAX if thread has never heartbeat
 DWORD Logger_GetHeartbeatAge(ThreadId thread);
 
+// Reset heartbeat state for a thread (call when thread stops/restarts)
+// This prevents stale heartbeat data from triggering false stall detection
+void Logger_ResetHeartbeat(ThreadId thread);
+
 #endif // LOGGER_H

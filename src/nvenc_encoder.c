@@ -261,6 +261,12 @@ static void MarkSessionLeaked(void* encoder) {
 
 // Force-destroy leaked sessions with PROPER cleanup sequence per NVIDIA SDK
 // This is called when NVENC runs out of sessions (error 21)
+// 
+// IMPORTANT: For LEAKED sessions (where the owning thread is stalled/hung),
+// we cannot safely call D3D11 Flush() because the stalled thread may be
+// blocked in the middle of a D3D11 operation on that context. Doing so
+// could deadlock or corrupt state. Instead, we directly destroy NVENC
+// resources - the driver will handle any in-flight GPU work.
 static int ForceCleanupLeakedSessions(void) {
     InitSessionTracker();
     EnterCriticalSection(&g_sessionLock);
@@ -271,20 +277,18 @@ static int ForceCleanupLeakedSessions(void) {
             void* enc = g_sessions[i].encoder;
             NV_ENCODE_API_FUNCTION_LIST* fn = &g_sessions[i].fn;
             
-            NvLog("NVENCEncoder: Force-cleanup leaked session in slot %d (proper sequence)\n", i);
+            NvLog("NVENCEncoder: Force-cleanup leaked session in slot %d\n", i);
             
             // ================================================================
-            // Step 0: Flush D3D11 context to complete pending GPU work
-            // Per NVIDIA: equivalent to cuCtxSynchronize() 
+            // SKIP D3D11 Flush for leaked sessions!
+            // The stalled thread may be blocked in D3D11, making Flush deadlock.
+            // NVENC cleanup will synchronize internally as needed.
             // ================================================================
-            if (g_sessions[i].encContext) {
-                NvLog("NVENCEncoder: [Slot %d] Step 0: Flushing D3D11 context\n", i);
-                g_sessions[i].encContext->lpVtbl->Flush(g_sessions[i].encContext);
-            }
             
             // ================================================================
             // Step 1: Send EOS to flush encoder
             // Per NVIDIA SDK: "must flush the encoder before freeing resources"
+            // For leaked sessions, this may fail but we try anyway
             // ================================================================
             NvLog("NVENCEncoder: [Slot %d] Step 1: Sending EOS flush\n", i);
             NV_ENC_PIC_PARAMS picParams = {0};
@@ -370,7 +374,7 @@ static int ForceCleanupLeakedSessions(void) {
     LeaveCriticalSection(&g_sessionLock);
     
     if (cleaned > 0) {
-        NvLog("NVENCEncoder: Force-cleaned %d leaked sessions (proper sequence)\n", cleaned);
+        NvLog("NVENCEncoder: Force-cleaned %d leaked sessions\n", cleaned);
     }
     
     return cleaned;

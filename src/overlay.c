@@ -2564,6 +2564,10 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 // Force state to STALLED so Stop() knows threads are hung
                 InterlockedExchange(&g_replayBuffer.state, REPLAY_STATE_STALLED);
                 
+                // Reset heartbeat state BEFORE stop to prevent stale data
+                Logger_ResetHeartbeat(THREAD_BUFFER);
+                Logger_ResetHeartbeat(THREAD_NVENC_OUTPUT);
+                
                 // Stop the replay buffer (will timeout on hung thread)
                 ReplayBuffer_Stop(&g_replayBuffer);
                 
@@ -3754,8 +3758,30 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     
                 case ID_CMB_QUALITY:
                     if (HIWORD(wParam) == CBN_SELCHANGE) {
-                        g_config.quality = (QualityPreset)SendMessage(
+                        QualityPreset newQuality = (QualityPreset)SendMessage(
                             GetDlgItem(hwnd, ID_CMB_QUALITY), CB_GETCURSEL, 0, 0);
+                        
+                        // Only restart if quality actually changed
+                        if (newQuality != g_config.quality) {
+                            QualityPreset oldQuality = g_config.quality;
+                            g_config.quality = newQuality;
+                            Logger_Log("Quality changed: %d -> %d\n", oldQuality, newQuality);
+                            
+                            // Hot-reload: restart replay buffer if currently running
+                            if (g_config.replayEnabled && g_replayBuffer.isBuffering) {
+                                Logger_Log("Hot-reloading replay buffer with new quality...\n");
+                                // Reset heartbeat state to prevent stale data triggering false stalls
+                                Logger_ResetHeartbeat(THREAD_BUFFER);
+                                Logger_ResetHeartbeat(THREAD_NVENC_OUTPUT);
+                                ReplayBuffer_Stop(&g_replayBuffer);
+                                ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                                CheckAudioError();
+                                // Notify health monitor that restart is complete
+                                HealthMonitor_NotifyRestart();
+                                Logger_Log("Replay buffer restarted with quality %d\n", newQuality);
+                            }
+                        }
+                        
                         // Update RAM estimate since bitrate changed
                         UpdateReplayRAMEstimate(hwnd);
                     }
@@ -3857,15 +3883,35 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 case ID_CMB_REPLAY_HOURS:
                 case ID_CMB_REPLAY_MINS:
                 case ID_CMB_REPLAY_SECS:
-                    // Duration is read on settings close, but update RAM estimate live
+                    // Duration changes - update RAM estimate and hot-reload if running
                     if (HIWORD(wParam) == CBN_SELCHANGE) {
                         int h = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_HOURS), CB_GETCURSEL, 0, 0);
                         int m = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_MINS), CB_GETCURSEL, 0, 0);
                         int s = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_SECS), CB_GETCURSEL, 0, 0);
                         int total = h * 3600 + m * 60 + s;
                         if (total < 1) total = 1;
-                        // Update config immediately so RAM estimate is accurate
-                        g_config.replayDuration = total;
+                        
+                        // Only restart if duration actually changed
+                        if (total != g_config.replayDuration) {
+                            int oldDuration = g_config.replayDuration;
+                            g_config.replayDuration = total;
+                            Logger_Log("Replay duration changed: %ds -> %ds\n", oldDuration, total);
+                            
+                            // Hot-reload: restart replay buffer if currently running
+                            if (g_config.replayEnabled && g_replayBuffer.isBuffering) {
+                                Logger_Log("Hot-reloading replay buffer with new duration...\n");
+                                // Reset heartbeat state to prevent stale data triggering false stalls
+                                Logger_ResetHeartbeat(THREAD_BUFFER);
+                                Logger_ResetHeartbeat(THREAD_NVENC_OUTPUT);
+                                ReplayBuffer_Stop(&g_replayBuffer);
+                                ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                                CheckAudioError();
+                                // Notify health monitor that restart is complete
+                                HealthMonitor_NotifyRestart();
+                                Logger_Log("Replay buffer restarted with %ds duration\n", total);
+                            }
+                        }
+                        
                         UpdateReplayRAMEstimate(hwnd);
                     }
                     break;
@@ -3896,7 +3942,28 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     if (HIWORD(wParam) == CBN_SELCHANGE) {
                         int idx = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_FPS), CB_GETCURSEL, 0, 0);
                         int fpsValues[] = { 30, 60, 120, 240 };
-                        g_config.replayFPS = (idx >= 0 && idx < 4) ? fpsValues[idx] : 60;
+                        int newFPS = (idx >= 0 && idx < 4) ? fpsValues[idx] : 60;
+                        
+                        // Only restart if FPS actually changed
+                        if (newFPS != g_config.replayFPS) {
+                            int oldFPS = g_config.replayFPS;
+                            g_config.replayFPS = newFPS;
+                            Logger_Log("Replay FPS changed: %d -> %d\n", oldFPS, newFPS);
+                            
+                            // Hot-reload: restart replay buffer if currently running
+                            if (g_config.replayEnabled && g_replayBuffer.isBuffering) {
+                                Logger_Log("Hot-reloading replay buffer with new FPS...\n");
+                                // Reset heartbeat state to prevent stale data triggering false stalls
+                                Logger_ResetHeartbeat(THREAD_BUFFER);
+                                Logger_ResetHeartbeat(THREAD_NVENC_OUTPUT);
+                                ReplayBuffer_Stop(&g_replayBuffer);
+                                ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                                CheckAudioError();
+                                // Notify health monitor that restart is complete
+                                HealthMonitor_NotifyRestart();
+                                Logger_Log("Replay buffer restarted at %d FPS\n", newFPS);
+                            }
+                        }
                         
                         // Update RAM estimate
                         UpdateReplayRAMEstimate(hwnd);
