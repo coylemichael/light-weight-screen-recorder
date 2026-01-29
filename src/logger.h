@@ -23,6 +23,7 @@ typedef enum {
     THREAD_AUDIO_SRC1,
     THREAD_AUDIO_SRC2,
     THREAD_WATCHDOG,
+    THREAD_HEALTH_MONITOR,  // Separate from WATCHDOG per architecture design Q7
     THREAD_MAX
 } ThreadId;
 

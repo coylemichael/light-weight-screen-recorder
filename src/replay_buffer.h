@@ -28,7 +28,7 @@ typedef enum {
     REPLAY_STATE_SAVING,        // Save in progress
     REPLAY_STATE_STOPPING,      // Shutdown requested
     REPLAY_STATE_ERROR,         // Fatal error occurred
-    REPLAY_STATE_STALLED        // Pipeline stalled - needs restart
+    REPLAY_STATE_RECOVERING     // HealthMonitor recovery in progress (renamed from STALLED)
 } ReplayStateEnum;
 
 typedef struct {

@@ -173,10 +173,12 @@ DWORD result = WaitForMultipleObjects(2, events, FALSE, frameTime);
 // Worker threads call periodically:
 Logger_Heartbeat(THREAD_BUFFER);  // Updates timestamp
 
-// Monitor checks timestamps every 500ms:
-double age = Logger_GetHeartbeatAge(THREAD_BUFFER);
-if (age > 5.0) {  // 5 second stall
-    PostMessage(g_controlWnd, WM_WORKER_STALLED, ...);
+// HealthMonitor checks timestamps every 500ms:
+DWORD age = Logger_GetHeartbeatAge(THREAD_BUFFER);
+if (age > HEALTH_HARD_THRESHOLD_MS) {  // 5 second stall
+    // Recovery executed directly by HealthMonitor thread
+    // Only posts to UI for restart (COM-dependent)
+    PostMessage(g_controlWnd, WM_WORKER_RESTART, ...);
 }
 ```
 

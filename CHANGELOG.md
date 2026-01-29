@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.2.19] - 2026-01-29
+
+### Changed
+- **HealthMonitor architecture redesign (split execution model)**
+  - HealthMonitor now executes recovery directly instead of posting to UI thread
+  - Only `ReplayBuffer_Start()` runs on main thread (requires COM for audio)
+  - Removes separate cleanup thread (Q12 decision)
+  - New messages: `WM_WORKER_RESTART` (recovery ok), `WM_WORKER_FAILED` (permanent failure)
+  - Renamed `REPLAY_STATE_STALLED` → `REPLAY_STATE_RECOVERING`
+  - Added `THREAD_HEALTH_MONITOR` enum (separate from `THREAD_WATCHDOG`)
+
+### Added
+- **Recovery failure tracking**: 3 recoveries in 5 minutes triggers permanent disable
+- **Debug hotkey**: Ctrl+Shift+D forces recovery test (only when debugLogging=true)
+- **docs/HEALTHMONITOR_ARCHITECTURE_DESIGN.md**: Comprehensive design document with 13 Q&A decisions
+
+### Fixed
+- **Removed ScheduleCleanup/CleanupThread** - recovery now inline in HealthMonitor thread
+- **Thread state differentiation**: Crashed threads get cleanup, hung threads get abandoned (prevents deadlock)
+
+### Documentation
+- Updated CLAUDE.md heartbeat pattern section
+- Updated REPLAY_BUFFER_ARCHITECTURE.md with new flow diagram
+- Design doc captures rationale for breaking main-thread convention (Q11)
+
 ## [1.2.18] - 2026-01-26
 
 ### Added

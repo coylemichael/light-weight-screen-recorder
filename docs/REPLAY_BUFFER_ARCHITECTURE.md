@@ -161,9 +161,9 @@ Main Thread                    Buffer Thread
 
 ### Health Monitor (`health_monitor.c`)
 
-Dedicated thread monitors worker thread health via heartbeats. Replaces old timer-based detection that blocked the UI thread.
+Dedicated thread monitors worker thread health via heartbeats. See [HEALTHMONITOR_ARCHITECTURE_DESIGN.md](HEALTHMONITOR_ARCHITECTURE_DESIGN.md) for detailed design.
 
-**Architecture:**
+**Architecture Summary:**
 ```
 HealthMonitor Thread (500ms interval)
      │
@@ -171,26 +171,39 @@ HealthMonitor Thread (500ms interval)
      ├── Check NVENC output thread heartbeat age
      │
      ├── Soft threshold (2s): Log warning
-     └── Hard threshold (5s): Post WM_WORKER_STALLED to g_controlWnd
+     └── Hard threshold (5s): Execute recovery directly
+                                    │
+                          ┌─────────┴─────────┐
+                          │ Recovery Steps    │
+                          │ (in HealthMonitor │
+                          │  thread):         │
+                          │ 1. Set RECOVERING │
+                          │ 2. Signal stop    │
+                          │ 3. Wait 5s        │
+                          │ 4. Cleanup NVENC  │
+                          │ 5. Track count    │
+                          └─────────┬─────────┘
                                     │
                                     ▼
-                            ControlWndProc
+                    WM_WORKER_RESTART/FAILED
+                            to ControlWndProc
                                     │
-                            ├── Duplicate stalled thread handle
-                            ├── Spawn cleanup thread (waits 100ms, terminates)
-                            └── Stop + Restart replay buffer
+                    ┌───────────────┴───────────────┐
+                    │                               │
+           WM_WORKER_RESTART            WM_WORKER_FAILED
+           (normal recovery)            (3 in 5 min limit)
+                    │                               │
+        ReplayBuffer_Start()              Disable buffer +
+        HealthMonitor_NotifyRestart()     MessageBox + Sound
 ```
 
-**Why dedicated thread?** Timer callbacks (`WM_TIMER`) run on the UI thread. If the UI thread is blocked (e.g., modal dialog, save operation), timer-based stall detection won't fire. The HealthMonitor thread is independent - it can detect stalls even if UI is unresponsive.
-
-**Cleanup Thread:** Terminating a thread from the message handler could deadlock if the stalled thread holds a lock the UI thread needs. Instead, we spawn a short-lived cleanup thread that:
-1. Waits 100ms (grace period for natural exit)
-2. Calls `TerminateThread()` if still running
-3. Closes both the original and duplicated handles
+**Why split execution?** The HealthMonitor executes recovery directly (kernel operations like signaling events, waiting on threads, and resetting heartbeats are thread-safe). Only `ReplayBuffer_Start()` needs the main thread because it uses COM for audio capture initialization.
 
 **Key Messages:**
-- `WM_WORKER_STALLED` (WM_USER+300): Posted when hard threshold exceeded
-  - wParam: `StallType` enum (BUFFER_ONLY, NVENC_ONLY, BOTH)
+- `WM_WORKER_RESTART` (WM_USER+301): Recovery succeeded, UI should restart
+  - wParam: `StallType` enum (BUFFER_ONLY, NVENC_ONLY, MULTIPLE)
+- `WM_WORKER_FAILED` (WM_USER+302): Too many recoveries (3 in 5 min), disable buffer
+  - wParam: `StallType` enum
 
 ---
 
