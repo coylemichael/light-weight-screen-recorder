@@ -1,6 +1,6 @@
 /*
- * NVENC Hardware Encoder - Native NVIDIA API
- * HEVC encoding with async mode and separate output thread
+ * NVENC Hardware Encoder - CUDA Path (OBS-style)
+ * Based on OBS nvenc-cuda.c
  */
 
 #ifndef NVENC_ENCODER_H
@@ -20,50 +20,40 @@ typedef struct {
 
 typedef struct NVENCEncoder NVENCEncoder;
 
-// Callback for receiving completed frames (called from output thread)
+// Callback for receiving completed frames
 typedef void (*EncodedFrameCallback)(EncodedFrame* frame, void* userData);
 
-// Check if NVENC is available
+// Check if NVENC + CUDA is available
 BOOL NVENCEncoder_IsAvailable(void);
 
-// Create encoder with D3D11 device
+// Create encoder (D3D11 device ignored - uses CUDA internally)
 NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height, int fps, QualityPreset quality);
 
-// Set callback for completed frames (async mode delivers via callback)
+// Set callback for completed frames
 void NVENCEncoder_SetCallback(NVENCEncoder* enc, EncodedFrameCallback callback, void* userData);
 
-// Submit texture for encoding (fast, non-blocking in async mode)
-// The texture will be copied internally, so caller can reuse it immediately
-// Returns: 1 = success, 0 = transient failure (retry), -1 = device lost (must recreate)
+// Submit NV12 frame for encoding (CPU buffers)
+// data[0] = Y plane, data[1] = UV plane
+// linesize[0] = Y stride, linesize[1] = UV stride
+// Returns: 1 = success, 0 = failure
+int NVENCEncoder_SubmitFrame(NVENCEncoder* enc, BYTE* data[2], int linesize[2], LONGLONG timestamp);
+
+// Submit D3D11 texture for encoding (reads back to CPU internally)
+// Returns: 1 = success, 0 = failure
 int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Texture, LONGLONG timestamp);
-
-// Check if device was lost (call after SubmitTexture returns -1)
-BOOL NVENCEncoder_IsDeviceLost(NVENCEncoder* enc);
-
-// Drain completed frames (for sync mode or manual draining)
-int NVENCEncoder_DrainCompleted(NVENCEncoder* enc, EncodedFrameCallback callback, void* userData);
-
-// Legacy API (wraps new API for compatibility)
-BOOL NVENCEncoder_EncodeTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Texture, LONGLONG timestamp, EncodedFrame* outFrame);
-BOOL NVENCEncoder_Flush(NVENCEncoder* enc, EncodedFrame* outFrame);
 
 // Get sequence header (VPS/SPS/PPS for HEVC)
 BOOL NVENCEncoder_GetSequenceHeader(NVENCEncoder* enc, BYTE* buffer, DWORD bufferSize, DWORD* outSize);
 
 // Stats
 void NVENCEncoder_GetStats(NVENCEncoder* enc, int* framesEncoded, double* avgEncodeTimeMs);
-
-// Get current QP value (for diagnostics)
 int NVENCEncoder_GetQP(NVENCEncoder* enc);
-
-// Get frame size stats (for quality monitoring)
 void NVENCEncoder_GetFrameSizeStats(NVENCEncoder* enc, UINT32* lastSize, UINT32* minSize, UINT32* maxSize, UINT32* avgSize);
 
-// Force cleanup leaked NVENC sessions (call before creating new encoder after stall)
-void NVENCEncoder_ForceCleanupLeaked(void);
-
-// Mark an encoder as leaked (called when thread stalls and encoder can't be destroyed)
+// Legacy stubs (no-ops in CUDA path)
 void NVENCEncoder_MarkLeaked(NVENCEncoder* enc);
+void NVENCEncoder_ForceCleanupLeaked(void);
+BOOL NVENCEncoder_Flush(NVENCEncoder* enc, EncodedFrame* outFrame);
 
 // Cleanup
 void NVENCEncoder_Destroy(NVENCEncoder* enc);
