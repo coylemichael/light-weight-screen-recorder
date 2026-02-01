@@ -23,6 +23,7 @@ typedef enum {
     THREAD_AUDIO_SRC1,
     THREAD_AUDIO_SRC2,
     THREAD_WATCHDOG,
+    THREAD_HEALTH_MONITOR,  // Separate from WATCHDOG per architecture design Q7
     THREAD_MAX
 } ThreadId;
 
@@ -59,5 +60,9 @@ BOOL Logger_IsThreadStalled(ThreadId thread);
 // Get milliseconds since last heartbeat for a thread
 // Returns UINT_MAX if thread has never heartbeat
 DWORD Logger_GetHeartbeatAge(ThreadId thread);
+
+// Reset heartbeat state for a thread (call when thread stops/restarts)
+// This prevents stale heartbeat data from triggering false stall detection
+void Logger_ResetHeartbeat(ThreadId thread);
 
 #endif // LOGGER_H

@@ -1,13 +1,20 @@
 /*
  * Health Monitor Implementation
  * 
- * See health_monitor.h for architecture overview.
+ * Architecture: See docs/HEALTHMONITOR_ARCHITECTURE_DESIGN.md
+ * 
+ * Key design decisions:
+ * - HealthMonitor is SOLE authority for replay buffer recovery
+ * - Executes recovery directly (no separate cleanup thread per Q12)
+ * - Posts to UI only for COM-dependent operations (Start) and dialogs
+ * - Tracks recovery count (3 in 5 min limit per Q4)
+ * - Differentiates crashed vs hung threads (Q2)
  */
 
 #include "health_monitor.h"
 #include "logger.h"
 #include "replay_buffer.h"
-#include "leak_tracker.h"
+#include "nvenc_encoder.h"
 #include <stdio.h>
 
 /* ============================================================================
@@ -24,104 +31,160 @@ static volatile HWND g_hwndNotify = NULL;
 static volatile LONG g_restartInProgress = FALSE;
 static volatile DWORD g_lastRestartTime = 0;
 
-/* Grace period after restart before stall detection resumes (ms) */
-#define RESTART_GRACE_PERIOD_MS 10000
+/* Recovery tracking (Q4: 3 in 5 min limit) */
+static DWORD g_recoveryTimestamps[MAX_RECOVERIES_IN_WINDOW] = {0};
+static int g_recoveryIndex = 0;
+static volatile LONG g_recoveryCount = 0;
 
-/* ============================================================================
- * CLEANUP THREAD
- * ============================================================================
- * Fire-and-forget thread that attempts to clean up orphaned resources.
- */
-
-typedef struct CleanupContext {
-    HANDLE hungThread;          /* Handle to wait on */
-    StallType stallType;        /* Which subsystem stalled */
-    DWORD startTime;            /* When cleanup was scheduled */
-} CleanupContext;
-
-/* Forward declarations */
+/* External references */
 extern ReplayBufferState g_replayBuffer;  /* From main.c */
 
-static DWORD WINAPI CleanupThread(LPVOID param) {
-    CleanupContext* ctx = (CleanupContext*)param;
-    if (!ctx) return 1;
+/* ============================================================================
+ * INTERNAL HELPERS
+ * ============================================================================ */
+
+/**
+ * Check thread state via GetExitCodeThread (Q2, Q11)
+ * Safe to call from any thread - kernel call only.
+ */
+static ThreadState GetThreadState(HANDLE hThread) {
+    if (!hThread) return THREAD_STATE_UNKNOWN;
     
-    Logger_Log("[HealthMonitor] Cleanup thread started for stall type %d\n", ctx->stallType);
-    
-    /* Wait for the hung thread to potentially recover */
-    if (ctx->hungThread) {
-        DWORD waitResult = WaitForSingleObject(ctx->hungThread, CLEANUP_WAIT_TIMEOUT_MS);
-        
-        if (waitResult == WAIT_OBJECT_0) {
-            /* Thread exited naturally - it cleaned up its own resources */
-            Logger_Log("[HealthMonitor] Hung thread recovered/exited naturally\n");
-        } else if (waitResult == WAIT_TIMEOUT) {
-            /* Thread is truly stuck - attempt resource cleanup */
-            Logger_Log("[HealthMonitor] Thread still hung after %d ms, attempting cleanup\n", 
-                       CLEANUP_WAIT_TIMEOUT_MS);
-            
-            /* 
-             * NOTE: At this point, the hung thread's resources (encoder, frame buffer, etc.)
-             * are orphaned. We can't safely free them because:
-             * 1. The thread may still be holding locks
-             * 2. NVENC/D3D11 calls may be in progress
-             * 3. We'd need to use TryEnterCriticalSection on each resource
-             * 
-             * For now, we just log the leak. A more sophisticated cleanup would:
-             * - Try to acquire each lock with TryEnterCriticalSection
-             * - Free resources only if lock acquired
-             * - Track leaked resources for diagnostics
-             */
-            Logger_Log("[HealthMonitor] Resources from stalled thread are leaked (safe mode)\n");
-            
-            /* Reset leak tracker to account for the orphaned resources */
-            /* This prevents the delta from looking like an active leak */
-            Logger_Log("[HealthMonitor] Note: Leak tracker deltas may show orphaned buffer contents\n");
-        } else if (waitResult == WAIT_FAILED) {
-            Logger_Log("[HealthMonitor] WaitForSingleObject failed: %u\n", GetLastError());
-        } else {
-            Logger_Log("[HealthMonitor] Unexpected wait result: %u\n", waitResult);
-        }
-        
-        /* Close our duplicated handle - we own it */
-        CloseHandle(ctx->hungThread);
+    DWORD exitCode = 0;
+    if (!GetExitCodeThread(hThread, &exitCode)) {
+        Logger_Log("[HealthMonitor] GetExitCodeThread failed: %u\n", GetLastError());
+        return THREAD_STATE_UNKNOWN;
     }
     
-    DWORD elapsed = GetTickCount() - ctx->startTime;
-    Logger_Log("[HealthMonitor] Cleanup thread finished after %u ms\n", elapsed);
-    
-    free(ctx);
-    return 0;
+    if (exitCode == STILL_ACTIVE) {
+        return THREAD_STATE_RUNNING;
+    } else if (exitCode == 0) {
+        return THREAD_STATE_EXITED;
+    } else {
+        return THREAD_STATE_CRASHED;
+    }
 }
 
-void HealthMonitor_ScheduleCleanup(HANDLE hungThread, StallType stallType) {
-    /* If no handle provided, just log - nothing to wait on */
-    if (!hungThread) {
-        Logger_Log("[HealthMonitor] No thread handle for cleanup (already exited?)\n");
-        return;
+/**
+ * Get string representation of thread state for logging.
+ */
+static const char* ThreadStateToString(ThreadState state) {
+    switch (state) {
+        case THREAD_STATE_RUNNING: return "RUNNING (hung)";
+        case THREAD_STATE_CRASHED: return "CRASHED";
+        case THREAD_STATE_EXITED:  return "EXITED";
+        default:                   return "UNKNOWN";
+    }
+}
+
+/**
+ * Count recoveries within the tracking window (Q4).
+ * Returns number of recoveries in last RECOVERY_WINDOW_MS.
+ */
+static int CountRecentRecoveries(void) {
+    DWORD now = GetTickCount();
+    int count = 0;
+    
+    for (int i = 0; i < MAX_RECOVERIES_IN_WINDOW; i++) {
+        if (g_recoveryTimestamps[i] != 0) {
+            DWORD age = now - g_recoveryTimestamps[i];
+            if (age < RECOVERY_WINDOW_MS) {
+                count++;
+            }
+        }
     }
     
-    CleanupContext* ctx = (CleanupContext*)malloc(sizeof(CleanupContext));
-    if (!ctx) {
-        Logger_Log("[HealthMonitor] Failed to allocate cleanup context\n");
-        CloseHandle(hungThread);  /* Don't leak the duplicated handle */
-        return;
+    return count;
+}
+
+/**
+ * Record a recovery attempt (Q4).
+ */
+static void RecordRecovery(void) {
+    g_recoveryTimestamps[g_recoveryIndex] = GetTickCount();
+    g_recoveryIndex = (g_recoveryIndex + 1) % MAX_RECOVERIES_IN_WINDOW;
+    InterlockedIncrement(&g_recoveryCount);
+}
+
+/**
+ * Execute recovery directly from monitor thread (Q11 - split execution).
+ * This performs all safe kernel operations; UI thread only does ReplayBuffer_Start().
+ * 
+ * @param stallType  Which thread(s) stalled
+ * @return TRUE if recovery should proceed (under limit), FALSE if permanent failure
+ */
+static BOOL ExecuteRecovery(StallType stallType) {
+    Logger_Log("[HealthMonitor] === RECOVERY START ===\n");
+    Logger_Log("[HealthMonitor] Stall type: %d\n", stallType);
+    
+    /* Step 1: Check thread states (Q2 - differentiate crashed vs hung) */
+    ThreadState bufferState = GetThreadState(g_replayBuffer.bufferThread);
+    Logger_Log("[HealthMonitor] Buffer thread state: %s\n", ThreadStateToString(bufferState));
+    
+    /* Step 2: Set state to RECOVERING (Q10) */
+    InterlockedExchange(&g_replayBuffer.state, REPLAY_STATE_RECOVERING);
+    
+    /* Step 3: Signal stop event - safe kernel call */
+    if (g_replayBuffer.hStopEvent) {
+        SetEvent(g_replayBuffer.hStopEvent);
+        Logger_Log("[HealthMonitor] Signaled stop event\n");
     }
     
-    ctx->hungThread = hungThread;
-    ctx->stallType = stallType;
-    ctx->startTime = GetTickCount();
-    
-    /* Fire-and-forget thread - we don't track it */
-    HANDLE hThread = CreateThread(NULL, 0, CleanupThread, ctx, 0, NULL);
-    if (hThread) {
-        CloseHandle(hThread);  /* Let it run detached */
-        Logger_Log("[HealthMonitor] Cleanup thread spawned\n");
-    } else {
-        Logger_Log("[HealthMonitor] Failed to create cleanup thread\n");
-        CloseHandle(ctx->hungThread);  /* Don't leak the duplicated handle */
-        free(ctx);
+    /* Step 4: Wait for thread to exit gracefully (Q11 - 5 second timeout) */
+    if (g_replayBuffer.bufferThread) {
+        Logger_Log("[HealthMonitor] Waiting for buffer thread (timeout=%d ms)...\n", 
+                   RECOVERY_WAIT_TIMEOUT_MS);
+        
+        DWORD waitResult = WaitForSingleObject(g_replayBuffer.bufferThread, 
+                                                RECOVERY_WAIT_TIMEOUT_MS);
+        
+        if (waitResult == WAIT_OBJECT_0) {
+            Logger_Log("[HealthMonitor] Buffer thread exited gracefully\n");
+            /* Thread exited - safe to close handle */
+            CloseHandle(g_replayBuffer.bufferThread);
+            g_replayBuffer.bufferThread = NULL;
+        } else if (waitResult == WAIT_TIMEOUT) {
+            Logger_Log("[HealthMonitor] Buffer thread did not exit - abandoning (hung)\n");
+            /* Thread is truly hung - abandon it (will leak resources) */
+            /* DO NOT close handle - thread is still running */
+            g_replayBuffer.bufferThread = NULL;  /* Orphan it */
+        } else {
+            Logger_Log("[HealthMonitor] Wait failed: %u\n", GetLastError());
+        }
     }
+    
+    /* Step 5: If thread CRASHED (not hung), we can safely cleanup (Q2) */
+    if (bufferState == THREAD_STATE_CRASHED || bufferState == THREAD_STATE_EXITED) {
+        Logger_Log("[HealthMonitor] Thread crashed/exited - safe to cleanup resources\n");
+        /* Resources were cleaned up by the thread or will be recreated */
+    } else if (bufferState == THREAD_STATE_RUNNING) {
+        Logger_Log("[HealthMonitor] Thread was hung - resources orphaned (leak accepted)\n");
+    }
+    
+    /* Step 6: Clean up NVENC sessions (Q8 - always call) */
+    Logger_Log("[HealthMonitor] Cleaning up leaked NVENC sessions...\n");
+    NVENCEncoder_ForceCleanupLeaked();
+    
+    /* Step 7: Reset heartbeat state */
+    Logger_ResetHeartbeat(THREAD_BUFFER);
+    Logger_ResetHeartbeat(THREAD_NVENC_OUTPUT);
+    
+    /* Step 8: Track recovery count (Q4) */
+    RecordRecovery();
+    int recentCount = CountRecentRecoveries();
+    Logger_Log("[HealthMonitor] Recovery count: %d in last %d minutes\n", 
+               recentCount, RECOVERY_WINDOW_MS / 60000);
+    
+    /* Step 9: Check if we've exceeded the limit (Q4 - 3 in 5 min) */
+    if (recentCount >= MAX_RECOVERIES_IN_WINDOW) {
+        Logger_Log("[HealthMonitor] PERMANENT FAILURE: Too many recoveries (%d in %d min)\n",
+                   recentCount, RECOVERY_WINDOW_MS / 60000);
+        InterlockedExchange(&g_replayBuffer.state, REPLAY_STATE_ERROR);
+        return FALSE;  /* Don't restart - notify user of failure */
+    }
+    
+    Logger_Log("[HealthMonitor] === RECOVERY COMPLETE - requesting restart ===\n");
+    return TRUE;  /* OK to restart */
 }
 
 /* ============================================================================
@@ -132,8 +195,11 @@ static DWORD WINAPI MonitorThread(LPVOID param) {
     (void)param;
     
     Logger_Log("[HealthMonitor] Monitor thread started\n");
-    Logger_Log("[HealthMonitor] Check interval: %d ms, soft threshold: %d ms, hard threshold: %d ms\n",
-               HEALTH_CHECK_INTERVAL_MS, HEALTH_SOFT_THRESHOLD_MS, HEALTH_HARD_THRESHOLD_MS);
+    Logger_Log("[HealthMonitor] Config: check=%dms, soft=%dms, hard=%dms, grace=%dms\n",
+               HEALTH_CHECK_INTERVAL_MS, HEALTH_SOFT_THRESHOLD_MS, 
+               HEALTH_HARD_THRESHOLD_MS, RESTART_GRACE_PERIOD_MS);
+    Logger_Log("[HealthMonitor] Failure limit: %d recoveries in %d minutes\n",
+               MAX_RECOVERIES_IN_WINDOW, RECOVERY_WINDOW_MS / 60000);
     
     /* Track if we've already warned for current stall (avoid log spam) */
     BOOL bufferWarned = FALSE;
@@ -144,15 +210,15 @@ static DWORD WINAPI MonitorThread(LPVOID param) {
         
         if (!InterlockedCompareExchange(&g_monitorRunning, 0, 0)) break;
         
-        /* Send our own heartbeat */
-        Logger_Heartbeat(THREAD_WATCHDOG);
+        /* Send our own heartbeat (Q7 - use THREAD_HEALTH_MONITOR) */
+        Logger_Heartbeat(THREAD_HEALTH_MONITOR);
         
-        /* Skip checks if monitoring is disabled or restart in progress */
+        /* Skip checks if monitoring is disabled */
         if (!InterlockedCompareExchange(&g_monitorEnabled, 0, 0)) {
             continue;
         }
         
-        /* Grace period after restart */
+        /* Grace period after restart (Q6 - after Start only) */
         if (InterlockedCompareExchange(&g_restartInProgress, 0, 0)) {
             DWORD elapsed = GetTickCount() - g_lastRestartTime;
             if (elapsed < RESTART_GRACE_PERIOD_MS) {
@@ -162,80 +228,87 @@ static DWORD WINAPI MonitorThread(LPVOID param) {
             Logger_Log("[HealthMonitor] Grace period ended, resuming monitoring\n");
         }
         
-        /* Only monitor when replay buffer is actively capturing */
-        if (g_replayBuffer.state != REPLAY_STATE_CAPTURING) {
+        /* Only monitor when replay buffer is actively capturing (Q1 - scope) */
+        LONG currentState = InterlockedCompareExchange(&g_replayBuffer.state, 0, 0);
+        if (currentState != REPLAY_STATE_CAPTURING) {
             bufferWarned = FALSE;
             nvencWarned = FALSE;
             continue;
         }
         
-        /* Check buffer thread heartbeat */
+        /* Check heartbeat ages (Q3 - either stalled triggers recovery) */
         DWORD bufferAge = Logger_GetHeartbeatAge(THREAD_BUFFER);
         DWORD nvencAge = Logger_GetHeartbeatAge(THREAD_NVENC_OUTPUT);
         
-        /* Buffer thread stall detection */
+        /* Soft warnings (Q5 - 2 second threshold) */
         if (bufferAge != UINT_MAX && bufferAge > HEALTH_SOFT_THRESHOLD_MS) {
             if (!bufferWarned) {
                 Logger_Log("[HealthMonitor] WARNING: Buffer thread slow (age=%u ms)\n", bufferAge);
                 bufferWarned = TRUE;
             }
-            
-            if (bufferAge > HEALTH_HARD_THRESHOLD_MS) {
-                Logger_Log("[HealthMonitor] CRITICAL: Buffer thread stalled (age=%u ms)\n", bufferAge);
-            }
         } else {
             bufferWarned = FALSE;
         }
         
-        /* NVENC thread stall detection */
         if (nvencAge != UINT_MAX && nvencAge > HEALTH_SOFT_THRESHOLD_MS) {
             if (!nvencWarned) {
                 Logger_Log("[HealthMonitor] WARNING: NVENC thread slow (age=%u ms)\n", nvencAge);
                 nvencWarned = TRUE;
             }
-            
-            if (nvencAge > HEALTH_HARD_THRESHOLD_MS) {
-                Logger_Log("[HealthMonitor] CRITICAL: NVENC thread stalled (age=%u ms)\n", nvencAge);
-            }
         } else {
             nvencWarned = FALSE;
         }
         
-        /* Trigger recovery if stall persists */
+        /* Hard recovery (Q5 - 5 second threshold) */
         BOOL bufferStalled = (bufferAge != UINT_MAX && bufferAge > HEALTH_HARD_THRESHOLD_MS);
         BOOL nvencStalled = (nvencAge != UINT_MAX && nvencAge > HEALTH_HARD_THRESHOLD_MS);
         
         if (bufferStalled || nvencStalled) {
+            /* Determine stall type (Q3) */
             StallType stallType = STALL_NONE;
             if (bufferStalled && nvencStalled) {
                 stallType = STALL_MULTIPLE;
             } else if (bufferStalled) {
                 stallType = STALL_BUFFER_THREAD;
-            } else if (nvencStalled) {
+            } else {
                 stallType = STALL_NVENC_THREAD;
             }
             
-            Logger_Log("[HealthMonitor] Stall detected: type=%d (buffer=%s, nvenc=%s)\n",
-                       stallType,
-                       bufferStalled ? "STALLED" : "ok",
-                       nvencStalled ? "STALLED" : "ok");
+            Logger_Log("[HealthMonitor] STALL DETECTED: buffer=%s (%ums), nvenc=%s (%ums)\n",
+                       bufferStalled ? "STALLED" : "ok", bufferAge,
+                       nvencStalled ? "STALLED" : "ok", nvencAge);
             
-            /* Post message to UI for recovery */
-            HWND hwnd = g_hwndNotify;  /* Local copy of volatile */
+            /* Disable monitoring during recovery */
+            InterlockedExchange(&g_monitorEnabled, FALSE);
+            
+            /* Execute recovery directly (Q11 - split execution) */
+            BOOL recoveryOk = ExecuteRecovery(stallType);
+            
+            /* Post appropriate message to UI */
+            HWND hwnd = g_hwndNotify;
             if (hwnd) {
-                if (PostMessage(hwnd, WM_WORKER_STALLED, (WPARAM)stallType, 0)) {
-                    Logger_Log("[HealthMonitor] Posted WM_WORKER_STALLED to UI\n");
+                if (recoveryOk) {
+                    /* Recovery succeeded - UI should restart */
+                    if (PostMessage(hwnd, WM_WORKER_RESTART, (WPARAM)stallType, 0)) {
+                        Logger_Log("[HealthMonitor] Posted WM_WORKER_RESTART to UI\n");
+                    } else {
+                        Logger_Log("[HealthMonitor] PostMessage failed: %u\n", GetLastError());
+                    }
                 } else {
-                    Logger_Log("[HealthMonitor] PostMessage failed: %u\n", GetLastError());
+                    /* Too many failures - UI should disable and notify user (Q9) */
+                    if (PostMessage(hwnd, WM_WORKER_FAILED, (WPARAM)stallType, 0)) {
+                        Logger_Log("[HealthMonitor] Posted WM_WORKER_FAILED to UI\n");
+                    } else {
+                        Logger_Log("[HealthMonitor] PostMessage failed: %u\n", GetLastError());
+                    }
                 }
             }
-            
-            /* Disable monitoring until restart completes */
-            InterlockedExchange(&g_monitorEnabled, FALSE);
             
             /* Reset warning flags */
             bufferWarned = FALSE;
             nvencWarned = FALSE;
+            
+            /* Monitoring stays disabled until NotifyRestart is called */
         }
     }
     
@@ -248,21 +321,25 @@ static DWORD WINAPI MonitorThread(LPVOID param) {
  * ============================================================================ */
 
 BOOL HealthMonitor_Start(HWND hwndNotify) {
-    /* Null guard at public API boundary */
     if (!hwndNotify) {
         Logger_Log("[HealthMonitor] Start failed: hwndNotify is NULL\n");
         return FALSE;
     }
     
-    /* Atomic check-and-set to prevent race if called from multiple threads */
+    /* Atomic check-and-set */
     if (InterlockedCompareExchange(&g_monitorRunning, TRUE, FALSE) != FALSE) {
         Logger_Log("[HealthMonitor] Already running\n");
-        return TRUE;  /* Already running */
+        return TRUE;
     }
     
     g_hwndNotify = hwndNotify;
     InterlockedExchange(&g_monitorEnabled, TRUE);
     InterlockedExchange(&g_restartInProgress, FALSE);
+    
+    /* Reset recovery tracking */
+    memset(g_recoveryTimestamps, 0, sizeof(g_recoveryTimestamps));
+    g_recoveryIndex = 0;
+    InterlockedExchange(&g_recoveryCount, 0);
     
     g_monitorThread = CreateThread(NULL, 0, MonitorThread, NULL, 0, NULL);
     if (!g_monitorThread) {
@@ -277,7 +354,7 @@ BOOL HealthMonitor_Start(HWND hwndNotify) {
 
 void HealthMonitor_Stop(void) {
     if (!InterlockedCompareExchange(&g_monitorRunning, 0, 0)) {
-        return;  /* Not running */
+        return;
     }
     
     Logger_Log("[HealthMonitor] Stopping...\n");
@@ -306,10 +383,21 @@ void HealthMonitor_SetEnabled(BOOL enabled) {
 }
 
 void HealthMonitor_NotifyRestart(void) {
-    /* Order matters: set grace period BEFORE re-enabling to avoid race */
+    /* Order matters: set grace period BEFORE re-enabling */
     g_lastRestartTime = GetTickCount();
     InterlockedExchange(&g_restartInProgress, TRUE);
-    InterlockedExchange(&g_monitorEnabled, TRUE);  /* Re-enable after grace period */
+    InterlockedExchange(&g_monitorEnabled, TRUE);
     Logger_Log("[HealthMonitor] Restart notified, grace period started (%d ms)\n", 
                RESTART_GRACE_PERIOD_MS);
+}
+
+void HealthMonitor_ResetFailureCount(void) {
+    memset(g_recoveryTimestamps, 0, sizeof(g_recoveryTimestamps));
+    g_recoveryIndex = 0;
+    InterlockedExchange(&g_recoveryCount, 0);
+    Logger_Log("[HealthMonitor] Failure count reset\n");
+}
+
+int HealthMonitor_GetRecoveryCount(void) {
+    return CountRecentRecoveries();
 }

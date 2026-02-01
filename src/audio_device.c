@@ -162,7 +162,7 @@ int AudioDevice_Enumerate(AudioDeviceList* list) {
 }
 
 BOOL AudioDevice_GetById(const char* deviceId, AudioDeviceInfo* info) {
-    if (!deviceId || !info || !g_deviceEnumerator) return FALSE;
+    if (!deviceId || !info) return FALSE;
     
     // Auto-initialize if needed
     if (!g_deviceEnumerator) {

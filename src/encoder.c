@@ -21,12 +21,17 @@
 #include <stdio.h>
 #include <time.h>
 
+// Local HEVC GUID definition (same as MFVideoFormat_HEVC)
+static const GUID MFVideoFormat_HEVC_Encoder = 
+    { 0x43564548, 0x0000, 0x0010, { 0x80, 0x00, 0x00, 0xAA, 0x00, 0x38, 0x9B, 0x71 } };
+
 static GUID GetVideoFormat(OutputFormat format) {
     switch (format) {
-        case FORMAT_MP4: return MFVideoFormat_H264;
-        case FORMAT_WMV: return MFVideoFormat_WMV3;
-        case FORMAT_AVI: return MFVideoFormat_H264;
-        default:         return MFVideoFormat_H264;
+        case FORMAT_MP4:  return MFVideoFormat_H264;
+        case FORMAT_HEVC: return MFVideoFormat_HEVC_Encoder;
+        case FORMAT_WMV:  return MFVideoFormat_WMV3;
+        case FORMAT_AVI:  return MFVideoFormat_H264;
+        default:          return MFVideoFormat_H264;
     }
 }
 

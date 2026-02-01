@@ -10,7 +10,8 @@
 
 // Output formats
 typedef enum {
-    FORMAT_MP4 = 0,
+    FORMAT_MP4 = 0,    // H.264 in MP4 container
+    FORMAT_HEVC,       // H.265/HEVC in MP4 container
     FORMAT_AVI,
     FORMAT_WMV,
     FORMAT_COUNT
@@ -52,7 +53,7 @@ typedef struct {
     int replaySaveKey;               // Hotkey to save replay (default: F9)
     RECT replayAreaRect;             // Custom area for replay (if MODE_AREA)
     int replayAspectRatio;           // 0=Native, 1=16:9, 2=16:10, 3=4:3, 4=21:9, 5=32:9
-    int replayFPS;                   // 30 or 60
+    int replayFPS;                   // 30, 60, 120, or 240
     
     // Audio capture settings
     BOOL audioEnabled;               // Enable audio capture

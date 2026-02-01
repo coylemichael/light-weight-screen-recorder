@@ -1,37 +1,35 @@
 /*
  * Health Monitor - Dedicated Thread for Worker Health Monitoring
  * 
- * Provides a dedicated monitoring thread that:
- * - Runs independently of the UI thread
- * - Monitors all worker thread heartbeats (buffer, NVENC, audio)
- * - Detects stalls and triggers recovery
- * - Spawns cleanup threads for orphaned resources
- * - Posts messages to UI for restart coordination
+ * ARCHITECTURE (see docs/HEALTHMONITOR_ARCHITECTURE_DESIGN.md):
  * 
- * ARCHITECTURE:
+ * HealthMonitor is the SOLE authority for replay buffer recovery:
+ * - Detects stalls via heartbeat monitoring
+ * - Diagnoses CRASHED vs HUNG threads
+ * - Executes recovery directly (signal, wait, cleanup)
+ * - Posts to UI only for operations requiring COM (Start) or dialogs
  * 
  *   ┌─────────────────────────────────────────────────────────┐
  *   │               HEALTH MONITOR THREAD                      │
  *   │  • Checks heartbeats every 500ms                        │
- *   │  • Soft warning at 2s stall                             │
- *   │  • Hard recovery at 5s stall                            │
- *   │  • Spawns cleanup thread, posts WM_WORKER_STALLED       │
+ *   │  • Diagnoses crashed vs hung (GetExitCodeThread)        │
+ *   │  • Executes cleanup directly (no separate thread)       │
+ *   │  • Posts WM_WORKER_RESTART or WM_WORKER_FAILED to UI    │
  *   └─────────────────────────────────────────────────────────┘
- *            │                              │
- *            ▼                              ▼
- *   ┌─────────────────────┐    ┌─────────────────────────────┐
- *   │   CLEANUP THREAD    │    │      WORKER THREADS         │
- *   │  (fire-and-forget)  │    │  • Buffer (capture+encode)  │
- *   │  • Waits for hung   │    │  • NVENC output             │
- *   │    thread 30-60s    │    │  • Audio capture/encode     │
- *   │  • Frees resources  │    │  • Each sends heartbeat     │
- *   └─────────────────────┘    └─────────────────────────────┘
+ *            │                              
+ *            ▼                              
+ *   ┌─────────────────────────────────────────────────────────┐
+ *   │      MONITORED THREADS (replay buffer only)             │
+ *   │  • THREAD_BUFFER (capture + encode submit)              │
+ *   │  • THREAD_NVENC_OUTPUT (bitstream retrieval)            │
+ *   │  Audio and RecordingThread manage themselves (Q1)       │
+ *   └─────────────────────────────────────────────────────────┘
  * 
  * THREAD SAFETY:
  * - Monitor thread runs independently
  * - Uses Logger heartbeat system (already thread-safe)
+ * - Recovery uses only kernel calls (no locks needed)
  * - Posts messages to UI via PostMessage (thread-safe)
- * - Cleanup thread uses TryEnterCriticalSection for safe access
  */
 
 #ifndef HEALTH_MONITOR_H
@@ -52,24 +50,48 @@
 /* Stall threshold for hard recovery (ms) */
 #define HEALTH_HARD_THRESHOLD_MS    5000
 
-/* How long cleanup thread waits for hung thread before giving up (ms) */
-#define CLEANUP_WAIT_TIMEOUT_MS     60000
+/* Grace period after restart before monitoring resumes (ms) */
+#define RESTART_GRACE_PERIOD_MS     10000
 
-/* Custom window message for stall notification (avoid conflict with WM_TRAYICON at +100) */
+/* How long to wait for thread to exit gracefully during recovery (ms) */
+#define RECOVERY_WAIT_TIMEOUT_MS    5000
+
+/* Failure tracking: max recoveries within time window before permanent failure */
+#define MAX_RECOVERIES_IN_WINDOW    3
+#define RECOVERY_WINDOW_MS          (5 * 60 * 1000)  /* 5 minutes */
+
+/* ============================================================================
+ * WINDOW MESSAGES
+ * ============================================================================ */
+
+/* Posted when recovery completes, UI should call ReplayBuffer_Start() */
+#define WM_WORKER_RESTART           (WM_USER + 301)
+
+/* Posted when recovery limit exceeded (3 in 5 min), UI should disable + notify */
+#define WM_WORKER_FAILED            (WM_USER + 302)
+
+/* Legacy - kept for compatibility but WM_WORKER_RESTART/FAILED preferred */
 #define WM_WORKER_STALLED           (WM_USER + 300)
 
 /* ============================================================================
  * STALL INFO
  * ============================================================================ */
 
-/* Which subsystem stalled - passed as WPARAM in WM_WORKER_STALLED */
+/* Which subsystem stalled - passed as WPARAM */
 typedef enum {
     STALL_NONE = 0,
     STALL_BUFFER_THREAD,
     STALL_NVENC_THREAD,
-    STALL_AUDIO_THREAD,
     STALL_MULTIPLE
 } StallType;
+
+/* Thread state from GetExitCodeThread */
+typedef enum {
+    THREAD_STATE_UNKNOWN = 0,
+    THREAD_STATE_RUNNING,       /* Still active (STILL_ACTIVE) */
+    THREAD_STATE_CRASHED,       /* Exited with non-zero code */
+    THREAD_STATE_EXITED         /* Exited normally (code 0) */
+} ThreadState;
 
 /* ============================================================================
  * PUBLIC API
@@ -78,7 +100,7 @@ typedef enum {
 /**
  * Initialize and start the health monitor thread.
  * 
- * @param hwndNotify  Window handle to receive WM_WORKER_STALLED messages
+ * @param hwndNotify  Window handle to receive WM_WORKER_* messages
  * @return TRUE if monitor started successfully
  */
 BOOL HealthMonitor_Start(HWND hwndNotify);
@@ -105,19 +127,22 @@ BOOL HealthMonitor_IsRunning(void);
 void HealthMonitor_SetEnabled(BOOL enabled);
 
 /**
- * Notify health monitor that replay buffer is being restarted.
- * Resets stall counters to prevent false positives during restart.
+ * Notify health monitor that replay buffer has restarted.
+ * Starts grace period to prevent false positives during initialization.
+ * Call this AFTER successful ReplayBuffer_Start().
  */
 void HealthMonitor_NotifyRestart(void);
 
 /**
- * Schedule cleanup of orphaned resources from a stalled thread.
- * Called internally when stall is detected. Spawns a fire-and-forget
- * cleanup thread that attempts to free resources safely.
- * 
- * @param hungThread      Handle to the hung thread (to wait on)
- * @param stallType       Which subsystem stalled
+ * Reset the failure counter (e.g., when user manually re-enables replay buffer).
  */
-void HealthMonitor_ScheduleCleanup(HANDLE hungThread, StallType stallType);
+void HealthMonitor_ResetFailureCount(void);
+
+/**
+ * Get current recovery count within the tracking window.
+ * 
+ * @return Number of recoveries in the last RECOVERY_WINDOW_MS
+ */
+int HealthMonitor_GetRecoveryCount(void);
 
 #endif /* HEALTH_MONITOR_H */

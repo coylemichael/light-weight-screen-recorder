@@ -2262,7 +2262,7 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             } else if (wParam == ID_TIMER_REPLAY_CHECK) {
                 // Stall detection moved to HealthMonitor thread (health_monitor.c)
                 // This timer is kept for future periodic UI updates if needed
-                // The HealthMonitor posts WM_WORKER_STALLED when recovery is needed
+                // HealthMonitor posts WM_WORKER_RESTART or WM_WORKER_FAILED for recovery
             } else if (wParam == ID_TIMER_HOVER) {
                 // Check which icon button is currently hovered (if any)
                 POINT pt;
@@ -2480,6 +2480,27 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             return (LRESULT)hBrush;
         }
         
+        /* Debug hotkey: Ctrl+Shift+D triggers forced recovery (Q13)
+         * Only enabled when debugLogging is TRUE */
+        case WM_KEYDOWN:
+            if (g_config.debugLogging && 
+                wParam == 'D' && 
+                (GetKeyState(VK_CONTROL) & 0x8000) &&
+                (GetKeyState(VK_SHIFT) & 0x8000)) {
+                
+                Logger_Log("[DEBUG] Ctrl+Shift+D pressed - forcing recovery test\n");
+                
+                if (g_replayBuffer.state == REPLAY_STATE_CAPTURING) {
+                    Logger_Log("[DEBUG] Forcing recovery via direct WM_WORKER_RESTART\n");
+                    PostMessage(hwnd, WM_WORKER_RESTART, (WPARAM)STALL_BUFFER_THREAD, 0);
+                } else {
+                    Logger_Log("[DEBUG] Replay buffer not capturing (state=%d)\n", 
+                               g_replayBuffer.state);
+                }
+                return 0;
+            }
+            break;
+        
         case WM_HOTKEY: {
             Logger_Log("WM_HOTKEY received: wParam=%llu\n", (unsigned long long)wParam);
             if (wParam == HOTKEY_REPLAY_SAVE) {
@@ -2536,49 +2557,60 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             return 0;
         }
         
-        case WM_WORKER_STALLED: {
-            // Health monitor detected a stalled worker thread
+        case WM_WORKER_RESTART: {
+            // HealthMonitor completed recovery, requests restart (Q11 - split execution)
+            // Recovery cleanup already done by HealthMonitor thread
+            // We just need to call ReplayBuffer_Start() which requires COM (main thread)
             StallType stallType = (StallType)wParam;
-            Logger_Log("WM_WORKER_STALLED received: type=%d\n", stallType);
+            Logger_Log("WM_WORKER_RESTART received: type=%d\n", stallType);
             
-            // Only recover if replay buffer is supposed to be running
-            if (g_config.replayEnabled && g_replayBuffer.isBuffering) {
-                Logger_Log("Initiating replay buffer recovery...\n");
+            // Only restart if replay buffer is supposed to be running
+            if (g_config.replayEnabled) {
+                Logger_Log("Restarting replay buffer after recovery...\n");
                 
-                // Duplicate the thread handle BEFORE Stop() closes it
-                // Cleanup thread needs its own handle to wait on
-                HANDLE hungThreadCopy = NULL;
-                if (g_replayBuffer.bufferThread) {
-                    if (!DuplicateHandle(GetCurrentProcess(), g_replayBuffer.bufferThread,
-                                         GetCurrentProcess(), &hungThreadCopy,
-                                         0, FALSE, DUPLICATE_SAME_ACCESS)) {
-                        Logger_Log("DuplicateHandle failed: %u\n", GetLastError());
-                        hungThreadCopy = NULL;
-                    }
-                }
-                
-                // Schedule cleanup of orphaned resources (fire-and-forget thread)
-                // Pass the duplicated handle so cleanup can wait for it (NULL is handled)
-                HealthMonitor_ScheduleCleanup(hungThreadCopy, stallType);
-                
-                // Force state to STALLED so Stop() knows threads are hung
-                InterlockedExchange(&g_replayBuffer.state, REPLAY_STATE_STALLED);
-                
-                // Stop the replay buffer (will timeout on hung thread)
-                ReplayBuffer_Stop(&g_replayBuffer);
-                
-                // Small delay before restart
-                Sleep(500);
-                
-                // Restart the replay buffer
+                // Start the replay buffer (requires COM which is why we're here)
                 ReplayBuffer_Start(&g_replayBuffer, &g_config);
                 CheckAudioError();
                 
-                // Notify health monitor that restart is complete
+                // Notify health monitor that restart is complete (starts grace period)
                 HealthMonitor_NotifyRestart();
                 
-                Logger_Log("Replay buffer restarted after stall recovery\n");
+                Logger_Log("Replay buffer restarted successfully\n");
             }
+            return 0;
+        }
+        
+        case WM_WORKER_FAILED: {
+            // HealthMonitor hit failure limit (3 in 5 min - Q4)
+            // Permanent failure - disable replay buffer and notify user (Q9)
+            StallType stallType = (StallType)wParam;
+            Logger_Log("WM_WORKER_FAILED received: type=%d - PERMANENT FAILURE\n", stallType);
+            
+            // Disable replay buffer in config
+            g_config.replayEnabled = FALSE;
+            g_replayBuffer.isBuffering = FALSE;
+            
+            // Update UI checkbox if it exists
+            HWND hChkReplay = GetDlgItem(g_controlWnd, ID_CHK_REPLAY_ENABLED);
+            if (hChkReplay) {
+                SendMessage(hChkReplay, BM_SETCHECK, BST_UNCHECKED, 0);
+            }
+            
+            // Audio feedback (Q9 - error sound only)
+            MessageBeep(MB_ICONERROR);
+            
+            // Show error dialog (Q9 - silent + error sound, but we add dialog for permanent failure)
+            MessageBoxA(g_controlWnd,
+                "Replay buffer has failed too many times (3 in 5 minutes).\n\n"
+                "The replay buffer has been disabled. This may indicate:\n"
+                "• GPU driver issues\n"
+                "• Insufficient memory\n"
+                "• Hardware encoder problems\n\n"
+                "Try restarting the application or updating your GPU drivers.",
+                "Replay Buffer Disabled",
+                MB_OK | MB_ICONERROR);
+            
+            Logger_Log("Replay buffer permanently disabled due to repeated failures\n");
             return 0;
         }
         
@@ -2834,7 +2866,7 @@ static void UpdateReplayRAMEstimate(HWND hwndSettings) {
         }
     }
     
-    int ramMB = ReplayBuffer_EstimateRAMUsage(durationSecs, estWidth, estHeight, fps);
+    int ramMB = ReplayBuffer_EstimateRAMUsage(durationSecs, estWidth, estHeight, fps, g_config.quality);
     
     // Update explanation text
     char explainText[256];
@@ -3016,6 +3048,7 @@ static void CreateOutputSettings(HWND hwnd, SettingsLayout* layout) {
     SendMessage(cmbFormat, WM_SETFONT, (WPARAM)layout->font, TRUE);
     
     SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.264) - Best compatibility");
+    SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.265) - Smaller files, less compatible");
     SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"AVI - Legacy format");
     SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"WMV - Windows Media");
     SendMessage(cmbFormat, CB_SETCURSEL, g_config.outputFormat, 0);
@@ -3032,10 +3065,10 @@ static void CreateOutputSettings(HWND hwnd, SettingsLayout* layout) {
         layout->controlX, layout->y, layout->controlW, 120, hwnd, (HMENU)ID_CMB_QUALITY, g_windows.hInstance, NULL);
     SendMessage(cmbQuality, WM_SETFONT, (WPARAM)layout->font, TRUE);
     
-    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Low - Small file, lower clarity");
-    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Medium - Balanced quality/size");
-    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"High - Sharp video, larger file");
-    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Lossless - Perfect quality, huge file");
+    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Good ~60 Mbps (YouTube, TikTok)");
+    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"High ~75 Mbps (Discord, Twitter/X)");
+    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Ultra ~90 Mbps (Archival, editing)");
+    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Lossless ~130 Mbps (No artifacts)");
     SendMessage(cmbQuality, CB_SETCURSEL, g_config.quality, 0);
     layout->y += layout->rowH + 8;
 }
@@ -3203,6 +3236,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SendMessage(cmbFormat, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
             SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.264) - Best compatibility");
+            SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.265) - Smaller files, less compatible");
             SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"AVI - Legacy format");
             SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"WMV - Windows Media");
             SendMessage(cmbFormat, CB_SETCURSEL, g_config.outputFormat, 0);
@@ -3219,10 +3253,10 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 controlX, y, controlW, 120, hwnd, (HMENU)ID_CMB_QUALITY, g_windows.hInstance, NULL);
             SendMessage(cmbQuality, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
-            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Low - Small file, lower clarity");
-            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Medium - Balanced quality/size");
-            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"High - Sharp video, larger file");
-            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Lossless - Perfect quality, huge file");
+            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Good ~60 Mbps (YouTube, TikTok)");
+            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"High ~75 Mbps (Discord, Twitter/X)");
+            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Ultra ~90 Mbps (Archival, editing)");
+            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Lossless ~130 Mbps (No artifacts)");
             SendMessage(cmbQuality, CB_SETCURSEL, g_config.quality, 0);
             y += rowH + 8;
             
@@ -3341,9 +3375,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             y += 14;
             
             // Enable replay checkbox
-            HWND chkReplayEnabled = CreateWindowW(L"BUTTON", L"Enable Instant Replay",
+            HWND chkReplayEnabled = CreateWindowW(L"BUTTON", L"Enable Instant Replay (H.265)",
                 WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                labelX, y, 200, 24, hwnd, (HMENU)ID_CHK_REPLAY_ENABLED, g_windows.hInstance, NULL);
+                labelX, y, 250, 24, hwnd, (HMENU)ID_CHK_REPLAY_ENABLED, g_windows.hInstance, NULL);
             SendMessage(chkReplayEnabled, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             CheckDlgButton(hwnd, ID_CHK_REPLAY_ENABLED, g_config.replayEnabled ? BST_CHECKED : BST_UNCHECKED);
             y += 38;
@@ -3430,8 +3464,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"30 FPS");
             SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"60 FPS");
             SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"120 FPS");
+            SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"240 FPS");
             // Set selection based on config
-            int fpsIdx = (g_config.replayFPS >= 120) ? 2 : (g_config.replayFPS >= 60) ? 1 : 0;
+            int fpsIdx = (g_config.replayFPS >= 240) ? 3 : (g_config.replayFPS >= 120) ? 2 : (g_config.replayFPS >= 60) ? 1 : 0;
             SendMessage(cmbFPS, CB_SETCURSEL, fpsIdx, 0);
             y += rowH;
             
@@ -3543,7 +3578,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     }
                 }
                 
-                int ramMB = ReplayBuffer_EstimateRAMUsage(durationSecs, estWidth, estHeight, fps);
+                int ramMB = ReplayBuffer_EstimateRAMUsage(durationSecs, estWidth, estHeight, fps, g_config.quality);
                 
                 // Explanation text
                 char explainText[256];
@@ -3751,8 +3786,32 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     
                 case ID_CMB_QUALITY:
                     if (HIWORD(wParam) == CBN_SELCHANGE) {
-                        g_config.quality = (QualityPreset)SendMessage(
+                        QualityPreset newQuality = (QualityPreset)SendMessage(
                             GetDlgItem(hwnd, ID_CMB_QUALITY), CB_GETCURSEL, 0, 0);
+                        
+                        // Only restart if quality actually changed
+                        if (newQuality != g_config.quality) {
+                            QualityPreset oldQuality = g_config.quality;
+                            g_config.quality = newQuality;
+                            Logger_Log("Quality changed: %d -> %d\n", oldQuality, newQuality);
+                            
+                            // Hot-reload: restart replay buffer if currently running
+                            if (g_config.replayEnabled && g_replayBuffer.isBuffering) {
+                                Logger_Log("Hot-reloading replay buffer with new quality...\n");
+                                // Reset heartbeat state to prevent stale data triggering false stalls
+                                Logger_ResetHeartbeat(THREAD_BUFFER);
+                                Logger_ResetHeartbeat(THREAD_NVENC_OUTPUT);
+                                ReplayBuffer_Stop(&g_replayBuffer);
+                                ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                                CheckAudioError();
+                                // Notify health monitor that restart is complete
+                                HealthMonitor_NotifyRestart();
+                                Logger_Log("Replay buffer restarted with quality %d\n", newQuality);
+                            }
+                        }
+                        
+                        // Update RAM estimate since bitrate changed
+                        UpdateReplayRAMEstimate(hwnd);
                     }
                     break;
                     
@@ -3852,15 +3911,35 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 case ID_CMB_REPLAY_HOURS:
                 case ID_CMB_REPLAY_MINS:
                 case ID_CMB_REPLAY_SECS:
-                    // Duration is read on settings close, but update RAM estimate live
+                    // Duration changes - update RAM estimate and hot-reload if running
                     if (HIWORD(wParam) == CBN_SELCHANGE) {
                         int h = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_HOURS), CB_GETCURSEL, 0, 0);
                         int m = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_MINS), CB_GETCURSEL, 0, 0);
                         int s = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_SECS), CB_GETCURSEL, 0, 0);
                         int total = h * 3600 + m * 60 + s;
                         if (total < 1) total = 1;
-                        // Update config immediately so RAM estimate is accurate
-                        g_config.replayDuration = total;
+                        
+                        // Only restart if duration actually changed
+                        if (total != g_config.replayDuration) {
+                            int oldDuration = g_config.replayDuration;
+                            g_config.replayDuration = total;
+                            Logger_Log("Replay duration changed: %ds -> %ds\n", oldDuration, total);
+                            
+                            // Hot-reload: restart replay buffer if currently running
+                            if (g_config.replayEnabled && g_replayBuffer.isBuffering) {
+                                Logger_Log("Hot-reloading replay buffer with new duration...\n");
+                                // Reset heartbeat state to prevent stale data triggering false stalls
+                                Logger_ResetHeartbeat(THREAD_BUFFER);
+                                Logger_ResetHeartbeat(THREAD_NVENC_OUTPUT);
+                                ReplayBuffer_Stop(&g_replayBuffer);
+                                ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                                CheckAudioError();
+                                // Notify health monitor that restart is complete
+                                HealthMonitor_NotifyRestart();
+                                Logger_Log("Replay buffer restarted with %ds duration\n", total);
+                            }
+                        }
+                        
                         UpdateReplayRAMEstimate(hwnd);
                     }
                     break;
@@ -3890,7 +3969,29 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 case ID_CMB_REPLAY_FPS:
                     if (HIWORD(wParam) == CBN_SELCHANGE) {
                         int idx = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_FPS), CB_GETCURSEL, 0, 0);
-                        g_config.replayFPS = (idx == 2) ? 120 : (idx == 1) ? 60 : 30;
+                        int fpsValues[] = { 30, 60, 120, 240 };
+                        int newFPS = (idx >= 0 && idx < 4) ? fpsValues[idx] : 60;
+                        
+                        // Only restart if FPS actually changed
+                        if (newFPS != g_config.replayFPS) {
+                            int oldFPS = g_config.replayFPS;
+                            g_config.replayFPS = newFPS;
+                            Logger_Log("Replay FPS changed: %d -> %d\n", oldFPS, newFPS);
+                            
+                            // Hot-reload: restart replay buffer if currently running
+                            if (g_config.replayEnabled && g_replayBuffer.isBuffering) {
+                                Logger_Log("Hot-reloading replay buffer with new FPS...\n");
+                                // Reset heartbeat state to prevent stale data triggering false stalls
+                                Logger_ResetHeartbeat(THREAD_BUFFER);
+                                Logger_ResetHeartbeat(THREAD_NVENC_OUTPUT);
+                                ReplayBuffer_Stop(&g_replayBuffer);
+                                ReplayBuffer_Start(&g_replayBuffer, &g_config);
+                                CheckAudioError();
+                                // Notify health monitor that restart is complete
+                                HealthMonitor_NotifyRestart();
+                                Logger_Log("Replay buffer restarted at %d FPS\n", newFPS);
+                            }
+                        }
                         
                         // Update RAM estimate
                         UpdateReplayRAMEstimate(hwnd);

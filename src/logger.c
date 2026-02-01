@@ -60,7 +60,8 @@ static const char* const g_threadNames[THREAD_MAX] = {
     "AUDIO_MIX",
     "AUDIO_SRC1",
     "AUDIO_SRC2",
-    "WATCHDOG"
+    "WATCHDOG",
+    "HEALTH_MON"
 };
 
 typedef struct {
@@ -426,4 +427,14 @@ DWORD Logger_GetHeartbeatAge(ThreadId thread) {
     DWORD now = (DWORD)GetTickCount64();
     DWORD lastBeat = (DWORD)InterlockedCompareExchange(&g_heartbeats[thread].lastHeartbeat, 0, 0);
     return now - lastBeat;
+}
+
+void Logger_ResetHeartbeat(ThreadId thread) {
+    if (thread < 0 || thread >= THREAD_MAX) return;
+    
+    // Mark thread as inactive - HealthMonitor will return UINT_MAX for age
+    // This prevents stale heartbeat data from old thread instance triggering false stalls
+    InterlockedExchange(&g_heartbeats[thread].active, 0);
+    InterlockedExchange(&g_heartbeats[thread].lastHeartbeat, 0);
+    InterlockedExchange(&g_heartbeats[thread].beatCount, 0);
 }

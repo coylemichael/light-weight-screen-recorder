@@ -28,7 +28,7 @@ typedef enum {
     REPLAY_STATE_SAVING,        // Save in progress
     REPLAY_STATE_STOPPING,      // Shutdown requested
     REPLAY_STATE_ERROR,         // Fatal error occurred
-    REPLAY_STATE_STALLED        // Pipeline stalled - needs restart
+    REPLAY_STATE_RECOVERING     // HealthMonitor recovery in progress (renamed from STALLED)
 } ReplayStateEnum;
 
 typedef struct {
@@ -93,7 +93,7 @@ BOOL ReplayBuffer_SaveAsync(ReplayBufferState* state, const char* outputPath,
 // Check if a save is currently in progress
 BOOL ReplayBuffer_IsSaving(ReplayBufferState* state);
 
-int ReplayBuffer_EstimateRAMUsage(int durationSeconds, int width, int height, int fps);
+int ReplayBuffer_EstimateRAMUsage(int durationSeconds, int width, int height, int fps, QualityPreset quality);
 void ReplayBuffer_GetStatus(ReplayBufferState* state, char* buffer, int bufferSize);
 
 #endif

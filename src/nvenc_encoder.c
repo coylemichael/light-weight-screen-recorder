@@ -1,28 +1,13 @@
 /*
- * NVENC Hardware Encoder - Clean Implementation
- * Based on NVIDIA Video Codec SDK 13.0 nvEncodeAPI.h documentation
+ * NVENC Hardware Encoder - CUDA Path
+ * Based directly on OBS nvenc-cuda.c and cuda-helpers.c
  * 
- * Architecture (per API docs lines 3380-3391):
- * - Main thread: Fast frame submission (non-blocking)
- * - Output thread: Waits on completion events, retrieves bitstream
- * 
- * Key API requirements implemented:
- * - Multiple input buffers for async pipelining (lines 3617-3627)
- * - Unmap AFTER LockBitstream returns (lines 4165-4167)
- * - Lock outputs in submission order (lines 3402-3404)
- * - Each output buffer has distinct completion event (line 2582)
- * 
- * CRITICAL FIX (per NVIDIA docs Section 6.3):
- * - Desktop Duplication and NVENC use SEPARATE D3D11 devices
- * - Shared textures with keyed mutex for cross-device synchronization
- * - This eliminates thread contention that caused hangs
- *
- * ERROR HANDLING PATTERN:
- * - HRESULT checks use FAILED()/SUCCEEDED() macros exclusively
- * - NVENC errors checked against NV_ENC_SUCCESS and specific error codes
- * - Device loss detection triggers graceful shutdown (-1 return)
- * - Transient errors return 0 for retry; fatal errors return -1
- * - All errors logged with status codes for debugging
+ * Flow:
+ * 1. Load nvcuda.dll, get function pointers
+ * 2. Create CUDA context (cuCtxCreate)
+ * 3. Create CUDA arrays for input surfaces (cuArray3DCreate)
+ * 4. Open NVENC session with CUDA device type
+ * 5. For each frame: CPU buffer → CUDA array (cuMemcpy2D) → NVENC encode
  */
 
 #include "nvenc_encoder.h"
@@ -32,9 +17,6 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
-#include <process.h>
-#include <dxgi.h>
-#include <dxgi1_2.h>
 
 // Include official NVIDIA header
 #include "nvEncodeAPI.h"
@@ -42,116 +24,361 @@
 #define NvLog Logger_Log
 
 // ============================================================================
+// CUDA Types and Function Pointers (from OBS cuda-helpers.c)
+// ============================================================================
+
+typedef int CUresult;
+typedef void* CUcontext;
+typedef void* CUarray;
+typedef int CUdevice;
+
+#define CUDA_SUCCESS 0
+
+// CUDA array descriptor (from cuda.h)
+typedef struct {
+    size_t Width;
+    size_t Height;
+    size_t Depth;
+    unsigned int Format;
+    unsigned int NumChannels;
+    unsigned int Flags;
+} CUDA_ARRAY3D_DESCRIPTOR;
+
+// CUDA memcpy descriptor - MUST match CUDA driver API exactly
+typedef unsigned long long CUdeviceptr;
+typedef enum {
+    CU_MEMORYTYPE_HOST = 1,
+    CU_MEMORYTYPE_DEVICE = 2,
+    CU_MEMORYTYPE_ARRAY = 3
+} CUmemorytype;
+
+typedef struct {
+    size_t srcXInBytes;
+    size_t srcY;
+    CUmemorytype srcMemoryType;
+    const void* srcHost;
+    CUdeviceptr srcDevice;
+    CUarray srcArray;
+    size_t srcPitch;
+    
+    size_t dstXInBytes;
+    size_t dstY;
+    CUmemorytype dstMemoryType;
+    void* dstHost;
+    CUdeviceptr dstDevice;
+    CUarray dstArray;
+    size_t dstPitch;
+    
+    size_t WidthInBytes;
+    size_t Height;
+} CUDA_MEMCPY2D;
+
+#define CU_AD_FORMAT_UNSIGNED_INT8 1
+#define CUDA_ARRAY3D_SURFACE_LDST 0x02
+
+// CUDA function pointer types
+typedef CUresult (*CU_INIT)(unsigned int);
+typedef CUresult (*CU_DEVICE_GET_COUNT)(int*);
+typedef CUresult (*CU_DEVICE_GET)(CUdevice*, int);
+typedef CUresult (*CU_CTX_CREATE)(CUcontext*, unsigned int, CUdevice);
+typedef CUresult (*CU_CTX_DESTROY)(CUcontext);
+typedef CUresult (*CU_CTX_PUSH_CURRENT)(CUcontext);
+typedef CUresult (*CU_CTX_POP_CURRENT)(CUcontext*);
+typedef CUresult (*CU_ARRAY3D_CREATE)(CUarray*, const CUDA_ARRAY3D_DESCRIPTOR*);
+typedef CUresult (*CU_ARRAY_DESTROY)(CUarray);
+typedef CUresult (*CU_MEMCPY2D)(const CUDA_MEMCPY2D*);
+typedef CUresult (*CU_MEM_HOST_REGISTER)(void*, size_t, unsigned int);
+typedef CUresult (*CU_MEM_HOST_UNREGISTER)(void*);
+typedef CUresult (*CU_GET_ERROR_NAME)(CUresult, const char**);
+typedef CUresult (*CU_GET_ERROR_STRING)(CUresult, const char**);
+
+// CUDA functions struct (like OBS CudaFunctions)
+typedef struct {
+    CU_INIT cuInit;
+    CU_DEVICE_GET_COUNT cuDeviceGetCount;
+    CU_DEVICE_GET cuDeviceGet;
+    CU_CTX_CREATE cuCtxCreate;
+    CU_CTX_DESTROY cuCtxDestroy;
+    CU_CTX_PUSH_CURRENT cuCtxPushCurrent;
+    CU_CTX_POP_CURRENT cuCtxPopCurrent;
+    CU_ARRAY3D_CREATE cuArray3DCreate;
+    CU_ARRAY_DESTROY cuArrayDestroy;
+    CU_MEMCPY2D cuMemcpy2D;
+    CU_MEM_HOST_REGISTER cuMemHostRegister;
+    CU_MEM_HOST_UNREGISTER cuMemHostUnregister;
+    CU_GET_ERROR_NAME cuGetErrorName;
+    CU_GET_ERROR_STRING cuGetErrorString;
+} CudaFunctions;
+
+static HMODULE g_cudaLib = NULL;
+static CudaFunctions* cu = NULL;
+
+// ============================================================================
+// CUDA Surface (from OBS)
+// ============================================================================
+
+typedef struct {
+    CUarray tex;
+    NV_ENC_REGISTERED_PTR res;
+    NV_ENC_INPUT_PTR mapped_res;
+} CudaSurface;
+
+// ============================================================================
 // Constants
 // ============================================================================
 
-// Per API docs (line 3444-3445): "at least 4 more than number of B frames"
-// With no B-frames, minimum is 4. We use 8 for better pipelining.
-#define NUM_BUFFERS NVENC_NUM_BUFFERS
+#define NUM_BUFFERS 4
+#define GOP_LENGTH_SECONDS 2
+#define MF_UNITS_PER_SECOND 10000000LL
 
 // ============================================================================
 // Encoder State
 // ============================================================================
 
-typedef struct {
-    EncodedFrame frame;
-    BOOL valid;
-} OutputSlot;
-
 struct NVENCEncoder {
-    // NVENC core
+    // NVENC
     HMODULE nvencLib;
     NV_ENCODE_API_FUNCTION_LIST fn;
     void* encoder;
     
-    // Own D3D11 device for NVENC (separate from capture device)
-    // This is CRITICAL per NVIDIA docs: Desktop Duplication and NVENC
-    // must use separate devices to avoid thread contention
-    ID3D11Device* encDevice;
-    ID3D11DeviceContext* encContext;
+    // CUDA
+    CUcontext cu_ctx;
     
-    // Reference to source device (for texture copies on source side)
-    ID3D11Device* srcDevice;
-    ID3D11DeviceContext* srcContext;
+    // Surfaces (like OBS enc->surfaces)
+    CudaSurface surfaces[NUM_BUFFERS];
+    int buf_count;
+    int next_bitstream;
     
-    // Dimensions and settings
+    // Output bitstream buffers
+    NV_ENC_OUTPUT_PTR outputBuffers[NUM_BUFFERS];
+    
+    // Dimensions
     int width;
     int height;
     int fps;
     int qp;
-    uint64_t frameDuration;  // 100-ns units
-    
-    // Per API: Each in-flight frame needs its own input buffer
-    // Staging textures on SOURCE device (shared with encoder device)
-    ID3D11Texture2D* stagingTextures[NUM_BUFFERS];  // On srcDevice, with SHARED flag
-    HANDLE sharedHandles[NUM_BUFFERS];               // For cross-device sharing
-    
-    // Input textures on ENCODER device (opened from shared handles)
-    ID3D11Texture2D* inputTextures[NUM_BUFFERS];    // On encDevice
-    NV_ENC_REGISTERED_PTR registeredResources[NUM_BUFFERS];
-    NV_ENC_INPUT_PTR mappedResources[NUM_BUFFERS];  // Track for unmap
-    
-    // Keyed mutexes for synchronization between devices
-    IDXGIKeyedMutex* srcMutex[NUM_BUFFERS];   // On source device textures
-    IDXGIKeyedMutex* encMutex[NUM_BUFFERS];   // On encoder device textures
-    
-    // Output bitstream buffers (one per in-flight frame)
-    NV_ENC_OUTPUT_PTR outputBuffers[NUM_BUFFERS];
-    
-    // Per API (line 2582): Each output buffer needs distinct completion event
-    HANDLE completionEvents[NUM_BUFFERS];
-    
-    // Timestamps for pending frames
-    LONGLONG pendingTimestamps[NUM_BUFFERS];
-    
-    // Ring buffer indices
-    int submitIndex;    // Next buffer to use for submission
-    int retrieveIndex;  // Next buffer to retrieve from
-    volatile LONG pendingCount;  // Frames in flight
+    uint64_t frameDuration;
     
     // Frame counter
     uint64_t frameNumber;
     
-    // Output thread (per API lines 3384-3388)
-    HANDLE outputThread;
-    volatile LONG stopThread;  // Thread-safe: use InterlockedExchange
-    
-    // Callback for completed frames
+    // Callback
     EncodedFrameCallback frameCallback;
     void* callbackUserData;
     
-    // Synchronization
-    CRITICAL_SECTION submitLock;
-    
-    // Per-instance diagnostic counters (avoid static pollution)
-    int pipelineFullCount;
-    int mutexTimeoutCount;
-    
-    // Frame size tracking for quality monitoring
+    // Frame stats
     UINT64 totalBytesEncoded;
     UINT32 lastFrameSize;
     UINT32 minFrameSize;
     UINT32 maxFrameSize;
     
-    // Device lost detection
-    volatile LONG deviceLost;  // Thread-safe: use InterlockedExchange
-    
     BOOL initialized;
 };
 
 // ============================================================================
-// Forward Declarations
+// CUDA Loading (from OBS cuda-helpers.c)
 // ============================================================================
 
-static unsigned __stdcall OutputThreadProc(void* param);
-static BOOL CreateInputTextures(NVENCEncoder* enc);
-static void DestroyInputTextures(NVENCEncoder* enc);
+static BOOL load_cuda_lib(void) {
+    if (g_cudaLib) return TRUE;
+    
+    g_cudaLib = LoadLibraryA("nvcuda.dll");
+    if (!g_cudaLib) {
+        NvLog("NVENC: Failed to load nvcuda.dll\n");
+        return FALSE;
+    }
+    return TRUE;
+}
+
+static void* load_cuda_func(const char* name) {
+    void* ptr = (void*)GetProcAddress(g_cudaLib, name);
+    if (!ptr) {
+        NvLog("NVENC: Failed to load CUDA function: %s\n", name);
+    }
+    return ptr;
+}
+
+static BOOL init_cuda(void) {
+    if (cu) return TRUE;
+    
+    if (!load_cuda_lib()) return FALSE;
+    
+    cu = (CudaFunctions*)calloc(1, sizeof(CudaFunctions));
+    if (!cu) return FALSE;
+    
+    // Load all functions (like OBS cuda_functions array)
+    cu->cuInit = (CU_INIT)load_cuda_func("cuInit");
+    cu->cuDeviceGetCount = (CU_DEVICE_GET_COUNT)load_cuda_func("cuDeviceGetCount");
+    cu->cuDeviceGet = (CU_DEVICE_GET)load_cuda_func("cuDeviceGet");
+    cu->cuCtxCreate = (CU_CTX_CREATE)load_cuda_func("cuCtxCreate_v2");
+    cu->cuCtxDestroy = (CU_CTX_DESTROY)load_cuda_func("cuCtxDestroy_v2");
+    cu->cuCtxPushCurrent = (CU_CTX_PUSH_CURRENT)load_cuda_func("cuCtxPushCurrent_v2");
+    cu->cuCtxPopCurrent = (CU_CTX_POP_CURRENT)load_cuda_func("cuCtxPopCurrent_v2");
+    cu->cuArray3DCreate = (CU_ARRAY3D_CREATE)load_cuda_func("cuArray3DCreate_v2");
+    cu->cuArrayDestroy = (CU_ARRAY_DESTROY)load_cuda_func("cuArrayDestroy");
+    cu->cuMemcpy2D = (CU_MEMCPY2D)load_cuda_func("cuMemcpy2D_v2");
+    cu->cuMemHostRegister = (CU_MEM_HOST_REGISTER)load_cuda_func("cuMemHostRegister_v2");
+    cu->cuMemHostUnregister = (CU_MEM_HOST_UNREGISTER)load_cuda_func("cuMemHostUnregister");
+    cu->cuGetErrorName = (CU_GET_ERROR_NAME)load_cuda_func("cuGetErrorName");
+    cu->cuGetErrorString = (CU_GET_ERROR_STRING)load_cuda_func("cuGetErrorString");
+    
+    // Check all loaded
+    if (!cu->cuInit || !cu->cuDeviceGetCount || !cu->cuDeviceGet ||
+        !cu->cuCtxCreate || !cu->cuCtxDestroy || !cu->cuCtxPushCurrent ||
+        !cu->cuCtxPopCurrent || !cu->cuArray3DCreate || !cu->cuArrayDestroy ||
+        !cu->cuMemcpy2D || !cu->cuMemHostRegister || !cu->cuMemHostUnregister) {
+        free(cu);
+        cu = NULL;
+        return FALSE;
+    }
+    
+    return TRUE;
+}
+
+// ============================================================================
+// CUDA Error Checking (from OBS)
+// ============================================================================
+
+#define CU_FAILED(call) \
+    do { \
+        CUresult _res = (call); \
+        if (_res != CUDA_SUCCESS) { \
+            const char* _name = "Unknown"; \
+            const char* _desc = "Unknown"; \
+            if (cu->cuGetErrorName) cu->cuGetErrorName(_res, &_name); \
+            if (cu->cuGetErrorString) cu->cuGetErrorString(_res, &_desc); \
+            NvLog("NVENC CUDA: %s failed: %s (%d) - %s\n", #call, _name, _res, _desc); \
+            return FALSE; \
+        } \
+    } while(0)
+
+#define CU_CHECK(call) \
+    do { \
+        CUresult _res = (call); \
+        if (_res != CUDA_SUCCESS) { \
+            success = FALSE; \
+            goto unmap; \
+        } \
+    } while(0)
+
+// ============================================================================
+// CUDA Context Management (from OBS nvenc-cuda.c cuda_ctx_init)
+// ============================================================================
+
+static BOOL cuda_ctx_init(NVENCEncoder* enc) {
+    int count;
+    CUdevice device;
+    
+    CU_FAILED(cu->cuInit(0));
+    CU_FAILED(cu->cuDeviceGetCount(&count));
+    
+    if (count == 0) {
+        NvLog("NVENC: No CUDA devices found\n");
+        return FALSE;
+    }
+    
+    CU_FAILED(cu->cuDeviceGet(&device, 0));  // Use first GPU
+    CU_FAILED(cu->cuCtxCreate(&enc->cu_ctx, 0, device));
+    CU_FAILED(cu->cuCtxPopCurrent(NULL));
+    
+    NvLog("NVENC: CUDA context created\n");
+    return TRUE;
+}
+
+static void cuda_ctx_free(NVENCEncoder* enc) {
+    if (enc->cu_ctx) {
+        cu->cuCtxPopCurrent(NULL);
+        cu->cuCtxDestroy(enc->cu_ctx);
+        enc->cu_ctx = NULL;
+    }
+}
+
+// ============================================================================
+// CUDA Surface Management (from OBS nvenc-cuda.c)
+// ============================================================================
+
+static BOOL cuda_surface_init(NVENCEncoder* enc, CudaSurface* surf) {
+    // NV12: Y plane (full height) + UV plane (half height)
+    CUDA_ARRAY3D_DESCRIPTOR desc = {0};
+    desc.Width = enc->width;
+    desc.Height = enc->height + enc->height / 2;  // NV12
+    desc.Depth = 0;
+    desc.Flags = CUDA_ARRAY3D_SURFACE_LDST;
+    desc.NumChannels = 1;
+    desc.Format = CU_AD_FORMAT_UNSIGNED_INT8;
+    
+    CU_FAILED(cu->cuArray3DCreate(&surf->tex, &desc));
+    
+    // Register with NVENC
+    NV_ENC_REGISTER_RESOURCE reg = {0};
+    reg.version = NV_ENC_REGISTER_RESOURCE_VER;
+    reg.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_CUDAARRAY;
+    reg.resourceToRegister = (void*)surf->tex;
+    reg.width = enc->width;
+    reg.height = enc->height;
+    reg.pitch = (uint32_t)(desc.Width * desc.NumChannels);
+    reg.bufferFormat = NV_ENC_BUFFER_FORMAT_NV12;
+    
+    NVENCSTATUS st = enc->fn.nvEncRegisterResource(enc->encoder, &reg);
+    if (st != NV_ENC_SUCCESS) {
+        NvLog("NVENC: nvEncRegisterResource failed (%d)\n", st);
+        cu->cuArrayDestroy(surf->tex);
+        return FALSE;
+    }
+    
+    surf->res = reg.registeredResource;
+    surf->mapped_res = NULL;
+    return TRUE;
+}
+
+static BOOL cuda_init_surfaces(NVENCEncoder* enc) {
+    CU_FAILED(cu->cuCtxPushCurrent(enc->cu_ctx));
+    
+    for (int i = 0; i < enc->buf_count; i++) {
+        if (!cuda_surface_init(enc, &enc->surfaces[i])) {
+            cu->cuCtxPopCurrent(NULL);
+            return FALSE;
+        }
+    }
+    
+    CU_FAILED(cu->cuCtxPopCurrent(NULL));
+    
+    NvLog("NVENC: Created %d CUDA surfaces (%dx%d NV12)\n", 
+          enc->buf_count, enc->width, enc->height);
+    return TRUE;
+}
+
+static void cuda_surface_free(NVENCEncoder* enc, CudaSurface* surf) {
+    if (surf->res) {
+        if (surf->mapped_res) {
+            enc->fn.nvEncUnmapInputResource(enc->encoder, surf->mapped_res);
+        }
+        enc->fn.nvEncUnregisterResource(enc->encoder, surf->res);
+        cu->cuArrayDestroy(surf->tex);
+        surf->res = NULL;
+        surf->mapped_res = NULL;
+        surf->tex = NULL;
+    }
+}
+
+static void cuda_free_surfaces(NVENCEncoder* enc) {
+    if (!enc->cu_ctx) return;
+    
+    cu->cuCtxPushCurrent(enc->cu_ctx);
+    for (int i = 0; i < enc->buf_count; i++) {
+        cuda_surface_free(enc, &enc->surfaces[i]);
+    }
+    cu->cuCtxPopCurrent(NULL);
+}
 
 // ============================================================================
 // Public API
 // ============================================================================
 
 BOOL NVENCEncoder_IsAvailable(void) {
+    // Check both CUDA and NVENC
+    if (!init_cuda()) return FALSE;
+    
     HMODULE lib = LoadLibraryA("nvEncodeAPI64.dll");
     if (!lib) lib = LoadLibraryA("nvEncodeAPI.dll");
     if (lib) {
@@ -162,180 +389,99 @@ BOOL NVENCEncoder_IsAvailable(void) {
 }
 
 NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height, int fps, QualityPreset quality) {
-    // Preconditions
-    LWSR_ASSERT(d3dDevice != NULL);
-    LWSR_ASSERT(width > 0);
-    LWSR_ASSERT(height > 0);
-    LWSR_ASSERT(fps > 0);
-    
-    if (!d3dDevice || width <= 0 || height <= 0 || fps <= 0) {
-        NvLog("NVENCEncoder: Invalid parameters\n");
+    (void)d3dDevice;  // Not used in CUDA path
+    if (width <= 0 || height <= 0 || fps <= 0) {
+        NvLog("NVENC: Invalid parameters\n");
         return NULL;
     }
     
-    NvLog("Creating NVENCEncoder (%dx%d @ %d fps, quality=%d)...\n", width, height, fps, quality);
+    NvLog("NVENC: Creating encoder (%dx%d @ %d fps, quality=%d)...\n", width, height, fps, quality);
+    
+    // Init CUDA
+    if (!init_cuda()) {
+        NvLog("NVENC: CUDA init failed\n");
+        return NULL;
+    }
     
     NVENCEncoder* enc = (NVENCEncoder*)calloc(1, sizeof(NVENCEncoder));
     if (!enc) return NULL;
     
-    enc->srcDevice = d3dDevice;  // Keep reference to source device
-    d3dDevice->lpVtbl->GetImmediateContext(d3dDevice, &enc->srcContext);  // Get source context
     enc->width = width;
     enc->height = height;
     enc->fps = fps;
     enc->frameDuration = MF_UNITS_PER_SECOND / fps;
+    enc->buf_count = NUM_BUFFERS;
     
-    InitializeCriticalSection(&enc->submitLock);
-    
-    // ========================================================================
-    // Step 1: Create SEPARATE D3D11 device for NVENC
-    // Per NVIDIA docs: Desktop Duplication + NVENC on same device causes
-    // thread contention. Using separate device eliminates this issue.
-    // ========================================================================
-    
-    {
-        // Get the adapter from source device to create encoder device on same GPU
-        IDXGIDevice* dxgiDevice = NULL;
-        IDXGIAdapter* adapter = NULL;
-        HRESULT hr = d3dDevice->lpVtbl->QueryInterface(d3dDevice, &IID_IDXGIDevice, (void**)&dxgiDevice);
-        if (FAILED(hr)) {
-            NvLog("NVENCEncoder: QueryInterface IDXGIDevice failed (0x%08X)\n", hr);
-            goto fail;
-        }
-        hr = dxgiDevice->lpVtbl->GetAdapter(dxgiDevice, &adapter);
-        if (FAILED(hr)) {
-            NvLog("NVENCEncoder: GetAdapter failed (0x%08X)\n", hr);
-            dxgiDevice->lpVtbl->Release(dxgiDevice);
-            goto fail;
-        }
-        dxgiDevice->lpVtbl->Release(dxgiDevice);
-        
-        D3D_FEATURE_LEVEL featureLevels[] = { D3D_FEATURE_LEVEL_11_0 };
-        D3D_FEATURE_LEVEL featureLevel;
-        
-        // Create encoder's own D3D11 device on the same adapter
-        hr = D3D11CreateDevice(
-            adapter,  // Use same GPU as source (guaranteed non-NULL now)
-            D3D_DRIVER_TYPE_UNKNOWN,
-            NULL,
-            0,  // No special flags needed
-            featureLevels,
-            1,
-            D3D11_SDK_VERSION,
-            &enc->encDevice,
-            &featureLevel,
-            &enc->encContext
-        );
-        
-        adapter->lpVtbl->Release(adapter);
-        
-        if (FAILED(hr)) {
-            NvLog("NVENCEncoder: Failed to create encoder D3D11 device (0x%08X)\n", hr);
-            goto fail;
-        }
-        NvLog("NVENCEncoder: Created separate D3D11 device for encoding\n");
+    // Create CUDA context
+    if (!cuda_ctx_init(enc)) {
+        free(enc);
+        return NULL;
     }
     
-    // ========================================================================
-    // Step 2: Load nvEncodeAPI64.dll and get function list
-    // ========================================================================
-    
+    // Load NVENC
     enc->nvencLib = LoadLibraryA("nvEncodeAPI64.dll");
+    if (!enc->nvencLib) enc->nvencLib = LoadLibraryA("nvEncodeAPI.dll");
     if (!enc->nvencLib) {
-        enc->nvencLib = LoadLibraryA("nvEncodeAPI.dll");
-    }
-    if (!enc->nvencLib) {
-        NvLog("NVENCEncoder: Failed to load nvEncodeAPI64.dll\n");
-        goto fail;
+        NvLog("NVENC: Failed to load nvEncodeAPI64.dll\n");
+        cuda_ctx_free(enc);
+        free(enc);
+        return NULL;
     }
     
-    typedef NVENCSTATUS (NVENCAPI *PFN_NvEncodeAPICreateInstance)(NV_ENCODE_API_FUNCTION_LIST*);
-    PFN_NvEncodeAPICreateInstance createInstance = 
-        (PFN_NvEncodeAPICreateInstance)GetProcAddress(enc->nvencLib, "NvEncodeAPICreateInstance");
+    typedef NVENCSTATUS (NVENCAPI *PFN_CREATE)(NV_ENCODE_API_FUNCTION_LIST*);
+    PFN_CREATE createInstance = (PFN_CREATE)GetProcAddress(enc->nvencLib, "NvEncodeAPICreateInstance");
     if (!createInstance) {
-        NvLog("NVENCEncoder: NvEncodeAPICreateInstance not found\n");
+        NvLog("NVENC: NvEncodeAPICreateInstance not found\n");
         goto fail;
     }
     
     enc->fn.version = NV_ENCODE_API_FUNCTION_LIST_VER;
-    NVENCSTATUS st = createInstance(&enc->fn);
-    if (st != NV_ENC_SUCCESS) {
-        NvLog("NVENCEncoder: CreateInstance failed (%d)\n", st);
+    if (createInstance(&enc->fn) != NV_ENC_SUCCESS) {
+        NvLog("NVENC: CreateInstance failed\n");
         goto fail;
     }
     
-    // ========================================================================
-    // Step 3: Open encode session with ENCODER's D3D11 device (not source)
-    // ========================================================================
-    
+    // Open session with CUDA device type (like OBS)
     NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS sessionParams = {0};
     sessionParams.version = NV_ENC_OPEN_ENCODE_SESSION_EX_PARAMS_VER;
-    sessionParams.deviceType = NV_ENC_DEVICE_TYPE_DIRECTX;
-    sessionParams.device = enc->encDevice;  // Use encoder's own device!
+    sessionParams.deviceType = NV_ENC_DEVICE_TYPE_CUDA;
+    sessionParams.device = enc->cu_ctx;
     sessionParams.apiVersion = NVENCAPI_VERSION;
     
-    st = enc->fn.nvEncOpenEncodeSessionEx(&sessionParams, &enc->encoder);
+    NVENCSTATUS st = enc->fn.nvEncOpenEncodeSessionEx(&sessionParams, &enc->encoder);
     if (st != NV_ENC_SUCCESS) {
-        NvLog("NVENCEncoder: OpenEncodeSessionEx failed (%d)\n", st);
+        NvLog("NVENC: OpenEncodeSessionEx failed (%d)\n", st);
         goto fail;
     }
     
-    // Log SDK version
-    NvLog("NVENCEncoder: SDK API version %d.%d\n",
-          NVENCAPI_MAJOR_VERSION, NVENCAPI_MINOR_VERSION);
+    NvLog("NVENC: Session opened (CUDA device type)\n");
     
-    // Check async support - required for this implementation
-    NV_ENC_CAPS_PARAM capsParam = {0};
-    capsParam.version = NV_ENC_CAPS_PARAM_VER;
-    capsParam.capsToQuery = NV_ENC_CAPS_ASYNC_ENCODE_SUPPORT;
-    int capsVal = 0;
-    NVENCSTATUS capsSt = enc->fn.nvEncGetEncodeCaps(enc->encoder, NV_ENC_CODEC_HEVC_GUID, &capsParam, &capsVal);
-    if (capsSt != NV_ENC_SUCCESS) {
-        NvLog("NVENCEncoder: nvEncGetEncodeCaps failed (%d)\n", capsSt);
-        goto fail;
-    }
-    if (!capsVal) {
-        NvLog("NVENCEncoder: Async mode not supported - this GPU/driver does not support async encoding\n");
-        goto fail;
-    }
-    
-    // ========================================================================
-    // Step 3: Get preset config and configure encoder
-    // Per API: Use NvEncGetEncodePresetConfigEx to get base config
-    // ========================================================================
-    
+    // Get preset config
     NV_ENC_PRESET_CONFIG presetConfig = {0};
     presetConfig.version = NV_ENC_PRESET_CONFIG_VER;
     presetConfig.presetCfg.version = NV_ENC_CONFIG_VER;
     
-    st = enc->fn.nvEncGetEncodePresetConfigEx(enc->encoder, 
-        NV_ENC_CODEC_HEVC_GUID, 
-        NV_ENC_PRESET_P1_GUID,  // Fastest preset
+    st = enc->fn.nvEncGetEncodePresetConfigEx(enc->encoder,
+        NV_ENC_CODEC_HEVC_GUID,
+        NV_ENC_PRESET_P1_GUID,
         NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY,
         &presetConfig);
     if (st != NV_ENC_SUCCESS) {
-        NvLog("NVENCEncoder: GetEncodePresetConfigEx failed (%d)\n", st);
+        NvLog("NVENC: GetEncodePresetConfigEx failed (%d)\n", st);
         goto fail;
     }
     
-    // Customize config for screen recording
+    // Configure encoder
     NV_ENC_CONFIG config = presetConfig.presetCfg;
-    config.gopLength = fps * GOP_LENGTH_SECONDS;  // 2-second GOP for seeking
-    config.frameIntervalP = 1;   // No B-frames (confirmed by user)
+    config.gopLength = fps * GOP_LENGTH_SECONDS;
+    config.frameIntervalP = 1;  // No B-frames
     
-    // Disable expensive features for maximum speed
+    // Disable expensive features
     config.rcParams.enableAQ = 0;
     config.rcParams.enableTemporalAQ = 0;
     config.rcParams.enableLookahead = 0;
-    config.rcParams.lookaheadDepth = 0;
-    config.rcParams.disableBadapt = 1;
-    config.rcParams.multiPass = NV_ENC_MULTI_PASS_DISABLED;
     
-    // HEVC: Disable temporal filter, minimal references
-    config.encodeCodecConfig.hevcConfig.tfLevel = NV_ENC_TEMPORAL_FILTER_LEVEL_0;
-    config.encodeCodecConfig.hevcConfig.maxNumRefFramesInDPB = 2;
-    
-    // Constant QP mode (fastest, no rate control overhead)
+    // Constant QP
     config.rcParams.rateControlMode = NV_ENC_PARAMS_RC_CONSTQP;
     switch (quality) {
         case QUALITY_LOW:      enc->qp = QP_LOW;      break;
@@ -346,13 +492,9 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     }
     config.rcParams.constQP.qpInterP = enc->qp;
     config.rcParams.constQP.qpInterB = enc->qp;
-    config.rcParams.constQP.qpIntra = enc->qp > QP_INTRA_OFFSET ? enc->qp - QP_INTRA_OFFSET : 1;
+    config.rcParams.constQP.qpIntra = enc->qp > 4 ? enc->qp - 4 : 0;
     
-    // ========================================================================
-    // Step 4: Initialize encoder
-    // Per API (line 2240): enableEncodeAsync=1 for async mode
-    // ========================================================================
-    
+    // Initialize encoder
     NV_ENC_INITIALIZE_PARAMS initParams = {0};
     initParams.version = NV_ENC_INITIALIZE_PARAMS_VER;
     initParams.encodeGUID = NV_ENC_CODEC_HEVC_GUID;
@@ -363,87 +505,40 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     initParams.darHeight = height;
     initParams.frameRateNum = fps;
     initParams.frameRateDen = 1;
-    initParams.enableEncodeAsync = 1;  // Async mode required
-    initParams.enablePTD = 1;  // Let NVENC decide picture types
+    initParams.enableEncodeAsync = 0;  // Sync mode (like OBS soft encoder)
+    initParams.enablePTD = 1;
     initParams.encodeConfig = &config;
     initParams.tuningInfo = NV_ENC_TUNING_INFO_ULTRA_LOW_LATENCY;
     
     st = enc->fn.nvEncInitializeEncoder(enc->encoder, &initParams);
     if (st != NV_ENC_SUCCESS) {
-        NvLog("NVENCEncoder: Initialize failed (%d)\n", st);
+        NvLog("NVENC: InitializeEncoder failed (%d)\n", st);
         goto fail;
     }
     
-    NvLog("NVENCEncoder: HEVC CQP (QP=%d, I-frame QP=%d), async mode\n", 
-          enc->qp, enc->qp > QP_INTRA_OFFSET ? enc->qp - QP_INTRA_OFFSET : 1);
-    NvLog("NVENCEncoder: Rate control: mode=%d, constQP.qpInterP=%d, qpInterB=%d, qpIntra=%d\n",
-          config.rcParams.rateControlMode, 
-          config.rcParams.constQP.qpInterP,
-          config.rcParams.constQP.qpInterB, 
-          config.rcParams.constQP.qpIntra);
+    NvLog("NVENC: Encoder initialized (HEVC CQP QP=%d)\n", enc->qp);
     
-    // ========================================================================
-    // Step 5: Create input textures (one per buffer slot)
-    // Per API: Each in-flight frame needs its own input buffer
-    // ========================================================================
-    
-    if (!CreateInputTextures(enc)) {
-        NvLog("NVENCEncoder: Failed to create input textures\n");
+    // Create CUDA surfaces
+    if (!cuda_init_surfaces(enc)) {
+        NvLog("NVENC: Failed to create CUDA surfaces\n");
         goto fail;
     }
     
-    // ========================================================================
-    // Step 6: Create output bitstream buffers and completion events
-    // Per API (line 2582): Each output buffer needs distinct completion event
-    // ========================================================================
-    
-    for (int i = 0; i < NUM_BUFFERS; i++) {
-        // Create bitstream buffer
-        NV_ENC_CREATE_BITSTREAM_BUFFER createBitstreamParams = {0};
-        createBitstreamParams.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
+    // Create bitstream buffers
+    for (int i = 0; i < enc->buf_count; i++) {
+        NV_ENC_CREATE_BITSTREAM_BUFFER createBuf = {0};
+        createBuf.version = NV_ENC_CREATE_BITSTREAM_BUFFER_VER;
         
-        st = enc->fn.nvEncCreateBitstreamBuffer(enc->encoder, &createBitstreamParams);
+        st = enc->fn.nvEncCreateBitstreamBuffer(enc->encoder, &createBuf);
         if (st != NV_ENC_SUCCESS) {
-            NvLog("NVENCEncoder: CreateBitstreamBuffer[%d] failed (%d)\n", i, st);
+            NvLog("NVENC: CreateBitstreamBuffer[%d] failed (%d)\n", i, st);
             goto fail;
         }
-        enc->outputBuffers[i] = createBitstreamParams.bitstreamBuffer;
-        
-        // Create and register completion event
-        enc->completionEvents[i] = CreateEvent(NULL, FALSE, FALSE, NULL);
-        if (!enc->completionEvents[i]) {
-            NvLog("NVENCEncoder: CreateEvent[%d] failed\n", i);
-            goto fail;
-        }
-        
-        NV_ENC_EVENT_PARAMS eventParams = {0};
-        eventParams.version = NV_ENC_EVENT_PARAMS_VER;
-        eventParams.completionEvent = enc->completionEvents[i];
-        
-        st = enc->fn.nvEncRegisterAsyncEvent(enc->encoder, &eventParams);
-        if (st != NV_ENC_SUCCESS) {
-            NvLog("NVENCEncoder: RegisterAsyncEvent[%d] failed (%d)\n", i, st);
-            CloseHandle(enc->completionEvents[i]);
-            enc->completionEvents[i] = NULL;
-            goto fail;
-        }
-    }
-    
-    // ========================================================================
-    // Step 7: Start output thread
-    // Per API (lines 3384-3388): "The client can create another thread and 
-    // wait on the event object to be signaled"
-    // ========================================================================
-    
-    InterlockedExchange(&enc->stopThread, FALSE);
-    enc->outputThread = (HANDLE)_beginthreadex(NULL, 0, OutputThreadProc, enc, 0, NULL);
-    if (!enc->outputThread) {
-        NvLog("NVENCEncoder: Failed to create output thread\n");
-        goto fail;
+        enc->outputBuffers[i] = createBuf.bitstreamBuffer;
     }
     
     enc->initialized = TRUE;
-    NvLog("NVENCEncoder: Ready (%d buffers, async)\n", NUM_BUFFERS);
+    NvLog("NVENC: Ready (%d buffers, sync mode)\n", enc->buf_count);
     return enc;
     
 fail:
@@ -452,260 +547,162 @@ fail:
 }
 
 void NVENCEncoder_SetCallback(NVENCEncoder* enc, EncodedFrameCallback callback, void* userData) {
-    // Precondition
-    LWSR_ASSERT(enc != NULL);
-    
     if (!enc) return;
     enc->frameCallback = callback;
     enc->callbackUserData = userData;
 }
 
-// Returns: 1 = success, 0 = transient failure (retry), -1 = device lost (must recreate)
-int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Source, LONGLONG timestamp) {
-    // Preconditions
-    LWSR_ASSERT(enc != NULL);
-    LWSR_ASSERT(nv12Source != NULL);
+// Copy frame to CUDA surface (from OBS copy_frame)
+static BOOL copy_frame(NVENCEncoder* enc, BYTE* data[2], int linesize[2], CudaSurface* surf) {
+    size_t height = enc->height;
+    size_t width = enc->width;
     
-    if (!enc || !enc->initialized || !nv12Source) return 0;
+    CUDA_MEMCPY2D m = {0};
+    m.srcMemoryType = CU_MEMORYTYPE_HOST;
+    m.dstMemoryType = CU_MEMORYTYPE_ARRAY;
+    m.dstArray = surf->tex;
+    m.WidthInBytes = width;
+    m.Height = height;
     
-    // Check if device was previously marked as lost
-    if (InterlockedCompareExchange(&enc->deviceLost, 0, 0)) return -1;
+    CUresult res;
     
-    EnterCriticalSection(&enc->submitLock);
-    
-    // Check if pipeline is full
-    if (enc->pendingCount >= NUM_BUFFERS) {
-        LeaveCriticalSection(&enc->submitLock);
-        // Rate-limit this log to avoid spam (log once per LOG_RATE_LIMIT occurrences)
-        enc->pipelineFullCount++;
-        if ((enc->pipelineFullCount % LOG_RATE_LIMIT) == 1) {
-            NvLog("NVENCEncoder: Pipeline full (%d pending) - frame dropped\n", enc->pendingCount);
-        }
-        return 0;  // Transient - output thread will drain
+    res = cu->cuCtxPushCurrent(enc->cu_ctx);
+    if (res != CUDA_SUCCESS) {
+        NvLog("NVENC: cuCtxPushCurrent failed (%d)\n", res);
+        return FALSE;
     }
     
-    int idx = enc->submitIndex;
-    NVENCSTATUS st;
-    HRESULT hr;
-    
-    // ========================================================================
-    // Step 1: Acquire keyed mutex on SOURCE device for writing
-    // Key 0 = available, Key 1 = encoder owns it
-    // ========================================================================
-    hr = enc->srcMutex[idx]->lpVtbl->AcquireSync(enc->srcMutex[idx], 0, MUTEX_ACQUIRE_TIMEOUT_MS);
-    
-    // Check for device removed/reset errors
-    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
-        InterlockedExchange(&enc->deviceLost, TRUE);
-        LeaveCriticalSection(&enc->submitLock);
-        NvLog("NVENCEncoder: DEVICE LOST detected on srcMutex acquire (0x%08X)\n", hr);
-        return -1;
+    // Copy Y plane
+    m.srcPitch = linesize[0];
+    m.srcHost = data[0];
+    res = cu->cuMemcpy2D(&m);
+    if (res != CUDA_SUCCESS) {
+        NvLog("NVENC: cuMemcpy2D Y plane failed (%d)\n", res);
+        cu->cuCtxPopCurrent(NULL);
+        return FALSE;
     }
     
-    // Note: AcquireSync returns WAIT_TIMEOUT (DWORD) not HRESULT on timeout
-    if (hr == (HRESULT)WAIT_TIMEOUT || FAILED(hr)) {
-        LeaveCriticalSection(&enc->submitLock);
-        enc->mutexTimeoutCount++;
-        if ((enc->mutexTimeoutCount % LOG_RATE_LIMIT) == 1) {
-            NvLog("NVENCEncoder: Mutex acquire timeout[%d] (0x%08X)\n", idx, hr);
-        }
-        return 0;  // Transient
+    // Copy UV plane
+    m.srcPitch = linesize[1];
+    m.srcHost = data[1];
+    m.dstY = height;
+    m.Height = height / 2;
+    res = cu->cuMemcpy2D(&m);
+    if (res != CUDA_SUCCESS) {
+        NvLog("NVENC: cuMemcpy2D UV plane failed (%d)\n", res);
+        cu->cuCtxPopCurrent(NULL);
+        return FALSE;
     }
     
-    // ========================================================================
-    // Step 2: Copy source texture to staging texture (on SOURCE device)
-    // Using SOURCE device context - this is safe, runs on capture thread
-    // ========================================================================
-    enc->srcContext->lpVtbl->CopyResource(enc->srcContext, 
-                                           (ID3D11Resource*)enc->stagingTextures[idx], 
-                                           (ID3D11Resource*)nv12Source);
+    cu->cuCtxPopCurrent(NULL);
+    return TRUE;
+}
+
+int NVENCEncoder_SubmitFrame(NVENCEncoder* enc, BYTE* data[2], int linesize[2], LONGLONG timestamp) {
+    if (!enc || !enc->initialized || !data[0] || !data[1]) return 0;
     
-    // Flush after copy to ensure GPU work completes before mutex release
-    // This prevents race conditions between source and encoder devices
-    enc->srcContext->lpVtbl->Flush(enc->srcContext);
+    int idx = enc->next_bitstream;
+    CudaSurface* surf = &enc->surfaces[idx];
+    NV_ENC_OUTPUT_PTR bs = enc->outputBuffers[idx];
     
-    // Check for device removed after GPU operation
-    hr = enc->srcDevice->lpVtbl->GetDeviceRemovedReason(enc->srcDevice);
-    if (FAILED(hr)) {
-        InterlockedExchange(&enc->deviceLost, TRUE);
-        enc->srcMutex[idx]->lpVtbl->ReleaseSync(enc->srcMutex[idx], 0);
-        LeaveCriticalSection(&enc->submitLock);
-        NvLog("NVENCEncoder: DEVICE LOST after CopyResource (0x%08X)\n", hr);
-        return -1;
+    // Copy frame to CUDA surface
+    if (!copy_frame(enc, data, linesize, surf)) {
+        NvLog("NVENC: copy_frame failed\n");
+        return 0;
     }
     
-    // ========================================================================
-    // Step 3: Release mutex with key 1 (signaling encoder can use it)
-    // ========================================================================
-    enc->srcMutex[idx]->lpVtbl->ReleaseSync(enc->srcMutex[idx], 1);
+    // Map input resource
+    NV_ENC_MAP_INPUT_RESOURCE map = {0};
+    map.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
+    map.registeredResource = surf->res;
+    map.mappedBufferFmt = NV_ENC_BUFFER_FORMAT_NV12;
     
-    // ========================================================================
-    // Step 4: Acquire mutex on ENCODER device for encoding
-    // ========================================================================
-    hr = enc->encMutex[idx]->lpVtbl->AcquireSync(enc->encMutex[idx], 1, MUTEX_ACQUIRE_TIMEOUT_MS);
-    
-    // Check for device removed/reset errors
-    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_DEVICE_RESET) {
-        InterlockedExchange(&enc->deviceLost, TRUE);
-        enc->srcMutex[idx]->lpVtbl->ReleaseSync(enc->srcMutex[idx], 0);
-        LeaveCriticalSection(&enc->submitLock);
-        NvLog("NVENCEncoder: DEVICE LOST detected on encMutex acquire (0x%08X)\n", hr);
-        return -1;
-    }
-    
-    // Note: AcquireSync returns WAIT_TIMEOUT (DWORD) not HRESULT on timeout
-    if (hr == (HRESULT)WAIT_TIMEOUT || FAILED(hr)) {
-        // Try to recover by releasing back to state 0
-        enc->srcMutex[idx]->lpVtbl->ReleaseSync(enc->srcMutex[idx], 0);
-        LeaveCriticalSection(&enc->submitLock);
-        NvLog("NVENCEncoder: Encoder mutex acquire failed[%d]\n", idx);
-        return 0;  // Transient
-    }
-    
-    // ========================================================================
-    // Step 5: Map the registered resource (on ENCODER device)
-    // ========================================================================
-    NV_ENC_MAP_INPUT_RESOURCE mapParams = {0};
-    mapParams.version = NV_ENC_MAP_INPUT_RESOURCE_VER;
-    mapParams.registeredResource = enc->registeredResources[idx];
-    
-    st = enc->fn.nvEncMapInputResource(enc->encoder, &mapParams);
-    
-    // Check for NVENC device errors
-    if (st == NV_ENC_ERR_DEVICE_NOT_EXIST || st == NV_ENC_ERR_INVALID_DEVICE || 
-        st == NV_ENC_ERR_INVALID_ENCODERDEVICE) {
-        InterlockedExchange(&enc->deviceLost, TRUE);
-        enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
-        LeaveCriticalSection(&enc->submitLock);
-        NvLog("NVENCEncoder: DEVICE LOST on MapInputResource (%d)\n", st);
-        return -1;
-    }
-    
+    NVENCSTATUS st = enc->fn.nvEncMapInputResource(enc->encoder, &map);
     if (st != NV_ENC_SUCCESS) {
-        enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
-        LeaveCriticalSection(&enc->submitLock);
-        NvLog("NVENCEncoder: MapInputResource[%d] failed (%d)\n", idx, st);
-        return 0;  // Transient
+        NvLog("NVENC: MapInputResource failed (%d)\n", st);
+        return 0;
     }
+    surf->mapped_res = map.mappedResource;
     
-    // Store for later unmap (per API lines 4165-4167: unmap after LockBitstream)
-    enc->mappedResources[idx] = mapParams.mappedResource;
-    
-    // ========================================================================
-    // Step 6: Submit frame for encoding
-    // Per API: In async mode, this returns immediately
-    // ========================================================================
-    
+    // Encode
     NV_ENC_PIC_PARAMS picParams = {0};
     picParams.version = NV_ENC_PIC_PARAMS_VER;
-    picParams.inputBuffer = mapParams.mappedResource;
-    picParams.outputBitstream = enc->outputBuffers[idx];
+    picParams.inputBuffer = map.mappedResource;
+    picParams.outputBitstream = bs;
     picParams.bufferFmt = NV_ENC_BUFFER_FORMAT_NV12;
     picParams.inputWidth = enc->width;
     picParams.inputHeight = enc->height;
-    picParams.inputPitch = 0;  // Let NVENC determine from texture
     picParams.pictureStruct = NV_ENC_PIC_STRUCT_FRAME;
     picParams.inputTimeStamp = timestamp;
     picParams.inputDuration = enc->frameDuration;
-    picParams.completionEvent = enc->completionEvents[idx];
     
-    // Force IDR every 2 seconds for seeking
+    // Force IDR every GOP
     if (enc->frameNumber % (enc->fps * GOP_LENGTH_SECONDS) == 0) {
         picParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR;
     }
     
     st = enc->fn.nvEncEncodePicture(enc->encoder, &picParams);
-    
-    // Check for NVENC device errors
-    if (st == NV_ENC_ERR_DEVICE_NOT_EXIST || st == NV_ENC_ERR_INVALID_DEVICE || 
-        st == NV_ENC_ERR_INVALID_ENCODERDEVICE) {
-        InterlockedExchange(&enc->deviceLost, TRUE);
-        enc->fn.nvEncUnmapInputResource(enc->encoder, mapParams.mappedResource);
-        enc->mappedResources[idx] = NULL;
-        enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
-        LeaveCriticalSection(&enc->submitLock);
-        NvLog("NVENCEncoder: DEVICE LOST on EncodePicture (%d)\n", st);
-        return -1;
-    }
-    
-    // Per API: NV_ENC_ERR_NEED_MORE_INPUT is not an error (B-frame buffering)
-    // But we don't use B-frames, so this shouldn't happen
     if (st != NV_ENC_SUCCESS && st != NV_ENC_ERR_NEED_MORE_INPUT) {
-        enc->fn.nvEncUnmapInputResource(enc->encoder, mapParams.mappedResource);
-        enc->mappedResources[idx] = NULL;
-        // Release mutex back to state 0 on error
-        enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
-        LeaveCriticalSection(&enc->submitLock);
-        NvLog("NVENCEncoder: EncodePicture[%d] failed (%d)\n", idx, st);
-        return 0;  // Transient
+        NvLog("NVENC: EncodePicture failed (%d)\n", st);
+        enc->fn.nvEncUnmapInputResource(enc->encoder, surf->mapped_res);
+        surf->mapped_res = NULL;
+        return 0;
     }
     
-    // NOTE: encMutex[idx] is still held! The output thread will release it
-    // after LockBitstream and UnmapInputResource complete.
+    // Lock bitstream (sync mode - blocks until encode done)
+    NV_ENC_LOCK_BITSTREAM lock = {0};
+    lock.version = NV_ENC_LOCK_BITSTREAM_VER;
+    lock.outputBitstream = bs;
     
-    // Track pending frame
-    enc->pendingTimestamps[idx] = timestamp;
-    enc->submitIndex = (enc->submitIndex + 1) % NUM_BUFFERS;
-    InterlockedIncrement(&enc->pendingCount);
+    st = enc->fn.nvEncLockBitstream(enc->encoder, &lock);
+    if (st != NV_ENC_SUCCESS) {
+        NvLog("NVENC: LockBitstream failed (%d)\n", st);
+        enc->fn.nvEncUnmapInputResource(enc->encoder, surf->mapped_res);
+        surf->mapped_res = NULL;
+        return 0;
+    }
+    
+    // Copy encoded data and deliver via callback
+    if (enc->frameCallback && lock.bitstreamSizeInBytes > 0) {
+        EncodedFrame frame = {0};
+        frame.data = (BYTE*)malloc(lock.bitstreamSizeInBytes);
+        if (frame.data) {
+            LEAK_TRACK_NVENC_FRAME_ALLOC();
+            memcpy(frame.data, lock.bitstreamBufferPtr, lock.bitstreamSizeInBytes);
+            frame.size = lock.bitstreamSizeInBytes;
+            frame.timestamp = timestamp;
+            frame.duration = enc->frameDuration;
+            frame.isKeyframe = (lock.pictureType == NV_ENC_PIC_TYPE_IDR);
+            
+            // Stats
+            enc->lastFrameSize = lock.bitstreamSizeInBytes;
+            enc->totalBytesEncoded += lock.bitstreamSizeInBytes;
+            if (enc->minFrameSize == 0 || lock.bitstreamSizeInBytes < enc->minFrameSize)
+                enc->minFrameSize = lock.bitstreamSizeInBytes;
+            if (lock.bitstreamSizeInBytes > enc->maxFrameSize)
+                enc->maxFrameSize = lock.bitstreamSizeInBytes;
+            
+            enc->frameCallback(&frame, enc->callbackUserData);
+        }
+    }
+    
+    // Unlock and unmap
+    enc->fn.nvEncUnlockBitstream(enc->encoder, bs);
+    enc->fn.nvEncUnmapInputResource(enc->encoder, surf->mapped_res);
+    surf->mapped_res = NULL;
+    
+    enc->next_bitstream = (enc->next_bitstream + 1) % enc->buf_count;
     enc->frameNumber++;
     
-    LeaveCriticalSection(&enc->submitLock);
-    
-    return 1;  // Success
-}
-
-BOOL NVENCEncoder_IsDeviceLost(NVENCEncoder* enc) {
-    return enc ? InterlockedCompareExchange(&enc->deviceLost, 0, 0) : FALSE;
-}
-
-int NVENCEncoder_DrainCompleted(NVENCEncoder* enc, EncodedFrameCallback callback, void* userData) {
-    // In async mode, the output thread handles frame retrieval
-    // This function is a no-op as draining happens automatically via callback
-    (void)enc;
-    (void)callback;
-    (void)userData;
-    return 0;
-}
-
-BOOL NVENCEncoder_EncodeTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Tex, LONGLONG ts, EncodedFrame* out) {
-    // Legacy API - wraps new API for compatibility
-    if (!enc || !out) return FALSE;
-    memset(out, 0, sizeof(*out));
-    
-    // Just submit - async mode will deliver via callback
-    return NVENCEncoder_SubmitTexture(enc, nv12Tex, ts);
-}
-
-BOOL NVENCEncoder_Flush(NVENCEncoder* enc, EncodedFrame* out) {
-    if (!enc || !out) return FALSE;
-    memset(out, 0, sizeof(*out));
-    
-    // Send EOS
-    NV_ENC_PIC_PARAMS picParams = {0};
-    picParams.version = NV_ENC_PIC_PARAMS_VER;
-    picParams.encodePicFlags = NV_ENC_PIC_FLAG_EOS;
-    NVENCSTATUS st = enc->fn.nvEncEncodePicture(enc->encoder, &picParams);
-    if (st != NV_ENC_SUCCESS) {
-        NvLog("NVENCEncoder_Flush: EOS failed (%d)\n", st);
-    }
-    
-    return FALSE;
+    return 1;
 }
 
 BOOL NVENCEncoder_GetSequenceHeader(NVENCEncoder* enc, BYTE* buffer, DWORD bufferSize, DWORD* outSize) {
-    // Preconditions
-    LWSR_ASSERT(enc != NULL);
-    LWSR_ASSERT(buffer != NULL);
-    LWSR_ASSERT(bufferSize > 0);
-    LWSR_ASSERT(outSize != NULL);
-    
-    // Initialize output before early returns
-    if (outSize) *outSize = 0;
-    
     if (!enc || !enc->initialized || !buffer || !outSize) return FALSE;
     
-    uint32_t payloadSize = 0;
+    *outSize = 0;
     
+    uint32_t payloadSize = 0;
     NV_ENC_SEQUENCE_PARAM_PAYLOAD seqParams = {0};
     seqParams.version = NV_ENC_SEQUENCE_PARAM_PAYLOAD_VER;
     seqParams.inBufferSize = bufferSize;
@@ -714,12 +711,11 @@ BOOL NVENCEncoder_GetSequenceHeader(NVENCEncoder* enc, BYTE* buffer, DWORD buffe
     
     NVENCSTATUS st = enc->fn.nvEncGetSequenceParams(enc->encoder, &seqParams);
     if (st != NV_ENC_SUCCESS) {
-        NvLog("NVENCEncoder: GetSequenceParams failed (%d)\n", st);
+        NvLog("NVENC: GetSequenceParams failed (%d)\n", st);
         return FALSE;
     }
     
     *outSize = payloadSize;
-    NvLog("NVENCEncoder: Sequence header size: %u bytes\n", payloadSize);
     return TRUE;
 }
 
@@ -748,400 +744,110 @@ void NVENCEncoder_GetFrameSizeStats(NVENCEncoder* enc, UINT32* lastSize, UINT32*
 void NVENCEncoder_Destroy(NVENCEncoder* enc) {
     if (!enc) return;
     
-    NvLog("NVENCEncoder: Destroy (%llu frames)\n", enc->frameNumber);
+    NvLog("NVENC: Destroying encoder (%llu frames)\n", enc->frameNumber);
     
-    // Stop output thread
-    if (enc->outputThread) {
-        InterlockedExchange(&enc->stopThread, TRUE);
-        
-        // Signal all events to wake up thread
-        for (int i = 0; i < NUM_BUFFERS; i++) {
-            if (enc->completionEvents[i]) {
-                SetEvent(enc->completionEvents[i]);
-            }
-        }
-        
-        DWORD waitResult = WaitForSingleObject(enc->outputThread, THREAD_JOIN_TIMEOUT_MS);
-        if (waitResult == WAIT_TIMEOUT) {
-            NvLog("NVENCEncoder: Warning - output thread did not exit in time\n");
-        }
-        CloseHandle(enc->outputThread);
-    }
-    
-    // Cleanup NVENC resources
     if (enc->encoder) {
-        // Flush D3D11 contexts to ensure all pending GPU work is complete
-        // This is the D3D11 equivalent of cuCtxSynchronize() recommended by NVIDIA
-        // to prevent NVENC API calls from hanging
-        if (enc->encContext) {
-            NvLog("NVENCEncoder: Flushing encoder D3D11 context before cleanup\n");
-            enc->encContext->lpVtbl->Flush(enc->encContext);
-        }
-        if (enc->srcContext) {
-            NvLog("NVENCEncoder: Flushing source D3D11 context before cleanup\n");
-            enc->srcContext->lpVtbl->Flush(enc->srcContext);
-        }
-        
         // Send EOS
         NV_ENC_PIC_PARAMS picParams = {0};
         picParams.version = NV_ENC_PIC_PARAMS_VER;
         picParams.encodePicFlags = NV_ENC_PIC_FLAG_EOS;
-        NVENCSTATUS eosSt = enc->fn.nvEncEncodePicture(enc->encoder, &picParams);
-        if (eosSt != NV_ENC_SUCCESS) {
-            NvLog("NVENCEncoder: EOS in Destroy failed (%d)\n", eosSt);
-        }
+        enc->fn.nvEncEncodePicture(enc->encoder, &picParams);
         
-        // Unregister events and destroy buffers
-        for (int i = 0; i < NUM_BUFFERS; i++) {
-            if (enc->completionEvents[i]) {
-                NV_ENC_EVENT_PARAMS eventParams = {0};
-                eventParams.version = NV_ENC_EVENT_PARAMS_VER;
-                eventParams.completionEvent = enc->completionEvents[i];
-                enc->fn.nvEncUnregisterAsyncEvent(enc->encoder, &eventParams);
-                CloseHandle(enc->completionEvents[i]);
-            }
-            
+        // Destroy bitstream buffers
+        for (int i = 0; i < enc->buf_count; i++) {
             if (enc->outputBuffers[i]) {
                 enc->fn.nvEncDestroyBitstreamBuffer(enc->encoder, enc->outputBuffers[i]);
             }
         }
         
-        // Destroy input textures (includes shared textures and mutexes)
-        DestroyInputTextures(enc);
+        // Destroy surfaces
+        cuda_free_surfaces(enc);
         
         // Destroy encoder
         enc->fn.nvEncDestroyEncoder(enc->encoder);
     }
     
-    // Release encoder's D3D11 device and context
-    if (enc->encContext) {
-        enc->encContext->lpVtbl->Release(enc->encContext);
-    }
-    if (enc->encDevice) {
-        enc->encDevice->lpVtbl->Release(enc->encDevice);
-    }
-    
-    // Release source context (we didn't AddRef the source device)
-    if (enc->srcContext) {
-        enc->srcContext->lpVtbl->Release(enc->srcContext);
-    }
+    // Free CUDA context
+    cuda_ctx_free(enc);
     
     if (enc->nvencLib) {
         FreeLibrary(enc->nvencLib);
     }
     
-    DeleteCriticalSection(&enc->submitLock);
     free(enc);
 }
 
 // ============================================================================
-// Output Thread (Per API lines 3384-3388)
-// "The client can create another thread and wait on the event object to be 
-// signaled by NvEncodeAPI interface on completion of the encoding process"
+// D3D11 Texture Interface (reads back to CPU, then encodes via CUDA)
 // ============================================================================
 
-static unsigned __stdcall OutputThreadProc(void* param) {
-    NVENCEncoder* enc = (NVENCEncoder*)param;
+int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Texture, LONGLONG timestamp) {
+    if (!enc || !nv12Texture) return 0;
     
-    NvLog("NVENCEncoder: Output thread started\n");
+    // Get device context
+    ID3D11Device* device = NULL;
+    ID3D11DeviceContext* ctx = NULL;
+    nv12Texture->lpVtbl->GetDevice(nv12Texture, &device);
+    if (!device) return 0;
+    device->lpVtbl->GetImmediateContext(device, &ctx);
+    device->lpVtbl->Release(device);
+    if (!ctx) return 0;
     
-    int framesRetrieved = 0;
+    // Create staging texture for CPU readback
+    D3D11_TEXTURE2D_DESC texDesc;
+    nv12Texture->lpVtbl->GetDesc(nv12Texture, &texDesc);
     
-    // Per NVIDIA docs (lines 3701-3704):
-    // "Waits on E1, copies encoded bitstream from O1
-    //  Waits on E2, copies encoded bitstream from O2
-    //  Waits on E3, copies encoded bitstream from O3"
-    // We wait on events IN ORDER (retrieveIndex), one at a time.
+    texDesc.Usage = D3D11_USAGE_STAGING;
+    texDesc.BindFlags = 0;
+    texDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    texDesc.MiscFlags = 0;
     
-    while (!InterlockedCompareExchange(&enc->stopThread, 0, 0)) {
-        // Heartbeat for monitoring
-        Logger_Heartbeat(THREAD_NVENC_OUTPUT);
-        
-        int idx = enc->retrieveIndex;
-        
-        // ====================================================================
-        // Step 1: Wait for completion event for this specific slot
-        // Per docs: "wait on the event object to be signaled"
-        // ====================================================================
-        
-        DWORD waitResult = WaitForSingleObject(enc->completionEvents[idx], EVENT_WAIT_TIMEOUT_MS);
-        
-        if (waitResult == WAIT_TIMEOUT) {
-            // No frame ready yet - check if we should stop, then wait again
-            continue;
-        }
-        
-        if (waitResult != WAIT_OBJECT_0) {
-            if (!InterlockedCompareExchange(&enc->stopThread, 0, 0)) {
-                NvLog("NVENCEncoder: Wait[%d] failed (0x%X)\n", idx, waitResult);
-            }
-            continue;
-        }
-        
-        if (InterlockedCompareExchange(&enc->stopThread, 0, 0)) break;
-        
-        // ====================================================================
-        // CHECK DEVICE HEALTH before any GPU/NVENC operations
-        // This prevents hanging on dead device calls
-        // ====================================================================
-        HRESULT deviceCheck = enc->encDevice->lpVtbl->GetDeviceRemovedReason(enc->encDevice);
-        if (deviceCheck != S_OK) {
-            InterlockedExchange(&enc->deviceLost, TRUE);
-            NvLog("NVENCEncoder: DEVICE REMOVED detected in output thread (0x%08X)\n", deviceCheck);
-            break;  // Exit loop immediately
-        }
-        
-        // ====================================================================
-        // Step 2: Lock bitstream to get encoded data
-        // Per docs (lines 3623-3626): event signaled means data is ready
-        // ====================================================================
-        
-        NV_ENC_LOCK_BITSTREAM lockParams = {0};
-        lockParams.version = NV_ENC_LOCK_BITSTREAM_VER;
-        lockParams.outputBitstream = enc->outputBuffers[idx];
-        lockParams.doNotWait = 1;  // Don't block - event already signaled
-        
-        NVENCSTATUS st = enc->fn.nvEncLockBitstream(enc->encoder, &lockParams);
-        
-        // Check for device lost errors
-        if (st == NV_ENC_ERR_DEVICE_NOT_EXIST || st == NV_ENC_ERR_INVALID_DEVICE || 
-            st == NV_ENC_ERR_INVALID_ENCODERDEVICE) {
-            InterlockedExchange(&enc->deviceLost, TRUE);
-            NvLog("NVENCEncoder: DEVICE LOST in OutputThread LockBitstream (%d)\n", st);
-            // Release mutex and exit thread - consumer will detect deviceLost
-            if (enc->encMutex[idx]) {
-                enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
-            }
-            break;  // Exit the while loop
-        }
-        
-        if (st != NV_ENC_SUCCESS) {
-            NvLog("NVENCEncoder: LockBitstream[%d] failed (%d)\n", idx, st);
-            // Still advance to avoid getting stuck
-            if (enc->encMutex[idx]) {
-                enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
-            }
-            enc->retrieveIndex = (enc->retrieveIndex + 1) % NUM_BUFFERS;
-            InterlockedDecrement(&enc->pendingCount);
-            continue;
-        }
-        
-        // ====================================================================
-        // Step 3: Copy encoded data and track frame sizes
-        // ====================================================================
-        
-        EncodedFrame frame = {0};
-        frame.data = (BYTE*)malloc(lockParams.bitstreamSizeInBytes);
-        if (frame.data) {
-            LEAK_TRACK_NVENC_FRAME_ALLOC();
-            memcpy(frame.data, lockParams.bitstreamBufferPtr, lockParams.bitstreamSizeInBytes);
-            frame.size = lockParams.bitstreamSizeInBytes;
-            frame.timestamp = enc->pendingTimestamps[idx];
-            frame.duration = enc->frameDuration;
-            frame.isKeyframe = (lockParams.pictureType == NV_ENC_PIC_TYPE_IDR);
-            
-            // Track frame sizes for quality monitoring
-            enc->lastFrameSize = lockParams.bitstreamSizeInBytes;
-            enc->totalBytesEncoded += lockParams.bitstreamSizeInBytes;
-            if (enc->minFrameSize == 0 || lockParams.bitstreamSizeInBytes < enc->minFrameSize)
-                enc->minFrameSize = lockParams.bitstreamSizeInBytes;
-            if (lockParams.bitstreamSizeInBytes > enc->maxFrameSize)
-                enc->maxFrameSize = lockParams.bitstreamSizeInBytes;
-        } else {
-            NvLog("NVENCEncoder: malloc failed for frame data (%u bytes) - frame dropped\n", lockParams.bitstreamSizeInBytes);
-        }
-        
-        // Unlock bitstream
-        enc->fn.nvEncUnlockBitstream(enc->encoder, enc->outputBuffers[idx]);
-        
-        // ====================================================================
-        // Step 4: Unmap input resource
-        // Per docs (lines 4165-4167): unmap AFTER LockBitstream
-        // Flush D3D11 context before unmap to ensure GPU work is complete
-        // (NVIDIA forum recommendation to prevent nvEncUnmapInputResource hangs)
-        // ====================================================================
-        
-        if (enc->mappedResources[idx]) {
-            // Flush encoder context before unmap to sync GPU state
-            if (enc->encContext) {
-                enc->encContext->lpVtbl->Flush(enc->encContext);
-            }
-            enc->fn.nvEncUnmapInputResource(enc->encoder, enc->mappedResources[idx]);
-            enc->mappedResources[idx] = NULL;
-        }
-        
-        // ====================================================================
-        // Step 5: Release keyed mutex - allows source device to reuse buffer
-        // Release with key 0 so source can acquire it again
-        // ====================================================================
-        
-        if (enc->encMutex[idx]) {
-            enc->encMutex[idx]->lpVtbl->ReleaseSync(enc->encMutex[idx], 0);
-        }
-        
-        // ====================================================================
-        // Step 6: Deliver frame and advance
-        // ====================================================================
-        
-        if (frame.data && enc->frameCallback) {
-            enc->frameCallback(&frame, enc->callbackUserData);
-            framesRetrieved++;
-        } else if (frame.data) {
-            free(frame.data);
-        }
-        
-        enc->retrieveIndex = (enc->retrieveIndex + 1) % NUM_BUFFERS;
-        InterlockedDecrement(&enc->pendingCount);
+    ID3D11Texture2D* staging = NULL;
+    nv12Texture->lpVtbl->GetDevice(nv12Texture, &device);
+    HRESULT hr = device->lpVtbl->CreateTexture2D(device, &texDesc, NULL, &staging);
+    device->lpVtbl->Release(device);
+    
+    if (FAILED(hr) || !staging) {
+        ctx->lpVtbl->Release(ctx);
+        return 0;
     }
     
-    NvLog("NVENCEncoder: Output thread exiting (retrieved %d frames)\n", framesRetrieved);
-    return 0;
-}
-
-// ============================================================================
-// Input Texture Management - Cross-Device Shared Textures
-// Per API: Each in-flight frame needs its own input buffer
-// 
-// We use shared textures with keyed mutex for synchronization:
-// 1. Create staging texture on SOURCE device with SHARED_KEYEDMUTEX flag
-// 2. Open that texture on ENCODER device via shared handle
-// 3. Use keyed mutex to synchronize copy (source) and encode (encoder)
-// ============================================================================
-
-static BOOL CreateInputTextures(NVENCEncoder* enc) {
-    HRESULT hr;
+    // Copy GPU texture to staging
+    ctx->lpVtbl->CopyResource(ctx, (ID3D11Resource*)staging, (ID3D11Resource*)nv12Texture);
     
-    for (int i = 0; i < NUM_BUFFERS; i++) {
-        // ====================================================================
-        // Step 1: Create NV12 shared texture on SOURCE device
-        // ====================================================================
-        D3D11_TEXTURE2D_DESC stagingDesc = {0};
-        stagingDesc.Width = enc->width;
-        stagingDesc.Height = enc->height;
-        stagingDesc.MipLevels = 1;
-        stagingDesc.ArraySize = 1;
-        stagingDesc.Format = DXGI_FORMAT_NV12;
-        stagingDesc.SampleDesc.Count = 1;
-        stagingDesc.Usage = D3D11_USAGE_DEFAULT;
-        stagingDesc.BindFlags = D3D11_BIND_SHADER_RESOURCE;  // Needed for shared
-        stagingDesc.CPUAccessFlags = 0;
-        stagingDesc.MiscFlags = D3D11_RESOURCE_MISC_SHARED_KEYEDMUTEX;
-        
-        hr = enc->srcDevice->lpVtbl->CreateTexture2D(enc->srcDevice, &stagingDesc, 
-                                                      NULL, &enc->stagingTextures[i]);
-        if (FAILED(hr)) {
-            NvLog("NVENCEncoder: CreateTexture2D staging[%d] failed (0x%08X)\n", i, hr);
-            DestroyInputTextures(enc);  // Clean up partial allocations
-            return FALSE;
-        }
-        
-        // Get keyed mutex for source-side texture
-        hr = enc->stagingTextures[i]->lpVtbl->QueryInterface(
-            enc->stagingTextures[i], &IID_IDXGIKeyedMutex, (void**)&enc->srcMutex[i]);
-        if (FAILED(hr)) {
-            NvLog("NVENCEncoder: QueryInterface IDXGIKeyedMutex src[%d] failed\n", i);
-            DestroyInputTextures(enc);  // Clean up partial allocations
-            return FALSE;
-        }
-        
-        // Get shared handle
-        IDXGIResource* dxgiRes = NULL;
-        hr = enc->stagingTextures[i]->lpVtbl->QueryInterface(
-            enc->stagingTextures[i], &IID_IDXGIResource, (void**)&dxgiRes);
-        if (FAILED(hr)) {
-            NvLog("NVENCEncoder: QueryInterface IDXGIResource[%d] failed\n", i);
-            DestroyInputTextures(enc);  // Clean up partial allocations
-            return FALSE;
-        }
-        hr = dxgiRes->lpVtbl->GetSharedHandle(dxgiRes, &enc->sharedHandles[i]);
-        dxgiRes->lpVtbl->Release(dxgiRes);
-        if (FAILED(hr)) {
-            NvLog("NVENCEncoder: GetSharedHandle[%d] failed\n", i);
-            DestroyInputTextures(enc);  // Clean up partial allocations
-            return FALSE;
-        }
-        
-        // ====================================================================
-        // Step 2: Open shared texture on ENCODER device
-        // ====================================================================
-        hr = enc->encDevice->lpVtbl->OpenSharedResource(
-            enc->encDevice, enc->sharedHandles[i], &IID_ID3D11Texture2D, 
-            (void**)&enc->inputTextures[i]);
-        if (FAILED(hr)) {
-            NvLog("NVENCEncoder: OpenSharedResource[%d] failed (0x%08X)\n", i, hr);
-            DestroyInputTextures(enc);  // Clean up partial allocations
-            return FALSE;
-        }
-        
-        // Get keyed mutex for encoder-side texture
-        hr = enc->inputTextures[i]->lpVtbl->QueryInterface(
-            enc->inputTextures[i], &IID_IDXGIKeyedMutex, (void**)&enc->encMutex[i]);
-        if (FAILED(hr)) {
-            NvLog("NVENCEncoder: QueryInterface IDXGIKeyedMutex enc[%d] failed\n", i);
-            DestroyInputTextures(enc);  // Clean up partial allocations
-            return FALSE;
-        }
-        
-        // ====================================================================
-        // Step 3: Register encoder-side texture with NVENC
-        // ====================================================================
-        NV_ENC_REGISTER_RESOURCE regParams = {0};
-        regParams.version = NV_ENC_REGISTER_RESOURCE_VER;
-        regParams.resourceType = NV_ENC_INPUT_RESOURCE_TYPE_DIRECTX;
-        regParams.width = enc->width;
-        regParams.height = enc->height;
-        regParams.pitch = 0;
-        regParams.subResourceIndex = 0;
-        regParams.resourceToRegister = enc->inputTextures[i];
-        regParams.bufferFormat = NV_ENC_BUFFER_FORMAT_NV12;
-        regParams.bufferUsage = NV_ENC_INPUT_IMAGE;
-        
-        NVENCSTATUS st = enc->fn.nvEncRegisterResource(enc->encoder, &regParams);
-        if (st != NV_ENC_SUCCESS) {
-            NvLog("NVENCEncoder: RegisterResource[%d] failed (%d)\n", i, st);
-            DestroyInputTextures(enc);  // Clean up partial allocations
-            return FALSE;
-        }
-        enc->registeredResources[i] = regParams.registeredResource;
+    // Map staging texture
+    D3D11_MAPPED_SUBRESOURCE mapped;
+    hr = ctx->lpVtbl->Map(ctx, (ID3D11Resource*)staging, 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) {
+        staging->lpVtbl->Release(staging);
+        ctx->lpVtbl->Release(ctx);
+        return 0;
     }
     
-    NvLog("NVENCEncoder: Created %d shared textures (%dx%d NV12, cross-device)\n", 
-          NUM_BUFFERS, enc->width, enc->height);
-    return TRUE;
+    // NV12: Y plane at offset 0, UV plane at offset height * pitch
+    BYTE* data[2];
+    int linesize[2];
+    
+    data[0] = (BYTE*)mapped.pData;
+    data[1] = (BYTE*)mapped.pData + enc->height * mapped.RowPitch;
+    linesize[0] = mapped.RowPitch;
+    linesize[1] = mapped.RowPitch;
+    
+    // Call new interface
+    int result = NVENCEncoder_SubmitFrame(enc, data, linesize, timestamp);
+    
+    // Cleanup
+    ctx->lpVtbl->Unmap(ctx, (ID3D11Resource*)staging, 0);
+    staging->lpVtbl->Release(staging);
+    ctx->lpVtbl->Release(ctx);
+    
+    return result;
 }
 
-static void DestroyInputTextures(NVENCEncoder* enc) {
-    for (int i = 0; i < NUM_BUFFERS; i++) {
-        if (enc->mappedResources[i]) {
-            enc->fn.nvEncUnmapInputResource(enc->encoder, enc->mappedResources[i]);
-            enc->mappedResources[i] = NULL;
-        }
-        
-        if (enc->registeredResources[i]) {
-            enc->fn.nvEncUnregisterResource(enc->encoder, enc->registeredResources[i]);
-            enc->registeredResources[i] = NULL;
-        }
-        
-        // Release encoder-side mutex and texture
-        if (enc->encMutex[i]) {
-            enc->encMutex[i]->lpVtbl->Release(enc->encMutex[i]);
-            enc->encMutex[i] = NULL;
-        }
-        if (enc->inputTextures[i]) {
-            enc->inputTextures[i]->lpVtbl->Release(enc->inputTextures[i]);
-            enc->inputTextures[i] = NULL;
-        }
-        
-        // Release source-side mutex and texture
-        if (enc->srcMutex[i]) {
-            enc->srcMutex[i]->lpVtbl->Release(enc->srcMutex[i]);
-            enc->srcMutex[i] = NULL;
-        }
-        if (enc->stagingTextures[i]) {
-            enc->stagingTextures[i]->lpVtbl->Release(enc->stagingTextures[i]);
-            enc->stagingTextures[i] = NULL;
-        }
-        
-        enc->sharedHandles[i] = NULL;
-    }
-}
+// Stubs for removed functionality
+BOOL NVENCEncoder_IsDeviceLost(NVENCEncoder* enc) { (void)enc; return FALSE; }
+int NVENCEncoder_DrainCompleted(NVENCEncoder* enc, EncodedFrameCallback cb, void* ud) { (void)enc; (void)cb; (void)ud; return 0; }
+BOOL NVENCEncoder_EncodeTexture(NVENCEncoder* enc, ID3D11Texture2D* tex, LONGLONG ts, EncodedFrame* out) { (void)out; return NVENCEncoder_SubmitTexture(enc, tex, ts); }
+BOOL NVENCEncoder_Flush(NVENCEncoder* enc, EncodedFrame* out) { (void)enc; (void)out; return FALSE; }
+void NVENCEncoder_ForceCleanupLeaked(void) { }
+void NVENCEncoder_MarkLeaked(NVENCEncoder* enc) { (void)enc; }

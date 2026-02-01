@@ -1,5 +1,58 @@
 # Changelog
 
+## [1.2.20] - 2026-01-31
+
+### Changed
+- **NVENC encoder rewritten to use CUDA path (OBS-style)**
+  - Replaced D3D11-based NVENC with CUDA-based implementation
+  - NVENC session now uses `NV_ENC_DEVICE_TYPE_CUDA` instead of `NV_ENC_DEVICE_TYPE_DIRECTX`
+  - Frame flow: Desktop Duplication → GPU Convert → CPU Readback → CUDA Upload → NVENC
+  - Eliminates all D3D11↔NVENC resource sharing that caused driver deadlocks
+
+### Fixed
+- **GPU stall/deadlock issue RESOLVED** - Root cause was D3D11 cross-device synchronization
+  - Old path: Desktop Duplication D3D11 device + separate NVENC D3D11 device + KeyedMutex = driver deadlock
+  - New path: CUDA context owns NVENC, no D3D11 involvement in encoding = no deadlock
+  - Tested 53+ minutes continuous 120fps encoding with zero stalls
+
+### Technical Details
+- CUDA functions loaded dynamically from nvcuda.dll (like OBS cuda-helpers.c)
+- Uses `cuArray3DCreate` for NV12 input surfaces
+- Uses `cuMemcpy2D` to upload CPU frames to CUDA arrays  
+- Sync encode mode (no async complexity needed)
+- `NVENCEncoder_SubmitTexture()` compatibility shim does CPU readback internally
+
+### Removed
+- D3D11 device creation for NVENC (was separate from capture device)
+- KeyedMutex synchronization between devices
+- Async encode thread and completion queue
+- Session leak tracking (no longer needed without stalls)
+
+## [1.2.19] - 2026-01-29
+
+### Changed
+- **HealthMonitor architecture redesign (split execution model)**
+  - HealthMonitor now executes recovery directly instead of posting to UI thread
+  - Only `ReplayBuffer_Start()` runs on main thread (requires COM for audio)
+  - Removes separate cleanup thread (Q12 decision)
+  - New messages: `WM_WORKER_RESTART` (recovery ok), `WM_WORKER_FAILED` (permanent failure)
+  - Renamed `REPLAY_STATE_STALLED` → `REPLAY_STATE_RECOVERING`
+  - Added `THREAD_HEALTH_MONITOR` enum (separate from `THREAD_WATCHDOG`)
+
+### Added
+- **Recovery failure tracking**: 3 recoveries in 5 minutes triggers permanent disable
+- **Debug hotkey**: Ctrl+Shift+D forces recovery test (only when debugLogging=true)
+- **docs/HEALTHMONITOR_ARCHITECTURE_DESIGN.md**: Comprehensive design document with 13 Q&A decisions
+
+### Fixed
+- **Removed ScheduleCleanup/CleanupThread** - recovery now inline in HealthMonitor thread
+- **Thread state differentiation**: Crashed threads get cleanup, hung threads get abandoned (prevents deadlock)
+
+### Documentation
+- Updated CLAUDE.md heartbeat pattern section
+- Updated REPLAY_BUFFER_ARCHITECTURE.md with new flow diagram
+- Design doc captures rationale for breaking main-thread convention (Q11)
+
 ## [1.2.18] - 2026-01-26
 
 ### Added
