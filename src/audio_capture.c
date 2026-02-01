@@ -122,6 +122,10 @@ static AudioCaptureSource* CreateSource(const char* deviceId) {
     if (AudioDevice_GetById(deviceId, &info)) {
         src->type = info.type;
         src->isLoopback = (info.type == AUDIO_DEVICE_OUTPUT);
+        Logger_Log("CreateSource: device='%s', type=%d, isLoopback=%d\n", 
+            deviceId, info.type, src->isLoopback);
+    } else {
+        Logger_Log("CreateSource: AudioDevice_GetById FAILED for '%s'\n", deviceId);
     }
     
     // Get device by ID
@@ -326,6 +330,9 @@ static BOOL InitSourceCapture(AudioCaptureSource* src) {
         streamFlags |= AUDCLNT_STREAMFLAGS_LOOPBACK;
     }
     
+    Logger_Log("InitSourceCapture: device='%s', isLoopback=%d, flags=0x%X\n", 
+        src->deviceId, src->isLoopback, streamFlags);
+    
     // Initialize audio client
     // Use device's native format - we'll convert later
     HRESULT hr = src->audioClient->lpVtbl->Initialize(
@@ -339,9 +346,11 @@ static BOOL InitSourceCapture(AudioCaptureSource* src) {
     );
     
     if (FAILED(hr)) {
-        Logger_Log("InitSourceCapture: Initialize failed (0x%08X)\n", hr);
+        Logger_Log("InitSourceCapture: Initialize failed (0x%08X) for '%s'\n", hr, src->deviceId);
         return FALSE;
     }
+    
+    Logger_Log("InitSourceCapture: Initialize succeeded for '%s'\n", src->deviceId);
     
     // Get capture client
     hr = src->audioClient->lpVtbl->GetService(
@@ -351,10 +360,11 @@ static BOOL InitSourceCapture(AudioCaptureSource* src) {
     );
     
     if (FAILED(hr)) {
-        Logger_Log("InitSourceCapture: GetService failed (0x%08X)\n", hr);
+        Logger_Log("InitSourceCapture: GetService failed (0x%08X) for '%s'\n", hr, src->deviceId);
         return FALSE;
     }
     
+    Logger_Log("InitSourceCapture: GetService succeeded for '%s'\n", src->deviceId);
     return TRUE;
 }
 
