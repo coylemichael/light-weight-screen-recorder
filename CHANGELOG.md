@@ -1,6 +1,21 @@
 # Changelog
 
-## [1.2.20] - 2026-01-31
+## [1.3.1] - 2026-02-02
+
+### Removed
+- **HealthMonitor module deleted** (~550 lines) - recovery logic obsolete after CUDA fix
+  - D3D11 deadlocks were the only failure mode HealthMonitor recovered from
+  - CUDA-based NVENC eliminated that failure mode entirely
+  - Heartbeat logging remains in logger.c for debugging visibility
+
+### Changed
+- **Documentation reorganized**
+  - `CLAUDE.md` → `docs/CODING_BEST_PRACTICE.md` with audit checklist
+  - Added `docs/FILE_MANIFEST.md` - one-liner purpose per source file
+  - Trimmed architecture docs to essentials
+  - Deleted obsolete: `DEBUGGING_GUIDE.md`, `GLOBAL_VARIABLES_AUDIT.md`, `TODO.md`
+
+## [1.3.0] - 2026-01-31
 
 ### Changed
 - **NVENC encoder rewritten to use CUDA path (OBS-style)**
