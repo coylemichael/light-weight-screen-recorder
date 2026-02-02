@@ -48,7 +48,7 @@ typedef void* GpImage;
 #include "aac_encoder.h"
 #include "logger.h"
 #include "constants.h"
-#include "health_monitor.h"
+
 
 #pragma comment(lib, "comctl32.lib")
 #pragma comment(lib, "comdlg32.lib")
@@ -2260,9 +2260,7 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 // Update timer display
                 UpdateTimerDisplay();
             } else if (wParam == ID_TIMER_REPLAY_CHECK) {
-                // Stall detection moved to HealthMonitor thread (health_monitor.c)
-                // This timer is kept for future periodic UI updates if needed
-                // HealthMonitor posts WM_WORKER_RESTART or WM_WORKER_FAILED for recovery
+                // Reserved for future periodic UI updates if needed
             } else if (wParam == ID_TIMER_HOVER) {
                 // Check which icon button is currently hovered (if any)
                 POINT pt;
@@ -2480,27 +2478,6 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             return (LRESULT)hBrush;
         }
         
-        /* Debug hotkey: Ctrl+Shift+D triggers forced recovery (Q13)
-         * Only enabled when debugLogging is TRUE */
-        case WM_KEYDOWN:
-            if (g_config.debugLogging && 
-                wParam == 'D' && 
-                (GetKeyState(VK_CONTROL) & 0x8000) &&
-                (GetKeyState(VK_SHIFT) & 0x8000)) {
-                
-                Logger_Log("[DEBUG] Ctrl+Shift+D pressed - forcing recovery test\n");
-                
-                if (g_replayBuffer.state == REPLAY_STATE_CAPTURING) {
-                    Logger_Log("[DEBUG] Forcing recovery via direct WM_WORKER_RESTART\n");
-                    PostMessage(hwnd, WM_WORKER_RESTART, (WPARAM)STALL_BUFFER_THREAD, 0);
-                } else {
-                    Logger_Log("[DEBUG] Replay buffer not capturing (state=%d)\n", 
-                               g_replayBuffer.state);
-                }
-                return 0;
-            }
-            break;
-        
         case WM_HOTKEY: {
             Logger_Log("WM_HOTKEY received: wParam=%llu\n", (unsigned long long)wParam);
             if (wParam == HOTKEY_REPLAY_SAVE) {
@@ -2554,63 +2531,6 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             } else {
                 MessageBeep(MB_ICONERROR);  // Failure audio feedback
             }
-            return 0;
-        }
-        
-        case WM_WORKER_RESTART: {
-            // HealthMonitor completed recovery, requests restart (Q11 - split execution)
-            // Recovery cleanup already done by HealthMonitor thread
-            // We just need to call ReplayBuffer_Start() which requires COM (main thread)
-            StallType stallType = (StallType)wParam;
-            Logger_Log("WM_WORKER_RESTART received: type=%d\n", stallType);
-            
-            // Only restart if replay buffer is supposed to be running
-            if (g_config.replayEnabled) {
-                Logger_Log("Restarting replay buffer after recovery...\n");
-                
-                // Start the replay buffer (requires COM which is why we're here)
-                ReplayBuffer_Start(&g_replayBuffer, &g_config);
-                CheckAudioError();
-                
-                // Notify health monitor that restart is complete (starts grace period)
-                HealthMonitor_NotifyRestart();
-                
-                Logger_Log("Replay buffer restarted successfully\n");
-            }
-            return 0;
-        }
-        
-        case WM_WORKER_FAILED: {
-            // HealthMonitor hit failure limit (3 in 5 min - Q4)
-            // Permanent failure - disable replay buffer and notify user (Q9)
-            StallType stallType = (StallType)wParam;
-            Logger_Log("WM_WORKER_FAILED received: type=%d - PERMANENT FAILURE\n", stallType);
-            
-            // Disable replay buffer in config
-            g_config.replayEnabled = FALSE;
-            g_replayBuffer.isBuffering = FALSE;
-            
-            // Update UI checkbox if it exists
-            HWND hChkReplay = GetDlgItem(g_controlWnd, ID_CHK_REPLAY_ENABLED);
-            if (hChkReplay) {
-                SendMessage(hChkReplay, BM_SETCHECK, BST_UNCHECKED, 0);
-            }
-            
-            // Audio feedback (Q9 - error sound only)
-            MessageBeep(MB_ICONERROR);
-            
-            // Show error dialog (Q9 - silent + error sound, but we add dialog for permanent failure)
-            MessageBoxA(g_controlWnd,
-                "Replay buffer has failed too many times (3 in 5 minutes).\n\n"
-                "The replay buffer has been disabled. This may indicate:\n"
-                "• GPU driver issues\n"
-                "• Insufficient memory\n"
-                "• Hardware encoder problems\n\n"
-                "Try restarting the application or updating your GPU drivers.",
-                "Replay Buffer Disabled",
-                MB_OK | MB_ICONERROR);
-            
-            Logger_Log("Replay buffer permanently disabled due to repeated failures\n");
             return 0;
         }
         
@@ -3804,8 +3724,6 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                                 ReplayBuffer_Stop(&g_replayBuffer);
                                 ReplayBuffer_Start(&g_replayBuffer, &g_config);
                                 CheckAudioError();
-                                // Notify health monitor that restart is complete
-                                HealthMonitor_NotifyRestart();
                                 Logger_Log("Replay buffer restarted with quality %d\n", newQuality);
                             }
                         }
@@ -3934,8 +3852,6 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                                 ReplayBuffer_Stop(&g_replayBuffer);
                                 ReplayBuffer_Start(&g_replayBuffer, &g_config);
                                 CheckAudioError();
-                                // Notify health monitor that restart is complete
-                                HealthMonitor_NotifyRestart();
                                 Logger_Log("Replay buffer restarted with %ds duration\n", total);
                             }
                         }
@@ -3987,8 +3903,6 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                                 ReplayBuffer_Stop(&g_replayBuffer);
                                 ReplayBuffer_Start(&g_replayBuffer, &g_config);
                                 CheckAudioError();
-                                // Notify health monitor that restart is complete
-                                HealthMonitor_NotifyRestart();
                                 Logger_Log("Replay buffer restarted at %d FPS\n", newFPS);
                             }
                         }

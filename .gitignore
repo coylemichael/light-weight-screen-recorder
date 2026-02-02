@@ -16,6 +16,9 @@ tools/
 # Debug logs (created when debug logging enabled)
 Debug/
 
+# Skills (local AI assistant prompts)
+docs/skills/
+
 # Config files (user-specific)
 lwsr_config.ini
 
@@ -31,7 +34,3 @@ Video_Codec_Interface_13.0.19/
 # Backup files
 *.bak
 *~
-# Internal docs (not for public repo)
-docs/DEBUGGING_GUIDE.md
-# Internal documentation (not for public repo)
-docs/

@@ -60,8 +60,7 @@ static const char* const g_threadNames[THREAD_MAX] = {
     "AUDIO_MIX",
     "AUDIO_SRC1",
     "AUDIO_SRC2",
-    "WATCHDOG",
-    "HEALTH_MON"
+    "WATCHDOG"
 };
 
 typedef struct {
