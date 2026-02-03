@@ -17,7 +17,6 @@
 #include "mem_utils.h"
 #include <mmdeviceapi.h>
 #include <functiondiscoverykeys_devpkey.h>
-#include <stdio.h>
 
 /*
  * Global MMDevice enumerator for device listing.
@@ -240,54 +239,4 @@ BOOL AudioDevice_GetById(const char* deviceId, AudioDeviceInfo* info) {
     return TRUE;
 }
 
-BOOL AudioDevice_GetDefaultOutput(char* deviceId, int maxLen) {
-    if (!g_deviceEnumerator || !deviceId) return FALSE;
-    
-    IMMDevice* device = NULL;
-    HRESULT hr = g_deviceEnumerator->lpVtbl->GetDefaultAudioEndpoint(
-        g_deviceEnumerator,
-        eRender,
-        eConsole,
-        &device
-    );
-    
-    if (FAILED(hr) || !device) return FALSE;
-    
-    BOOL success = FALSE;
-    LPWSTR wideId = NULL;
-    hr = device->lpVtbl->GetId(device, &wideId);
-    if (SUCCEEDED(hr) && wideId) {
-        Util_WideToUtf8(wideId, deviceId, maxLen);
-        CoTaskMemFree(wideId);
-        success = TRUE;
-    }
-    
-    device->lpVtbl->Release(device);
-    return success;
-}
 
-BOOL AudioDevice_GetDefaultInput(char* deviceId, int maxLen) {
-    if (!g_deviceEnumerator || !deviceId) return FALSE;
-    
-    IMMDevice* device = NULL;
-    HRESULT hr = g_deviceEnumerator->lpVtbl->GetDefaultAudioEndpoint(
-        g_deviceEnumerator,
-        eCapture,
-        eConsole,
-        &device
-    );
-    
-    if (FAILED(hr) || !device) return FALSE;
-    
-    BOOL success = FALSE;
-    LPWSTR wideId = NULL;
-    hr = device->lpVtbl->GetId(device, &wideId);
-    if (SUCCEEDED(hr) && wideId) {
-        Util_WideToUtf8(wideId, deviceId, maxLen);
-        CoTaskMemFree(wideId);
-        success = TRUE;
-    }
-    
-    device->lpVtbl->Release(device);
-    return success;
-}

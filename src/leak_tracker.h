@@ -116,12 +116,6 @@ extern LeakCounters g_leakCounters;
 void LeakTracker_Init(void);
 
 /**
- * Reset all counters to zero.
- * Useful when starting a new recording session.
- */
-void LeakTracker_Reset(void);
-
-/**
  * Log current counter status if tracking is enabled.
  * Rate-limited to once per LEAK_REPORT_INTERVAL_MS (default 60 seconds).
  * Safe to call frequently - will no-op if interval hasn't elapsed.
@@ -133,15 +127,6 @@ void LeakTracker_LogStatus(void);
  * Useful at recording stop/shutdown.
  */
 void LeakTracker_LogStatusForced(void);
-
-/**
- * Check if any counters show a potential leak.
- * Returns TRUE if any (allocs - frees) delta exceeds threshold.
- * 
- * @param threshold  Maximum acceptable delta (e.g., 100 for in-flight frames)
- * @return TRUE if potential leak detected
- */
-BOOL LeakTracker_HasPotentialLeak(int threshold);
 
 /* Report interval in milliseconds (default: 60 seconds) */
 #define LEAK_REPORT_INTERVAL_MS 60000

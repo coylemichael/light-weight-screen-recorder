@@ -1,14 +1,5 @@
 /*
- * Media Foundation Encoder Implementation
- * Using proper C-style COM vtable calls
- *
- * ERROR HANDLING PATTERN:
- * - Goto-cleanup for functions with multiple resource allocations
- * - Uses CHECK_HR/CHECK_HR_LOG macros from mem_utils.h for HRESULT checks
- * - HRESULT checks use FAILED()/SUCCEEDED() macros in hot paths
- * - All MF errors are logged with HRESULT values
- * - Returns BOOL to propagate errors; callers must check
- * - "Always check creation, release in reverse order" (see mem_utils.h)
+ * encoder.c - Media Foundation H.264/HEVC/WMV sink writer for traditional recording
  */
 
 #include "encoder.h"
@@ -17,7 +8,6 @@
 #include "mem_utils.h"
 #include "logger.h"
 #include "leak_tracker.h"
-#include <mferror.h>
 #include <stdio.h>
 #include <time.h>
 
@@ -288,11 +278,4 @@ void Encoder_Finalize(EncoderState* state) {
     // Thread-safe state update
     InterlockedExchange(&state->initialized, FALSE);
     InterlockedExchange(&state->recording, FALSE);
-}
-
-const char* Encoder_GetOutputPath(EncoderState* state) {
-    // Precondition
-    LWSR_ASSERT(state != NULL);
-    
-    return state->outputPath;
 }

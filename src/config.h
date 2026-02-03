@@ -88,7 +88,4 @@ void Config_Save(const AppConfig* config);
 // Get format extension
 const char* Config_GetFormatExtension(OutputFormat format);
 
-// Get format display name
-const char* Config_GetFormatName(OutputFormat format);
-
 #endif // CONFIG_H

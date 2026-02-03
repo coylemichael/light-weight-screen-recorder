@@ -1,6 +1,5 @@
 /*
- * Video Encoder using Media Foundation
- * Hardware-accelerated H.264/WMV encoding
+ * encoder.h - Media Foundation H.264/HEVC/WMV sink writer for traditional recording
  */
 
 #ifndef ENCODER_H
@@ -44,9 +43,6 @@ BOOL Encoder_WriteFrame(EncoderState* state, const BYTE* frameData, UINT64 times
 
 // Finalize and close the output file
 void Encoder_Finalize(EncoderState* state);
-
-// Get output file path
-const char* Encoder_GetOutputPath(EncoderState* state);
 
 // Generate output filename with timestamp
 void Encoder_GenerateFilename(char* buffer, size_t size, 

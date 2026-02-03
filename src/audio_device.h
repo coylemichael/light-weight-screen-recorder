@@ -45,10 +45,4 @@ int AudioDevice_Enumerate(AudioDeviceList* list);
 // Returns TRUE if found
 BOOL AudioDevice_GetById(const char* deviceId, AudioDeviceInfo* info);
 
-// Get the default output device ID
-BOOL AudioDevice_GetDefaultOutput(char* deviceId, int maxLen);
-
-// Get the default input device ID
-BOOL AudioDevice_GetDefaultInput(char* deviceId, int maxLen);
-
 #endif // AUDIO_DEVICE_H

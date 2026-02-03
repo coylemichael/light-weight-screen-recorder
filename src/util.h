@@ -15,14 +15,6 @@
 // Returns bitrate in bits per second
 UINT32 Util_CalculateBitrate(int width, int height, int fps, QualityPreset quality);
 
-// Calculate precise timestamp for a frame (avoids cumulative rounding errors)
-// Returns timestamp in 100-ns units
-LONGLONG Util_CalculateTimestamp(int frameNumber, int fps);
-
-// Calculate precise frame duration
-// Returns duration in 100-ns units
-LONGLONG Util_CalculateFrameDuration(int frameNumber, int fps);
-
 // Calculate aspect ratio crop rectangle centered on source bounds
 // Returns the cropped RECT; ratioW/ratioH define the target aspect (e.g., 16, 9)
 RECT Util_CalculateAspectRect(RECT sourceBounds, int ratioW, int ratioH);

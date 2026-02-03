@@ -11,9 +11,6 @@
 // Border thickness in pixels
 #define BORDER_THICKNESS 1
 
-// Preview border thickness (thinner for settings preview)
-#define PREVIEW_BORDER_THICKNESS 2
-
 // Initialize the border module
 BOOL Border_Init(HINSTANCE hInstance);
 
@@ -26,13 +23,9 @@ void Border_Show(RECT captureRect);
 // Hide the border
 void Border_Hide(void);
 
-// Check if border is currently visible
-BOOL Border_IsVisible(void);
-
 // Preview border for settings window
 BOOL PreviewBorder_Init(HINSTANCE hInstance);
 void PreviewBorder_Shutdown(void);
-void PreviewBorder_Show(RECT rect);
 void PreviewBorder_Hide(void);
 
 // Draggable area selection for custom area mode

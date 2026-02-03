@@ -17,21 +17,6 @@ void LeakTracker_Init(void) {
     g_leakCounters.lastReportTime = GetTickCount();
 }
 
-void LeakTracker_Reset(void) {
-    /* Reset all counters atomically-ish (good enough for diagnostics) */
-    InterlockedExchange(&g_leakCounters.nvencFrameAllocs, 0);
-    InterlockedExchange(&g_leakCounters.nvencFrameFrees, 0);
-    InterlockedExchange(&g_leakCounters.aacSampleAllocs, 0);
-    InterlockedExchange(&g_leakCounters.aacSampleFrees, 0);
-    InterlockedExchange(&g_leakCounters.frameBufferAllocs, 0);
-    InterlockedExchange(&g_leakCounters.frameBufferFrees, 0);
-    InterlockedExchange(&g_leakCounters.mfSampleCreates, 0);
-    InterlockedExchange(&g_leakCounters.mfSampleReleases, 0);
-    InterlockedExchange(&g_leakCounters.mfBufferCreates, 0);
-    InterlockedExchange(&g_leakCounters.mfBufferReleases, 0);
-    g_leakCounters.lastReportTime = GetTickCount();
-}
-
 void LeakTracker_LogStatusForced(void) {
     if (!g_config.debugLogging) return;
     
@@ -73,22 +58,4 @@ void LeakTracker_LogStatus(void) {
     }
     
     LeakTracker_LogStatusForced();
-}
-
-BOOL LeakTracker_HasPotentialLeak(int threshold) {
-    if (!g_config.debugLogging) return FALSE;
-    
-    /* Check each category for growing delta */
-    if (g_leakCounters.nvencFrameAllocs - g_leakCounters.nvencFrameFrees > threshold)
-        return TRUE;
-    if (g_leakCounters.aacSampleAllocs - g_leakCounters.aacSampleFrees > threshold)
-        return TRUE;
-    if (g_leakCounters.frameBufferAllocs - g_leakCounters.frameBufferFrees > threshold)
-        return TRUE;
-    if (g_leakCounters.mfSampleCreates - g_leakCounters.mfSampleReleases > threshold)
-        return TRUE;
-    if (g_leakCounters.mfBufferCreates - g_leakCounters.mfBufferReleases > threshold)
-        return TRUE;
-    
-    return FALSE;
 }

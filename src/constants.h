@@ -106,11 +106,8 @@ void Logger_Log(const char* fmt, ...);
  *   - This is the native format for Windows desktop composition (DWM)
  *   - The alpha channel is typically unused but present for alignment
  *   - Desktop Duplication API provides frames in this format
- * 
- * RGB24: 3 bytes per pixel (no alpha channel, rarely used in this codebase)
  */
 #define BYTES_PER_PIXEL_BGRA        4
-#define BYTES_PER_PIXEL_RGB24       3
 
 /* ============================================================================
  * VIDEO CAPTURE DEFAULTS
@@ -211,16 +208,12 @@ void Logger_Log(const char* fmt, ...);
  * MAX_SEQ_HEADER_SIZE: Maximum size for HEVC sequence headers (VPS/SPS/PPS).
  *   These headers contain codec configuration and must be stored separately
  *   for MP4 muxing. 256 bytes is generous; typical headers are 50-100 bytes.
- * 
- * CONFIG_BUFFER_SIZE: Scratch buffer for reading config file values.
- *   32 chars is enough for any numeric value or short string.
  */
 #define MIN_BUFFER_CAPACITY         100
 #define MAX_BUFFER_CAPACITY         100000
 #define BUFFER_CAPACITY_HEADROOM    1.5f
 #define NVENC_NUM_BUFFERS           8
 #define MAX_SEQ_HEADER_SIZE         256
-#define CONFIG_BUFFER_SIZE          32
 
 /* ============================================================================
  * AUDIO BUFFER MANAGEMENT

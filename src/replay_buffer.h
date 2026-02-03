@@ -81,19 +81,11 @@ void ReplayBuffer_Shutdown(ReplayBufferState* state);
 BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config);
 void ReplayBuffer_Stop(ReplayBufferState* state);
 
-// Synchronous save (blocks until complete - use for testing only)
-BOOL ReplayBuffer_Save(ReplayBufferState* state, const char* outputPath);
-
 // Asynchronous save (returns immediately, posts notifyMessage when done)
 // wParam = success (BOOL), lParam = 0
 // Returns FALSE if save cannot be started (not ready, already saving)
 BOOL ReplayBuffer_SaveAsync(ReplayBufferState* state, const char* outputPath,
                             HWND notifyWindow, UINT notifyMessage);
 
-// Check if a save is currently in progress
-BOOL ReplayBuffer_IsSaving(ReplayBufferState* state);
-
 int ReplayBuffer_EstimateRAMUsage(int durationSeconds, int width, int height, int fps, QualityPreset quality);
-void ReplayBuffer_GetStatus(ReplayBufferState* state, char* buffer, int bufferSize);
-
 #endif

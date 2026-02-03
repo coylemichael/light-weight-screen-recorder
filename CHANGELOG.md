@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.2] - 2026-02-03
+
+### Code Review (R2 Pass)
+- **encoder.c**: Removed unused `<mferror.h>` include
+
 ## [1.3.1] - 2026-02-02
 
 ### Removed

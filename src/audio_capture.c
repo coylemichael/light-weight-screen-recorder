@@ -1,6 +1,5 @@
 /*
- * Audio Capture Implementation
- * WASAPI-based audio capture with loopback support
+ * audio_capture.c - WASAPI capture + mixing from up to 3 sources
  *
  * ERROR HANDLING PATTERN:
  * - Goto-cleanup for CreateSource() with multiple COM allocations
@@ -22,9 +21,6 @@
 #include <mmdeviceapi.h>
 #include <audioclient.h>
 #include <functiondiscoverykeys_devpkey.h>
-#include <stdio.h>
-#include <math.h>
-#include <limits.h>
 
 /* Individual audio source capture */
 struct AudioCaptureSource {
@@ -202,11 +198,10 @@ static void DestroySource(AudioCaptureSource* src) {
     free(src);
 }
 
-// Forward declaration for SourceCaptureThread
+// Forward declarations
 static DWORD WINAPI SourceCaptureThread(LPVOID param);
-
-// Forward declaration for InitSourceCapture
 static BOOL InitSourceCapture(AudioCaptureSource* src);
+static LONGLONG AudioCapture_GetTimestamp(AudioCaptureContext* ctx);
 
 /*
  * MULTI-RESOURCE FUNCTION: TryRecoverSource
@@ -1161,7 +1156,7 @@ int AudioCapture_Read(AudioCaptureContext* ctx, BYTE* buffer, int maxBytes, LONG
     return available;
 }
 
-LONGLONG AudioCapture_GetTimestamp(AudioCaptureContext* ctx) {
+static LONGLONG AudioCapture_GetTimestamp(AudioCaptureContext* ctx) {
     // Precondition
     LWSR_ASSERT(ctx != NULL);
     
@@ -1175,15 +1170,3 @@ LONGLONG AudioCapture_GetTimestamp(AudioCaptureContext* ctx) {
     return (elapsed * 10000000) / ctx->perfFreq.QuadPart;
 }
 
-BOOL AudioCapture_HasData(AudioCaptureContext* ctx) {
-    // Precondition
-    LWSR_ASSERT(ctx != NULL);
-    
-    if (!ctx) return FALSE;
-    
-    EnterCriticalSection(&ctx->mixLock);
-    BOOL hasData = ctx->mixBufferAvailable > 0;
-    LeaveCriticalSection(&ctx->mixLock);
-    
-    return hasData;
-}

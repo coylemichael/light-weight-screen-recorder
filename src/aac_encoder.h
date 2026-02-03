@@ -1,13 +1,11 @@
 /*
- * AAC Audio Encoder
- * Uses Media Foundation AAC encoder
+ * aac_encoder.h - Media Foundation AAC encoding
  */
 
 #ifndef AAC_ENCODER_H
 #define AAC_ENCODER_H
 
 #include <windows.h>
-#include "audio_capture.h"
 #include "constants.h"
 
 // Forward declaration
@@ -37,9 +35,6 @@ typedef enum {
 // Check if AAC encoder is available (quick check for UI validation)
 BOOL AACEncoder_IsAvailable(void);
 
-// Create AAC encoder (legacy - no error info)
-AACEncoder* AACEncoder_Create(void);
-
 // Create AAC encoder with error reporting
 // Returns NULL on failure, error code in *outError if non-NULL
 AACEncoder* AACEncoder_CreateEx(AACEncoderError* outError);
@@ -55,9 +50,6 @@ void AACEncoder_SetCallback(AACEncoder* encoder, AACEncoderCallback callback, vo
 // pcmSize: size in bytes
 // timestamp: presentation time in 100ns units
 BOOL AACEncoder_Feed(AACEncoder* encoder, const BYTE* pcmData, int pcmSize, LONGLONG timestamp);
-
-// Flush any remaining samples
-void AACEncoder_Flush(AACEncoder* encoder);
 
 // Get encoder info for muxer
 BOOL AACEncoder_GetConfig(AACEncoder* encoder, BYTE** configData, int* configSize);

@@ -1,6 +1,6 @@
 /*
- * Overlay Window System
- * Handles selection UI and recording controls
+ * overlay.h - Header for overlay.c
+ * Recording indicator overlay window + hotkey handling
  */
 
 #ifndef OVERLAY_H
@@ -14,12 +14,6 @@ BOOL Overlay_Create(HINSTANCE hInstance);
 
 // Destroy overlay windows
 void Overlay_Destroy(void);
-
-// Show/hide the selection overlay
-void Overlay_ShowSelection(BOOL show);
-
-// Show/hide the control panel
-void Overlay_ShowControls(BOOL show);
 
 // Set the current capture mode
 void Overlay_SetMode(CaptureMode mode);

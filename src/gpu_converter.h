@@ -1,7 +1,5 @@
 /*
- * GPU Color Converter
- * Uses D3D11 Video Processor for hardware BGRA→NV12 conversion
- * Zero-copy path for NVENC encoding
+ * gpu_converter.h - D3D11 Video Processor BGRA→NV12 conversion (zero-copy GPU path)
  */
 
 #ifndef GPU_CONVERTER_H
@@ -9,7 +7,6 @@
 
 #include <windows.h>
 #include <d3d11.h>
-#include <d3d11_1.h>
 
 typedef struct {
     ID3D11Device* device;

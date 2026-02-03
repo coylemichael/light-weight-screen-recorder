@@ -14,7 +14,6 @@
 #include "logger.h"
 #include "constants.h"
 #include "leak_tracker.h"
-#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
@@ -844,10 +843,7 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Texture, 
     return result;
 }
 
-// Stubs for removed functionality
-BOOL NVENCEncoder_IsDeviceLost(NVENCEncoder* enc) { (void)enc; return FALSE; }
-int NVENCEncoder_DrainCompleted(NVENCEncoder* enc, EncodedFrameCallback cb, void* ud) { (void)enc; (void)cb; (void)ud; return 0; }
-BOOL NVENCEncoder_EncodeTexture(NVENCEncoder* enc, ID3D11Texture2D* tex, LONGLONG ts, EncodedFrame* out) { (void)out; return NVENCEncoder_SubmitTexture(enc, tex, ts); }
+// Legacy stubs (no-ops in CUDA path) - declared in header, used by replay_buffer.c
 BOOL NVENCEncoder_Flush(NVENCEncoder* enc, EncodedFrame* out) { (void)enc; (void)out; return FALSE; }
 void NVENCEncoder_ForceCleanupLeaked(void) { }
 void NVENCEncoder_MarkLeaked(NVENCEncoder* enc) { (void)enc; }

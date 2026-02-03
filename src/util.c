@@ -55,33 +55,6 @@ UINT32 Util_CalculateBitrate(int width, int height, int fps, QualityPreset quali
     return bitrate;
 }
 
-// Calculate precise timestamp for a frame (avoids cumulative rounding errors)
-LONGLONG Util_CalculateTimestamp(int frameNumber, int fps) {
-    // Preconditions
-    LWSR_ASSERT(frameNumber >= 0);
-    LWSR_ASSERT(fps > 0);
-    
-    if (fps <= 0) return 0;  // Defensive: avoid division by zero
-    
-    // Using exact division: (frame * 10000000) / fps
-    // This avoids cumulative rounding errors that occur with additive timing
-    return (LONGLONG)frameNumber * MF_UNITS_PER_SECOND / fps;
-}
-
-// Calculate precise frame duration
-LONGLONG Util_CalculateFrameDuration(int frameNumber, int fps) {
-    // Preconditions
-    LWSR_ASSERT(frameNumber >= 0);
-    LWSR_ASSERT(fps > 0);
-    
-    if (fps <= 0) return 0;  // Defensive: avoid division by zero
-    
-    // Duration = next_timestamp - this_timestamp
-    LONGLONG thisTime = Util_CalculateTimestamp(frameNumber, fps);
-    LONGLONG nextTime = Util_CalculateTimestamp(frameNumber + 1, fps);
-    return nextTime - thisTime;
-}
-
 // Get aspect ratio dimensions from config index
 void Util_GetAspectRatioDimensions(int aspectIndex, int* ratioW, int* ratioH) {
     // Preconditions

@@ -1,4 +1,7 @@
-// action_toolbar.h - Custom action toolbar with smooth rounded corners
+/*
+ * action_toolbar.h - Header for action_toolbar.c
+ * Custom floating toolbar with smooth rounded corners for selection UI
+ */
 #ifndef ACTION_TOOLBAR_H
 #define ACTION_TOOLBAR_H
 
@@ -23,8 +26,5 @@ void ActionToolbar_Hide(void);
 // onSettings: called when "..." button clicked
 void ActionToolbar_SetCallbacks(void (*onMinimize)(void), void (*onRecord)(void), 
                                  void (*onClose)(void), void (*onSettings)(void));
-
-// Get the toolbar window handle (for z-order management, etc.)
-HWND ActionToolbar_GetWindow(void);
 
 #endif // ACTION_TOOLBAR_H

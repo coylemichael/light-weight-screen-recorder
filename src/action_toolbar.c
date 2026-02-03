@@ -13,7 +13,6 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <windowsx.h>  // GET_X_LPARAM, GET_Y_LPARAM
-#include <dwmapi.h>
 #include "gdiplus_api.h"
 
 // windowsx.h defines DeleteFont/SelectFont macros that conflict with GDI+ function names
@@ -420,8 +419,4 @@ void ActionToolbar_SetCallbacks(void (*onMinimize)(void), void (*onRecord)(void)
     g_ui.onRecord = onRecord;
     g_ui.onClose = onClose;
     g_ui.onSettings = onSettings;
-}
-
-HWND ActionToolbar_GetWindow(void) {
-    return g_ui.wnd;
 }

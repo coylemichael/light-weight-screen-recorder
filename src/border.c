@@ -11,7 +11,6 @@
 
 #include "border.h"
 #include "constants.h"
-#include <stdlib.h>
 #include <windowsx.h>  // GET_X_LPARAM, GET_Y_LPARAM
 
 /* ============================================================================
@@ -187,10 +186,6 @@ void Border_Hide(void) {
     g_recording.isVisible = FALSE;
 }
 
-BOOL Border_IsVisible(void) {
-    return g_recording.isVisible;
-}
-
 static LRESULT CALLBACK BorderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_NCHITTEST:
@@ -221,67 +216,6 @@ typedef struct PreviewBorderState {
 } PreviewBorderState;
 
 static PreviewBorderState g_preview = {0};
-
-static void UpdatePreviewBorderBitmap(int width, int height) {
-    if (!g_preview.wnd || width < 1 || height < 1) return;
-    
-    HDC screenDC = NULL;
-    HDC memDC = NULL;
-    HBITMAP hBitmap = NULL;
-    HBITMAP oldBitmap = NULL;
-    
-    screenDC = GetDC(NULL);
-    if (!screenDC) return;
-    
-    memDC = CreateCompatibleDC(screenDC);
-    if (!memDC) goto cleanup;
-    
-    BITMAPINFO bmi = {0};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height;
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    
-    BYTE* pixels = NULL;
-    hBitmap = CreateDIBSection(memDC, &bmi, DIB_RGB_COLORS, (void**)&pixels, NULL, 0);
-    if (!hBitmap || !pixels) goto cleanup;
-    
-    oldBitmap = (HBITMAP)SelectObject(memDC, hBitmap);
-    memset(pixels, 0, width * height * 4);
-    
-    // Draw red border - BGRA format
-    BYTE r = 255, g = 50, b = 50, a = 200;
-    
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            BOOL isBorder = (x < PREVIEW_BORDER_THICKNESS || x >= width - PREVIEW_BORDER_THICKNESS ||
-                            y < PREVIEW_BORDER_THICKNESS || y >= height - PREVIEW_BORDER_THICKNESS);
-            
-            if (isBorder) {
-                int idx = (y * width + x) * 4;
-                pixels[idx + 0] = (BYTE)(b * a / 255);
-                pixels[idx + 1] = (BYTE)(g * a / 255);
-                pixels[idx + 2] = (BYTE)(r * a / 255);
-                pixels[idx + 3] = a;
-            }
-        }
-    }
-    
-    POINT ptSrc = {0, 0};
-    SIZE sizeWnd = {width, height};
-    BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-    POINT ptDst = {g_preview.rect.left, g_preview.rect.top};
-    
-    UpdateLayeredWindow(g_preview.wnd, screenDC, &ptDst, &sizeWnd, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
-    
-cleanup:
-    if (oldBitmap) SelectObject(memDC, oldBitmap);
-    if (hBitmap) DeleteObject(hBitmap);
-    if (memDC) DeleteDC(memDC);
-    if (screenDC) ReleaseDC(NULL, screenDC);
-}
 
 BOOL PreviewBorder_Init(HINSTANCE hInstance) {
     if (!hInstance) return FALSE;
@@ -314,23 +248,6 @@ void PreviewBorder_Shutdown(void) {
         g_preview.wnd = NULL;
     }
     g_preview.visible = FALSE;
-}
-
-void PreviewBorder_Show(RECT rect) {
-    if (!g_preview.wnd) return;
-    
-    int pad = PREVIEW_BORDER_THICKNESS;
-    g_preview.rect.left = rect.left - pad;
-    g_preview.rect.top = rect.top - pad;
-    g_preview.rect.right = rect.right + pad;
-    g_preview.rect.bottom = rect.bottom + pad;
-    
-    int width = g_preview.rect.right - g_preview.rect.left;
-    int height = g_preview.rect.bottom - g_preview.rect.top;
-    
-    UpdatePreviewBorderBitmap(width, height);
-    ShowWindow(g_preview.wnd, SW_SHOWNA);
-    g_preview.visible = TRUE;
 }
 
 void PreviewBorder_Hide(void) {

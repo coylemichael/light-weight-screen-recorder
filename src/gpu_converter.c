@@ -1,6 +1,5 @@
 /*
- * GPU Color Converter Implementation
- * Uses D3D11 Video Processor for hardware BGRA→NV12 conversion
+ * gpu_converter.c - D3D11 Video Processor BGRA→NV12 conversion (zero-copy GPU path)
  *
  * ERROR HANDLING PATTERN:
  * - Goto-cleanup (fail label) for Init with multiple resource allocations

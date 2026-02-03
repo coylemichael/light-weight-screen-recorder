@@ -1,7 +1,8 @@
 /*
- * Ultra Lightweight Screen Recorder
- * Pure Win32 + DXGI Desktop Duplication + Media Foundation
- * Zero external dependencies, maximum performance
+ * main.c - Entry point, instance mutex, window creation, message loop
+ *
+ * WinMain initializes all subsystems in order, runs the message loop,
+ * and cleans up in reverse order. Uses goto-cleanup pattern for error paths.
  *
  * ============================================================================
  * PROJECT-WIDE ERROR HANDLING STANDARDS
@@ -42,16 +43,9 @@
 #define COBJMACROS
 #include <initguid.h>
 #include <windows.h>
-#include <windowsx.h>
-#include <d3d11.h>
-#include <dxgi1_2.h>
 #include <mfapi.h>
-#include <mfidl.h>
-#include <mfreadwrite.h>
-#include <mferror.h>
 #include <shlobj.h>
 #include <stdio.h>
-#include <stdlib.h>
 #include <string.h>
 #include <time.h>
 
@@ -64,7 +58,6 @@
 #pragma comment(lib, "mfuuid.lib")
 #pragma comment(lib, "ole32.lib")
 #pragma comment(lib, "shell32.lib")
-#pragma comment(lib, "comdlg32.lib")
 
 // Forward declarations
 #include "config.h"

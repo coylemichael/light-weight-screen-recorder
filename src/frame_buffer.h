@@ -64,16 +64,9 @@ int FrameBuffer_GetCount(FrameBuffer* buf);
 // Get total memory usage in bytes
 size_t FrameBuffer_GetMemoryUsage(FrameBuffer* buf);
 
-// Write all buffered frames to an MP4 file
-// Uses passthrough muxing (no re-encoding)
-BOOL FrameBuffer_WriteToFile(FrameBuffer* buf, const char* outputPath);
-
 // Get copies of frames for external muxing (caller must free)
 // Used for audio+video muxing
 BOOL FrameBuffer_GetFramesForMuxing(FrameBuffer* buf, MuxerSample** frames, int* count);
-
-// Clear all frames from buffer
-void FrameBuffer_Clear(FrameBuffer* buf);
 
 // Set HEVC sequence header (VPS/SPS/PPS) for muxing
 void FrameBuffer_SetSequenceHeader(FrameBuffer* buf, const BYTE* header, DWORD size);

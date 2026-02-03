@@ -19,7 +19,6 @@
 #include <mftransform.h>
 #include <mferror.h>
 #include <wmcodecdsp.h>
-#include <stdio.h>
 
 /*
  * AAC encoder CLSID: {93AF0C51-2275-45d2-A35B-F2BA21CAED00}
@@ -380,11 +379,6 @@ cleanup_fail:
     return NULL;
 }
 
-// Legacy wrapper for backward compatibility
-AACEncoder* AACEncoder_Create(void) {
-    return AACEncoder_CreateEx(NULL);
-}
-
 /* Destroy AAC encoder using SAFE_* macros for consistent cleanup */
 void AACEncoder_Destroy(AACEncoder* encoder) {
     if (!encoder) return;
@@ -493,24 +487,6 @@ BOOL AACEncoder_Feed(AACEncoder* encoder, const BYTE* pcmData, int pcmSize, LONG
     }
     
     return TRUE;
-}
-
-void AACEncoder_Flush(AACEncoder* encoder) {
-    if (!encoder || !encoder->transform) return;
-    
-    // Pad remaining input with silence and encode
-    if (encoder->inputBufferUsed > 0) {
-        int padding = encoder->bytesPerFrame - encoder->inputBufferUsed;
-        memset(encoder->inputBuffer + encoder->inputBufferUsed, 0, padding);
-        encoder->inputBufferUsed = encoder->bytesPerFrame;
-        
-        // Encode final frame
-        AACEncoder_Feed(encoder, NULL, 0, 0);  // Will process the buffer
-    }
-    
-    // Drain encoder
-    encoder->transform->lpVtbl->ProcessMessage(encoder->transform, MFT_MESSAGE_COMMAND_DRAIN, 0);
-    ProcessOutput(encoder);
 }
 
 BOOL AACEncoder_GetConfig(AACEncoder* encoder, BYTE** configData, int* configSize) {

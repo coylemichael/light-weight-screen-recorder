@@ -1,6 +1,5 @@
 /*
- * Screen Capture using DXGI Desktop Duplication
- * Hardware-accelerated, zero-copy where possible
+ * capture.h - Header for capture.c
  */
 
 #ifndef CAPTURE_H
@@ -38,7 +37,6 @@ typedef struct {
     
     // State
     BOOL initialized;
-    BOOL capturing;
     BOOL accessLost;  // Set when DXGI_ERROR_ACCESS_LOST occurs
     
 } CaptureState;
@@ -57,9 +55,6 @@ BOOL Capture_SetAllMonitors(CaptureState* state);
 
 // Get a frame (returns pointer to RGB data)
 BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp);
-
-// Release the current frame
-void Capture_ReleaseFrame(CaptureState* state);
 
 // Get monitor refresh rate
 int Capture_GetRefreshRate(CaptureState* state);
@@ -80,10 +75,6 @@ BOOL Capture_GetMonitorFromPoint(POINT pt, RECT* monitorRect, int* monitorIndex)
 
 // Helper: Get all monitors bounding rect
 BOOL Capture_GetAllMonitorsBounds(RECT* bounds);
-
-// Helper: Enumerate monitors
-typedef BOOL (*MonitorEnumProc)(int index, RECT bounds, BOOL isPrimary, void* userData);
-void Capture_EnumMonitors(MonitorEnumProc callback, void* userData);
 
 // Helper: Get monitor bounds by index
 BOOL Capture_GetMonitorBoundsByIndex(int monitorIndex, RECT* bounds);

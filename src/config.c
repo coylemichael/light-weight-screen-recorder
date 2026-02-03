@@ -16,11 +16,10 @@
 /* ============================================================================
  * CONSTANT LOOKUP TABLES
  * ============================================================================
- * Read-only after compile time. Used by Config_GetFormatExtension/Name.
+ * Read-only after compile time. Used by Config_GetFormatExtension.
  * Thread Access: [ReadOnly - safe for concurrent access]
  */
 static const char* const FORMAT_EXTENSIONS[] = { ".mp4", ".mp4", ".avi", ".wmv" };
-static const char* const FORMAT_NAMES[] = { "MP4 (H.264)", "MP4 (H.265)", "AVI", "WMV" };
 
 void Config_GetPath(char* buffer, size_t size) {
     // Preconditions
@@ -315,14 +314,4 @@ const char* Config_GetFormatExtension(OutputFormat format) {
         return FORMAT_EXTENSIONS[format];
     }
     return ".mp4";
-}
-
-const char* Config_GetFormatName(OutputFormat format) {
-    // Precondition: format in valid range (defensive, returns default if invalid)
-    LWSR_ASSERT(format >= 0 && format < FORMAT_COUNT);
-    
-    if (format >= 0 && format < FORMAT_COUNT) {
-        return FORMAT_NAMES[format];
-    }
-    return "MP4";
 }

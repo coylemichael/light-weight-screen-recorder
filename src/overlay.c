@@ -1,6 +1,5 @@
 /*
- * Overlay Implementation
- * Selection UI, recording controls, and main logic
+ * overlay.c - Recording indicator overlay window + hotkey handling
  *
  * ERROR HANDLING PATTERN:
  * - Early return for simple validation/precondition checks
@@ -14,7 +13,6 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
-#include <commdlg.h>
 #include <shlobj.h>
 #include <shellapi.h>   // For system tray (Shell_NotifyIcon)
 #include <dwmapi.h>
@@ -41,7 +39,6 @@ typedef void* GpImage;
 #endif
 
 #include "overlay.h"
-#include "capture.h"
 #include "encoder.h"
 #include "config.h"
 #include "replay_buffer.h"
@@ -51,7 +48,6 @@ typedef void* GpImage;
 
 
 #pragma comment(lib, "comctl32.lib")
-#pragma comment(lib, "comdlg32.lib")
 #pragma comment(lib, "dwmapi.lib")
 
 // Hotkey ID for replay save (must match main.c)
@@ -242,11 +238,8 @@ static LRESULT CALLBACK CrosshairWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 
 /* Helper functions */
 static HandlePosition HitTestHandle(POINT pt);
-static void UpdateActionToolbar(void);
 static void UpdateTimerDisplay(void);
 static void ShowActionToolbar(BOOL show);
-static void CaptureToClipboard(void);
-static void CaptureToFile(void);
 
 // System tray functions
 static void AddTrayIcon(void);
@@ -520,37 +513,6 @@ static void UpdateOverlayBitmap(void) {
     ReleaseDC(NULL, screenDC);
 }
 
-// Update crosshair position - positions the size indicator near cursor
-static void UpdateCrosshair(int x, int y) {
-    if (!g_windows.crosshairWnd) return;
-    if (!IsWindowVisible(g_windows.crosshairWnd)) return;
-    
-    // Get screen bounds to determine corner placement
-    RECT screenRect;
-    Capture_GetAllMonitorsBounds(&screenRect);
-    
-    int crossSize = CROSSHAIR_SIZE;
-    int offset = 20;
-    int posX, posY;
-    
-    // Position near cursor but offset so it doesn't obscure selection
-    if (x > (screenRect.right - 150)) {
-        posX = x - crossSize - offset;
-    } else {
-        posX = x + offset;
-    }
-    
-    if (y > (screenRect.bottom - 150)) {
-        posY = y - crossSize - offset;
-    } else {
-        posY = y + offset;
-    }
-    
-    SetWindowPos(g_windows.crosshairWnd, HWND_TOPMOST, posX, posY, 
-                 crossSize, crossSize, SWP_NOACTIVATE);
-    InvalidateRect(g_windows.crosshairWnd, NULL, FALSE);
-}
-
 // Hit test for resize handles - returns which handle is under the point
 static HandlePosition HitTestHandle(POINT pt) {
     if (IsRectEmpty(&g_selection.selectedRect)) return HANDLE_NONE;
@@ -654,121 +616,6 @@ static void ShowActionToolbar(BOOL show) {
     }
 }
 
-// Update the action toolbar position
-static void UpdateActionToolbar(void) {
-    ShowActionToolbar(g_selection.state == SEL_COMPLETE);
-}
-
-// Capture screen region to clipboard
-static void CaptureToClipboard(void) {
-    if (IsRectEmpty(&g_selection.selectedRect)) return;
-    
-    int w = g_selection.selectedRect.right - g_selection.selectedRect.left;
-    int h = g_selection.selectedRect.bottom - g_selection.selectedRect.top;
-    
-    // Hide overlay temporarily and wait for redraw
-    ShowWindow(g_overlayWnd, SW_HIDE);
-    ActionToolbar_Hide();
-    /* Force windows to repaint the area we just revealed, then wait for
-     * the window manager to complete the operation. RedrawWindow with
-     * RDW_UPDATENOW ensures synchronous repaint; the Sleep gives the
-     * compositor time to finish any animations. */
-    RedrawWindow(NULL, &g_selection.selectedRect, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
-    Sleep(OVERLAY_HIDE_SETTLE_MS);
-    
-    HDC screenDC = GetDC(NULL);
-    HDC memDC = CreateCompatibleDC(screenDC);
-    HBITMAP hBitmap = CreateCompatibleBitmap(screenDC, w, h);
-    HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, hBitmap);
-    
-    BitBlt(memDC, 0, 0, w, h, screenDC, g_selection.selectedRect.left, g_selection.selectedRect.top, SRCCOPY);
-    
-    SelectObject(memDC, oldBitmap);
-    DeleteDC(memDC);
-    ReleaseDC(NULL, screenDC);
-    
-    // Copy to clipboard
-    if (OpenClipboard(NULL)) {
-        EmptyClipboard();
-        SetClipboardData(CF_BITMAP, hBitmap);
-        CloseClipboard();
-    } else {
-        DeleteObject(hBitmap);
-    }
-    
-    // Clear selection state - overlay stays hidden, show control panel
-    g_selection.state = SEL_NONE;
-    SetRectEmpty(&g_selection.selectedRect);
-    InterlockedExchange(&g_isSelecting, FALSE);
-    ShowWindow(g_controlWnd, SW_SHOW);
-}
-
-// Capture screen region to file (Save As dialog)
-static void CaptureToFile(void) {
-    if (IsRectEmpty(&g_selection.selectedRect)) return;
-    
-    int w = g_selection.selectedRect.right - g_selection.selectedRect.left;
-    int h = g_selection.selectedRect.bottom - g_selection.selectedRect.top;
-    
-    // Hide overlay temporarily and wait for redraw
-    ShowWindow(g_overlayWnd, SW_HIDE);
-    ActionToolbar_Hide();
-    /* Force windows to repaint the area we just revealed, then wait for
-     * the window manager to complete the operation. */
-    RedrawWindow(NULL, &g_selection.selectedRect, NULL, RDW_INVALIDATE | RDW_UPDATENOW | RDW_ALLCHILDREN);
-    Sleep(OVERLAY_HIDE_SETTLE_MS);
-    
-    HDC screenDC = GetDC(NULL);
-    HDC memDC = CreateCompatibleDC(screenDC);
-    HBITMAP hBitmap = CreateCompatibleBitmap(screenDC, w, h);
-    HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, hBitmap);
-    
-    BitBlt(memDC, 0, 0, w, h, screenDC, g_selection.selectedRect.left, g_selection.selectedRect.top, SRCCOPY);
-    
-    SelectObject(memDC, oldBitmap);
-    DeleteDC(memDC);
-    ReleaseDC(NULL, screenDC);
-    
-    // Show Save As dialog
-    char filename[MAX_PATH] = "capture.png";
-    OPENFILENAMEA ofn = {0};
-    ofn.lStructSize = sizeof(ofn);
-    ofn.hwndOwner = NULL;
-    ofn.lpstrFilter = "PNG Image\0*.png\0All Files\0*.*\0";
-    ofn.lpstrFile = filename;
-    ofn.nMaxFile = MAX_PATH;
-    ofn.Flags = OFN_OVERWRITEPROMPT;
-    ofn.lpstrDefExt = "png";
-    
-    BOOL clipboardTookOwnership = FALSE;
-    if (GetSaveFileNameA(&ofn)) {
-        // TODO: Save as PNG (requires GDI+ or other library)
-        // For now, just show success message
-        MessageBoxA(NULL, "Save functionality requires PNG encoder.\nBitmap captured to clipboard instead.", 
-                    "Save", MB_OK | MB_ICONINFORMATION);
-        
-        // Copy to clipboard as fallback
-        if (OpenClipboard(NULL)) {
-            EmptyClipboard();
-            if (SetClipboardData(CF_BITMAP, hBitmap)) {
-                clipboardTookOwnership = TRUE;  // Clipboard now owns the bitmap
-            }
-            CloseClipboard();
-        }
-    }
-    
-    // Only delete bitmap if clipboard didn't take ownership
-    if (!clipboardTookOwnership) {
-        DeleteObject(hBitmap);
-    }
-    
-    // Clear selection state - overlay stays hidden, show control panel
-    g_selection.state = SEL_NONE;
-    SetRectEmpty(&g_selection.selectedRect);
-    InterlockedExchange(&g_isSelecting, FALSE);
-    ShowWindow(g_controlWnd, SW_SHOW);
-}
-
 // ============================================================================
 // System Tray Functions
 // ============================================================================
@@ -783,175 +630,7 @@ static HICON LoadIconFromICO(const char* filename) {
     return hIcon;
 }
 
-// Load icon from PNG file using GDI+ and scale to proper tray icon size
-static HICON LoadIconFromPNG(const char* filename) {
-    if (!g_gdip.CreateFromHDC) return NULL;  // GDI+ not loaded
-    
-    // Convert filename to wide string
-    WCHAR wFilename[MAX_PATH];
-    MultiByteToWideChar(CP_ACP, 0, filename, -1, wFilename, MAX_PATH);
-    
-    // Load GDI+ image functions
-    typedef int (WINAPI *GdipLoadImageFromFileFunc)(const WCHAR*, void**);
-    typedef int (WINAPI *GdipCreateHBITMAPFromBitmapFunc)(void*, HBITMAP*, DWORD);
-    typedef int (WINAPI *GdipGetImageWidthFunc)(void*, UINT*);
-    typedef int (WINAPI *GdipGetImageHeightFunc)(void*, UINT*);
-    typedef int (WINAPI *GdipDisposeImageFunc)(void*);
-    typedef int (WINAPI *GdipGetImageThumbnailFunc)(void*, UINT, UINT, void**, void*, void*);
-    
-    GdipLoadImageFromFileFunc pGdipLoadImageFromFile = 
-        (GdipLoadImageFromFileFunc)GetProcAddress(g_gdip.module, "GdipLoadImageFromFile");
-    GdipCreateHBITMAPFromBitmapFunc pGdipCreateHBITMAPFromBitmap = 
-        (GdipCreateHBITMAPFromBitmapFunc)GetProcAddress(g_gdip.module, "GdipCreateHBITMAPFromBitmap");
-    GdipDisposeImageFunc pGdipDisposeImage = 
-        (GdipDisposeImageFunc)GetProcAddress(g_gdip.module, "GdipDisposeImage");
-    GdipGetImageThumbnailFunc pGdipGetImageThumbnail =
-        (GdipGetImageThumbnailFunc)GetProcAddress(g_gdip.module, "GdipGetImageThumbnail");
-    
-    // Suppress unused warnings for functions we may use later
-    (void)pGdipGetImageThumbnail;
-    
-    if (!pGdipLoadImageFromFile || !pGdipCreateHBITMAPFromBitmap || !pGdipDisposeImage) {
-        return NULL;
-    }
-    
-    void* image = NULL;
-    if (pGdipLoadImageFromFile(wFilename, &image) != 0 || !image) {
-        return NULL;
-    }
-    
-    // Get system tray icon size (typically 16x16 or scaled for DPI)
-    int iconWidth = GetSystemMetrics(SM_CXSMICON);
-    int iconHeight = GetSystemMetrics(SM_CYSMICON);
-    
-    // Scale image to proper tray icon size using thumbnail
-    void* scaledImage = NULL;
-    if (pGdipGetImageThumbnail) {
-        if (pGdipGetImageThumbnail(image, iconWidth, iconHeight, &scaledImage, NULL, NULL) == 0 && scaledImage) {
-            pGdipDisposeImage(image);
-            image = scaledImage;
-        }
-    }
-    
-    // Create HBITMAP from image
-    HBITMAP hBitmap = NULL;
-    pGdipCreateHBITMAPFromBitmap(image, &hBitmap, 0);
-    pGdipDisposeImage(image);
-    
-    if (!hBitmap) return NULL;
-    
-    // Create icon from bitmap at proper size
-    ICONINFO ii = {0};
-    ii.fIcon = TRUE;
-    ii.hbmMask = CreateBitmap(iconWidth, iconHeight, 1, 1, NULL);
-    ii.hbmColor = hBitmap;
-    
-    HICON hIcon = CreateIconIndirect(&ii);
-    
-    DeleteObject(ii.hbmMask);
-    DeleteObject(hBitmap);
-    
-    return hIcon;
-}
-
 static HICON g_trayHIcon = NULL;  // Keep track of custom icon for cleanup
-static void* g_settingsImage = NULL;  // GDI+ image for settings icon
-
-// Load PNG file as GDI+ image (returns void* that is a GpImage*)
-static void* LoadPNGImage(const char* filename) {
-    if (!g_gdip.module) return NULL;
-    
-    WCHAR wFilename[MAX_PATH];
-    MultiByteToWideChar(CP_ACP, 0, filename, -1, wFilename, MAX_PATH);
-    
-    typedef int (WINAPI *GdipLoadImageFromFileFunc)(const WCHAR*, void**);
-    GdipLoadImageFromFileFunc pGdipLoadImageFromFile = 
-        (GdipLoadImageFromFileFunc)GetProcAddress(g_gdip.module, "GdipLoadImageFromFile");
-    
-    if (!pGdipLoadImageFromFile) return NULL;
-    
-    void* image = NULL;
-    if (pGdipLoadImageFromFile(wFilename, &image) != 0) {
-        return NULL;
-    }
-    return image;
-}
-
-// Draw GDI+ image to HDC at specified rectangle with proper alpha blending
-static void DrawPNGImage(HDC hdc, void* image, int x, int y, int width, int height) {
-    if (!image || !g_gdip.CreateFromHDC) return;
-    
-    typedef int (WINAPI *GdipDrawImageRectIFunc)(void*, void*, int, int, int, int);
-    typedef int (WINAPI *GdipSetCompositingModeFunc)(void*, int);
-    typedef int (WINAPI *GdipSetCompositingQualityFunc)(void*, int);
-    typedef int (WINAPI *GdipSetInterpolationModeFunc)(void*, int);
-    typedef int (WINAPI *GdipSetPixelOffsetModeFunc)(void*, int);
-    
-    GdipDrawImageRectIFunc pGdipDrawImageRectI = 
-        (GdipDrawImageRectIFunc)GetProcAddress(g_gdip.module, "GdipDrawImageRectI");
-    GdipSetCompositingModeFunc pGdipSetCompositingMode =
-        (GdipSetCompositingModeFunc)GetProcAddress(g_gdip.module, "GdipSetCompositingMode");
-    GdipSetCompositingQualityFunc pGdipSetCompositingQuality =
-        (GdipSetCompositingQualityFunc)GetProcAddress(g_gdip.module, "GdipSetCompositingQuality");
-    GdipSetInterpolationModeFunc pGdipSetInterpolationMode = 
-        (GdipSetInterpolationModeFunc)GetProcAddress(g_gdip.module, "GdipSetInterpolationMode");
-    GdipSetPixelOffsetModeFunc pGdipSetPixelOffsetMode =
-        (GdipSetPixelOffsetModeFunc)GetProcAddress(g_gdip.module, "GdipSetPixelOffsetMode");
-    
-    if (!pGdipDrawImageRectI) return;
-    
-    GpGraphics* graphics = NULL;
-    if (g_gdip.CreateFromHDC(hdc, &graphics) != 0 || !graphics) return;
-    
-    // Set compositing mode to SourceOver for proper alpha blending
-    if (pGdipSetCompositingMode) {
-        pGdipSetCompositingMode(graphics, 0);  // CompositingModeSourceOver
-    }
-    
-    // Set high quality compositing
-    if (pGdipSetCompositingQuality) {
-        pGdipSetCompositingQuality(graphics, 4);  // CompositingQualityHighQuality
-    }
-    
-    // Set interpolation mode for smooth scaling
-    if (pGdipSetInterpolationMode) {
-        pGdipSetInterpolationMode(graphics, 7);  // InterpolationModeHighQualityBicubic
-    }
-    
-    // Set pixel offset mode for better rendering
-    if (pGdipSetPixelOffsetMode) {
-        pGdipSetPixelOffsetMode(graphics, 4);  // PixelOffsetModeHighQuality
-    }
-    
-    pGdipDrawImageRectI(graphics, image, x, y, width, height);
-    g_gdip.DeleteGraphics(graphics);
-}
-
-// Free GDI+ image
-static void FreePNGImage(void* image) {
-    if (!image) return;
-    typedef int (WINAPI *GdipDisposeImageFunc)(void*);
-    GdipDisposeImageFunc pGdipDisposeImage = 
-        (GdipDisposeImageFunc)GetProcAddress(g_gdip.module, "GdipDisposeImage");
-    if (pGdipDisposeImage) pGdipDisposeImage(image);
-}
-
-// Load settings icon on startup
-static void LoadSettingsIcon(void) {
-    g_settingsImage = LoadPNGImage("static\\settings.png");
-    if (!g_settingsImage) {
-        // Try relative to executable
-        char exePath[MAX_PATH];
-        GetModuleFileNameA(NULL, exePath, MAX_PATH);
-        char* lastSlash = strrchr(exePath, '\\');
-        if (lastSlash) {
-            size_t remaining = sizeof(exePath) - (lastSlash + 1 - exePath);
-            strncpy(lastSlash + 1, "..\\static\\settings.png", remaining - 1);
-            exePath[sizeof(exePath) - 1] = '\0';
-            g_settingsImage = LoadPNGImage(exePath);
-        }
-    }
-}
 
 static void AddTrayIcon(void) {
     g_tray.iconData.cbSize = sizeof(NOTIFYICONDATAA);
@@ -1100,9 +779,6 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     
     // GDI+ is now initialized globally via g_gdip in main.c
     
-    // Load settings icon
-    LoadSettingsIcon();
-    
     // Initialize common controls (including trackbar)
     INITCOMMONCONTROLSEX icex = { sizeof(icex), ICC_STANDARD_CLASSES | ICC_BAR_CLASSES };
     InitCommonControlsEx(&icex);
@@ -1181,11 +857,6 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     );
     
     if (!g_overlayWnd) {
-        // Clean up settings icon on failure
-        if (g_settingsImage) {
-            FreePNGImage(g_settingsImage);
-            g_settingsImage = NULL;
-        }
         return FALSE;
     }
     
@@ -1211,11 +882,6 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     if (!g_controlWnd) {
         DestroyWindow(g_overlayWnd);
         g_overlayWnd = NULL;
-        // Clean up settings icon on failure
-        if (g_settingsImage) {
-            FreePNGImage(g_settingsImage);
-            g_settingsImage = NULL;
-        }
         return FALSE;
     }
     
@@ -1237,10 +903,6 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
         g_controlWnd = NULL;
         DestroyWindow(g_overlayWnd);
         g_overlayWnd = NULL;
-        if (g_settingsImage) {
-            FreePNGImage(g_settingsImage);
-            g_settingsImage = NULL;
-        }
         return FALSE;
     }
     
@@ -1267,12 +929,6 @@ void Overlay_Destroy(void) {
     // Thread-safe check
     if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
         Recording_Stop();
-    }
-    
-    // Free settings icon (GDI+ shutdown handled by main.c)
-    if (g_settingsImage) {
-        FreePNGImage(g_settingsImage);
-        g_settingsImage = NULL;
     }
     
     // GDI+ is now shut down globally via g_gdip in main.c
@@ -2527,9 +2183,15 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             Logger_Log("WM_REPLAY_SAVE_COMPLETE received: success=%d\n", success);
             
             if (success) {
-                MessageBeep(MB_OK);  // Success audio feedback
+                // Play Windows system notification sound via registry alias
+                BOOL played = PlaySound(TEXT("SystemNotification"), NULL, SND_ALIAS | SND_ASYNC);
+                if (!played) {
+                    // Fallback: try the actual wav file path
+                    played = PlaySound(TEXT("C:\\Windows\\Media\\Windows Notify System Generic.wav"), NULL, SND_FILENAME | SND_ASYNC);
+                }
+                Logger_Log("PlaySound result: %d\n", played);
             } else {
-                MessageBeep(MB_ICONERROR);  // Failure audio feedback
+                PlaySound(TEXT("SystemHand"), NULL, SND_ALIAS | SND_ASYNC);
             }
             return 0;
         }

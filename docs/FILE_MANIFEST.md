@@ -8,7 +8,8 @@ One-liner purpose for each source file. If a file is doing more than this, quest
 |------|---------|
 | `main.c` | Entry point, instance mutex, window creation, message loop |
 | `capture.c` | DXGI Desktop Duplication - acquire frames from desktop |
-| `gpu_converter.c` | D3D11 Video Processor BGRA→NV12, CPU readback for CUDA |
+| `encoder.c` | Media Foundation H.264/HEVC/WMV sink writer for traditional recording |
+| `gpu_converter.c` | D3D11 Video Processor BGRA→NV12 conversion (zero-copy GPU path) |
 | `nvenc_encoder.c` | CUDA-based NVENC HEVC encoding |
 | `frame_buffer.c` | Circular buffer of encoded video samples |
 | `mp4_muxer.c` | Media Foundation IMFSinkWriter - passthrough mux to MP4 |
@@ -27,7 +28,7 @@ One-liner purpose for each source file. If a file is doing more than this, quest
 | File | Purpose |
 |------|---------|
 | `overlay.c` | Recording indicator overlay window + hotkey handling |
-| `action_toolbar.c` | Floating toolbar (pause/stop/save buttons) |
+| `action_toolbar.c` | Custom floating toolbar with smooth rounded corners for selection UI |
 | `border.c` | Screen region selection border |
 
 ## Infrastructure

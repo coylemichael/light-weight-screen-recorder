@@ -336,40 +336,6 @@ void Logger_Log(const char* fmt, ...) {
     if (g_log.event) SetEvent(g_log.event);
 }
 
-void Logger_LogThread(ThreadId thread, const char* fmt, ...) {
-    // Preconditions
-    assert(fmt != NULL && "Logger_LogThread: format string cannot be NULL");
-    assert(thread >= 0 && thread < THREAD_MAX && "Logger_LogThread: invalid thread ID");
-    
-    // Thread-safe check (must use atomic read for cross-thread safety)
-    if (!InterlockedCompareExchange(&g_log.initialized, 0, 0)) return;
-    if (thread < 0 || thread >= THREAD_MAX) return;
-    
-    // Get next slot
-    LONG idx = InterlockedIncrement(&g_log.writeIndex) - 1;
-    idx = idx % LOG_QUEUE_SIZE;
-    
-    LogEntry* entry = &g_logQueue[idx];
-    if (InterlockedCompareExchange(&entry->ready, 0, 0) != 0) {
-        return;  // Queue full
-    }
-    
-    // Format with thread prefix
-    char temp[LOG_ENTRY_SIZE];
-    va_list args;
-    va_start(args, fmt);
-    vsnprintf(temp, LOG_ENTRY_SIZE - 1, fmt, args);
-    va_end(args);
-    
-    snprintf(entry->message, LOG_ENTRY_SIZE - 1, "[%s] %s", g_threadNames[thread], temp);
-    entry->message[LOG_ENTRY_SIZE - 1] = '\0';
-    
-    entry->timestamp = GetTickCount64();
-    InterlockedExchange(&entry->ready, 1);
-    
-    if (g_log.event) SetEvent(g_log.event);
-}
-
 void Logger_Heartbeat(ThreadId thread) {
     // Precondition: valid thread ID
     assert(thread >= 0 && thread < THREAD_MAX && "Logger_Heartbeat: invalid thread ID");
@@ -382,17 +348,6 @@ void Logger_Heartbeat(ThreadId thread) {
     InterlockedExchange(&g_heartbeats[thread].lastHeartbeat, (LONG)now);
     InterlockedIncrement(&g_heartbeats[thread].beatCount);
     InterlockedExchange(&g_heartbeats[thread].active, 1);
-}
-
-BOOL Logger_IsThreadStalled(ThreadId thread) {
-    if (thread < 0 || thread >= THREAD_MAX) return FALSE;
-    if (!g_heartbeats[thread].active) return FALSE;
-    
-    DWORD now = (DWORD)GetTickCount64();
-    DWORD lastBeat = (DWORD)g_heartbeats[thread].lastHeartbeat;
-    DWORD age = now - lastBeat;
-    
-    return age > STALL_THRESHOLD;
 }
 
 BOOL Logger_IsInitialized(void) {
@@ -410,22 +365,6 @@ void Logger_Flush(void) {
         SetEvent(g_log.event);
         Sleep(10);
     }
-}
-
-const char* Logger_GetThreadName(ThreadId thread) {
-    if (thread < 0 || thread >= THREAD_MAX) return "UNKNOWN";
-    return g_threadNames[thread];
-}
-
-DWORD Logger_GetHeartbeatAge(ThreadId thread) {
-    if (thread < 0 || thread >= THREAD_MAX) return UINT_MAX;
-    if (!InterlockedCompareExchange(&g_heartbeats[thread].active, 0, 0)) return UINT_MAX;
-    
-    // Note: Using DWORD (32-bit) truncation of GetTickCount64 is intentional.
-    // Subtraction handles wrap correctly for relative time within ~49 days.
-    DWORD now = (DWORD)GetTickCount64();
-    DWORD lastBeat = (DWORD)InterlockedCompareExchange(&g_heartbeats[thread].lastHeartbeat, 0, 0);
-    return now - lastBeat;
 }
 
 void Logger_ResetHeartbeat(ThreadId thread) {

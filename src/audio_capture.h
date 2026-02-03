@@ -1,6 +1,5 @@
 /*
- * Audio Capture Module
- * WASAPI-based audio capture with loopback support
+ * audio_capture.h - WASAPI capture + mixing from up to 3 sources
  */
 
 #ifndef AUDIO_CAPTURE_H
@@ -74,11 +73,5 @@ void AudioCapture_Stop(AudioCaptureContext* ctx);
 // Read mixed audio data (returns bytes read)
 // Timestamp is in 100ns units (same as video)
 int AudioCapture_Read(AudioCaptureContext* ctx, BYTE* buffer, int maxBytes, LONGLONG* timestamp);
-
-// Get current capture timestamp (100ns units)
-LONGLONG AudioCapture_GetTimestamp(AudioCaptureContext* ctx);
-
-// Check if audio data is available
-BOOL AudioCapture_HasData(AudioCaptureContext* ctx);
 
 #endif // AUDIO_CAPTURE_H

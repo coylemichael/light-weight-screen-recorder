@@ -13,12 +13,10 @@
 
 #include "frame_buffer.h"
 #include "mp4_muxer.h"
-#include "util.h"
 #include "logger.h"
 #include "constants.h"
 #include "leak_tracker.h"
 #include "mem_utils.h"
-#include <stdio.h>
 
 // Alias for logging
 #define BufLog Logger_Log
@@ -165,8 +163,7 @@ void FrameBuffer_Shutdown(FrameBuffer* buf) {
             FreeFrame(&buf->frames[i]);
         }
         
-        free(buf->frames);
-        buf->frames = NULL;
+        SAFE_FREE(buf->frames);
         
         LeaveCriticalSection(&buf->lock);
         DeleteCriticalSection(&buf->lock);
@@ -279,163 +276,6 @@ size_t FrameBuffer_GetMemoryUsage(FrameBuffer* buf) {
     LeaveCriticalSection(&buf->lock);
     
     return total;
-}
-
-void FrameBuffer_Clear(FrameBuffer* buf) {
-    if (!buf || !buf->initialized) return;
-    
-    EnterCriticalSection(&buf->lock);
-    
-    for (int i = 0; i < buf->capacity; i++) {
-        FreeFrame(&buf->frames[i]);
-    }
-    
-    buf->head = 0;
-    buf->tail = 0;
-    buf->count = 0;
-    
-    LeaveCriticalSection(&buf->lock);
-}
-
-// Write buffered frames to MP4 file using muxer module
-// Deep copies all data under lock to prevent use-after-free from eviction,
-// then releases lock before muxing (which can be slow)
-BOOL FrameBuffer_WriteToFile(FrameBuffer* buf, const char* outputPath) {
-    // Preconditions
-    LWSR_ASSERT(buf != NULL);
-    LWSR_ASSERT(outputPath != NULL);
-    
-    if (!buf || !buf->initialized || !outputPath) return FALSE;
-    
-    BufLog("WriteToFile: entering, getting lock...\n");
-    EnterCriticalSection(&buf->lock);
-    BufLog("WriteToFile: lock acquired\n");
-    
-    if (buf->count == 0) {
-        LeaveCriticalSection(&buf->lock);
-        BufLog("WriteToFile: buffer is empty\n");
-        return FALSE;
-    }
-    
-    int count = buf->count;
-    
-    // CRITICAL FIX: Find the first keyframe (IDR) to start the clip
-    // Without this, clips extracted after long encoding sessions have invalid
-    // POC (Picture Order Count) references and decode with severe artifacts.
-    int startOffset = 0;
-    for (int i = 0; i < count; i++) {
-        BufferedFrame* src = &buf->frames[(buf->tail + i) % buf->capacity];
-        if (src->data && src->size > 0 && src->isKeyframe) {
-            startOffset = i;
-            if (startOffset > 0) {
-                BufLog("WriteToFile: Starting at keyframe offset %d (skipped %d frames)\n", 
-                       startOffset, startOffset);
-            }
-            break;
-        }
-    }
-    
-    // Adjust count to start from keyframe
-    int actualCount = count - startOffset;
-    if (actualCount <= 0) {
-        LeaveCriticalSection(&buf->lock);
-        BufLog("WriteToFile: No keyframe found in buffer!\n");
-        return FALSE;
-    }
-    
-    // Calculate duration from timestamps (from keyframe)
-    double bufDuration = 0.0;
-    int newestIdx = (buf->head - 1 + buf->capacity) % buf->capacity;
-    int startIdx = (buf->tail + startOffset) % buf->capacity;
-    bufDuration = (double)(buf->frames[newestIdx].timestamp - buf->frames[startIdx].timestamp) / 10000000.0;
-    BufLog("WriteToFile: %d frames, %.1fs to %s\n", actualCount, bufDuration, outputPath);
-    
-    // Allocate frame array with overflow check
-    size_t allocSize = (size_t)actualCount * sizeof(MuxerSample);
-    // Check for multiplication overflow: if allocSize / count != sizeof(MuxerSample), overflow occurred
-    if (actualCount > 0 && allocSize / (size_t)actualCount != sizeof(MuxerSample)) {
-        LeaveCriticalSection(&buf->lock);
-        BufLog("WriteToFile: allocation size overflow\n");
-        return FALSE;
-    }
-    BufLog("WriteToFile: allocating %d frames (%zu bytes)\n", actualCount, allocSize);
-    MuxerSample* frames = (MuxerSample*)malloc(allocSize);
-    if (!frames) {
-        LeaveCriticalSection(&buf->lock);
-        BufLog("WriteToFile: failed to allocate frames array\n");
-        return FALSE;
-    }
-    // Zero-initialize to prevent uninitialized memory access in cleanup
-    memset(frames, 0, allocSize);
-    
-    // Find first timestamp for normalization (from keyframe)
-    LONGLONG firstTimestamp = 0;
-    BufferedFrame* firstSrc = &buf->frames[startIdx];
-    if (firstSrc->data && firstSrc->size > 0) {
-        firstTimestamp = firstSrc->timestamp;
-    }
-    
-    // Deep copy all frames starting from keyframe while holding lock (prevents use-after-free)
-    BufLog("WriteToFile: deep copying frames...\n");
-    int copiedCount = 0;
-    size_t totalBytes = 0;
-    BOOL allocFailed = FALSE;
-    for (int i = startOffset; i < count && !allocFailed; i++) {
-        BufferedFrame* src = &buf->frames[(buf->tail + i) % buf->capacity];
-        if (src->data && src->size > 0) {
-            frames[copiedCount].data = (BYTE*)malloc(src->size);
-            if (frames[copiedCount].data) {
-                memcpy(frames[copiedCount].data, src->data, src->size);
-                frames[copiedCount].size = src->size;
-                frames[copiedCount].timestamp = src->timestamp - firstTimestamp;
-                frames[copiedCount].duration = src->duration;
-                frames[copiedCount].isKeyframe = src->isKeyframe;
-                totalBytes += src->size;
-                copiedCount++;
-            } else {
-                allocFailed = TRUE;
-            }
-        }
-    }
-    BufLog("WriteToFile: copied %d frames (%zu bytes total)\n", copiedCount, totalBytes);
-    
-    // If no frames were copied or allocation failed, clean up and return failure
-    if (copiedCount == 0 || allocFailed) {
-        for (int i = 0; i < copiedCount; i++) {
-            if (frames[i].data) free(frames[i].data);
-        }
-        free(frames);
-        LeaveCriticalSection(&buf->lock);
-        BufLog("WriteToFile: %s\n", allocFailed ? "malloc failed during copy" : "no frames could be copied");
-        return FALSE;
-    }
-    
-    // Capture config
-    MuxerConfig config;
-    config.width = buf->width;
-    config.height = buf->height;
-    config.fps = buf->fps;
-    config.quality = buf->quality;
-    config.seqHeader = buf->seqHeaderSize > 0 ? buf->seqHeader : NULL;
-    config.seqHeaderSize = buf->seqHeaderSize;
-    
-    BufLog("WriteToFile: releasing lock, calling muxer...\n");
-    LeaveCriticalSection(&buf->lock);
-    // Lock released! All data is now in our own deep-copied memory
-    
-    // Mux to file (this can be slow, but we're not holding the lock)
-    BOOL success = MP4Muxer_WriteFile(outputPath, frames, copiedCount, &config);
-    BufLog("WriteToFile: muxer returned %s\n", success ? "OK" : "FAILED");
-    
-    // Free deep-copied frame data
-    BufLog("WriteToFile: freeing frame copies...\n");
-    for (int i = 0; i < copiedCount; i++) {
-        if (frames[i].data) free(frames[i].data);
-    }
-    free(frames);
-    BufLog("WriteToFile: done\n");
-    
-    return success;
 }
 
 // Get copies of frames for external muxing (caller must free)

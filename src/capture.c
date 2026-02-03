@@ -1,19 +1,11 @@
 /*
- * DXGI Desktop Duplication Implementation
- * Using proper C-style COM vtable calls
- *
- * ERROR HANDLING PATTERN:
- * - Goto-cleanup for functions with multiple resource allocations
- * - HRESULT checks use FAILED()/SUCCEEDED() macros exclusively
- * - All COM errors are logged with HRESULT values
- * - Returns BOOL/NULL to propagate errors; callers must check
+ * capture.c - DXGI Desktop Duplication - acquire frames from desktop
  */
 
 #include "capture.h"
 #include "constants.h"
 #include "mem_utils.h"
 #include "logger.h"
-#include <stdio.h>
 
 // Monitor enumeration data
 typedef struct {
@@ -52,45 +44,6 @@ static BOOL CALLBACK MonitorEnumProcAll(HMONITOR hMonitor, HDC hdcMonitor,
     }
     
     return TRUE;
-}
-
-typedef struct {
-    MonitorEnumProc callback;
-    void* userData;
-    int index;
-} EnumCallbackData;
-
-static BOOL CALLBACK MonitorEnumProcCallback(HMONITOR hMonitor, HDC hdcMonitor,
-                                              LPRECT lprcMonitor, LPARAM dwData) {
-    (void)hdcMonitor;
-    EnumCallbackData* data = (EnumCallbackData*)dwData;
-    
-    MONITORINFO mi;
-    mi.cbSize = sizeof(mi);
-    if (!GetMonitorInfo(hMonitor, &mi)) {
-        // Continue enumeration on error, treat as non-primary
-        data->index++;
-        return TRUE;
-    }
-    
-    BOOL isPrimary = (mi.dwFlags & MONITORINFOF_PRIMARY) != 0;
-    BOOL continueEnum = data->callback(data->index, *lprcMonitor, isPrimary, data->userData);
-    data->index++;
-    
-    return continueEnum;
-}
-
-void Capture_EnumMonitors(MonitorEnumProc callback, void* userData) {
-    // Precondition
-    LWSR_ASSERT(callback != NULL);
-    
-    if (!callback) return;
-    
-    EnumCallbackData data;
-    data.callback = callback;
-    data.userData = userData;
-    data.index = 0;
-    EnumDisplayMonitors(NULL, NULL, MonitorEnumProcCallback, (LPARAM)&data);
 }
 
 BOOL Capture_GetMonitorBoundsByIndex(int monitorIndex, RECT* bounds) {
@@ -665,10 +618,6 @@ ID3D11Texture2D* Capture_GetFrameTexture(CaptureState* state, UINT64* timestamp)
     if (timestamp) *timestamp = state->lastFrameTime;
     
     return state->gpuTexture;
-}
-
-void Capture_ReleaseFrame(CaptureState* state) {
-    (void)state; // Frame is already released in GetFrame
 }
 
 int Capture_GetRefreshRate(CaptureState* state) {
