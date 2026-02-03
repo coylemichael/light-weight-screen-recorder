@@ -37,7 +37,7 @@ Each file is checked against:
 | `encoder.h` | ✅ | ✅ | R1: 2, R2: 0 | R1: Docstring updated; removed unused `Encoder_GetOutputPath` declaration. R2: Clean - all MF headers required by mfreadwrite.h dependencies, all functions called |
 | `nvenc_encoder.c` | ✅ | ✅ | R1: 2, R2: 0 | R1: Removed unused `<stdio.h>`; removed 3 dead code stubs. R2: Clean - all includes used (leak_tracker.h, constants.h), all functions called from replay_buffer.c, proper goto-cleanup via NVENCEncoder_Destroy |
 | `nvenc_encoder.h` | ✅ | ✅ | R1: 0, R2: 2 | R1: Docstring aligns with manifest (detailed OK). R2: Removed unused `NVENCEncoder_IsAvailable`, `NVENCEncoder_ForceCleanupLeaked` |
-| `frame_buffer.c` | ✅ | ⬜ | 5 fixed | Removed unused `util.h`, `<stdio.h>`, `FrameBuffer_WriteToFile`, `FrameBuffer_Clear`; use `SAFE_FREE` |
+| `frame_buffer.c` | ✅ | ✅ | R1: 5, R2: 0 | R1: Removed unused `util.h`, `<stdio.h>`, `FrameBuffer_WriteToFile`, `FrameBuffer_Clear`; use `SAFE_FREE`. R2: Clean - all includes used, all functions called from replay_buffer.c, proper goto-cleanup pattern, SAFE_FREE in cleanup, size_t overflow protection |
 | `frame_buffer.h` | ✅ | ⬜ | 2 fixed | Removed unused `FrameBuffer_WriteToFile`, `FrameBuffer_Clear` declarations |
 | `mp4_muxer.c` | ✅ | ⬜ | 1 fixed | Removed unused `<stdio.h>` |
 | `mp4_muxer.h` | ✅ | ⬜ | 0 | Clean - docstring matches manifest, all types/functions used |
