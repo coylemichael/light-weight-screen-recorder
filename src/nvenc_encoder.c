@@ -374,19 +374,6 @@ static void cuda_free_surfaces(NVENCEncoder* enc) {
 // Public API
 // ============================================================================
 
-BOOL NVENCEncoder_IsAvailable(void) {
-    // Check both CUDA and NVENC
-    if (!init_cuda()) return FALSE;
-    
-    HMODULE lib = LoadLibraryA("nvEncodeAPI64.dll");
-    if (!lib) lib = LoadLibraryA("nvEncodeAPI.dll");
-    if (lib) {
-        FreeLibrary(lib);
-        return TRUE;
-    }
-    return FALSE;
-}
-
 NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height, int fps, QualityPreset quality) {
     (void)d3dDevice;  // Not used in CUDA path
     if (width <= 0 || height <= 0 || fps <= 0) {
@@ -845,5 +832,4 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Texture, 
 
 // Legacy stubs (no-ops in CUDA path) - declared in header, used by replay_buffer.c
 BOOL NVENCEncoder_Flush(NVENCEncoder* enc, EncodedFrame* out) { (void)enc; (void)out; return FALSE; }
-void NVENCEncoder_ForceCleanupLeaked(void) { }
 void NVENCEncoder_MarkLeaked(NVENCEncoder* enc) { (void)enc; }

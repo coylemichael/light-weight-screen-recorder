@@ -23,9 +23,6 @@ typedef struct NVENCEncoder NVENCEncoder;
 // Callback for receiving completed frames
 typedef void (*EncodedFrameCallback)(EncodedFrame* frame, void* userData);
 
-// Check if NVENC + CUDA is available
-BOOL NVENCEncoder_IsAvailable(void);
-
 // Create encoder (D3D11 device ignored - uses CUDA internally)
 NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height, int fps, QualityPreset quality);
 
@@ -52,7 +49,6 @@ void NVENCEncoder_GetFrameSizeStats(NVENCEncoder* enc, UINT32* lastSize, UINT32*
 
 // Legacy stubs (no-ops in CUDA path)
 void NVENCEncoder_MarkLeaked(NVENCEncoder* enc);
-void NVENCEncoder_ForceCleanupLeaked(void);
 BOOL NVENCEncoder_Flush(NVENCEncoder* enc, EncodedFrame* outFrame);
 
 // Cleanup
