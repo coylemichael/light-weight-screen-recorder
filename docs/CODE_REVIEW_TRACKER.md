@@ -34,7 +34,7 @@ Each file is checked against:
 | `gpu_converter.c` | ✅ | ✅ | R1: 2, R2: 0 | R1: Docstring updated to match manifest; manifest updated (zero-copy, no CPU readback). R2: Clean - all includes used, goto-cleanup pattern, SAFE_RELEASE, FAILED() checks |
 | `gpu_converter.h` | ✅ | ✅ | R1: 1, R2: 1 | R1: Docstring updated. R2: Removed unused `<d3d11_1.h>` |
 | `encoder.c` | ✅ | ✅ | R1: 2, R2: 1 | R1: Docstring updated; removed unused `Encoder_GetOutputPath`; added to FILE_MANIFEST.md. R2: Removed unused `<mferror.h>` |
-| `encoder.h` | ✅ | ⬜ | 2 fixed | Docstring updated; removed unused `Encoder_GetOutputPath` declaration |
+| `encoder.h` | ✅ | ✅ | R1: 2, R2: 0 | R1: Docstring updated; removed unused `Encoder_GetOutputPath` declaration. R2: Clean - all MF headers required by mfreadwrite.h dependencies, all functions called |
 | `nvenc_encoder.c` | ✅ | ⬜ | 2 fixed | Removed unused `<stdio.h>`; removed 3 dead code stubs |
 | `nvenc_encoder.h` | ✅ | ⬜ | 0 | Docstring aligns with manifest (detailed OK) |
 | `frame_buffer.c` | ✅ | ⬜ | 5 fixed | Removed unused `util.h`, `<stdio.h>`, `FrameBuffer_WriteToFile`, `FrameBuffer_Clear`; use `SAFE_FREE` |
