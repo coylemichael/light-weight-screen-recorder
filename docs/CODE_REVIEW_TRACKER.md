@@ -39,7 +39,7 @@ Each file is checked against:
 | `nvenc_encoder.h` | ✅ | ✅ | R1: 0, R2: 2 | R1: Docstring aligns with manifest (detailed OK). R2: Removed unused `NVENCEncoder_IsAvailable`, `NVENCEncoder_ForceCleanupLeaked` |
 | `frame_buffer.c` | ✅ | ✅ | R1: 5, R2: 0 | R1: Removed unused `util.h`, `<stdio.h>`, `FrameBuffer_WriteToFile`, `FrameBuffer_Clear`; use `SAFE_FREE`. R2: Clean - all includes used, all functions called from replay_buffer.c, proper goto-cleanup pattern, SAFE_FREE in cleanup, size_t overflow protection |
 | `frame_buffer.h` | ✅ | ✅ | R1: 2, R2: 0 | R1: Removed unused `FrameBuffer_WriteToFile`, `FrameBuffer_Clear` declarations. R2: Clean - all includes used (windows.h, nvenc_encoder.h for EncodedFrame, config.h for QualityPreset, mp4_muxer.h for MuxerSample, constants.h for MAX_SEQ_HEADER_SIZE), all functions called from replay_buffer.c |
-| `mp4_muxer.c` | ✅ | ⬜ | 1 fixed | Removed unused `<stdio.h>` |
+| `mp4_muxer.c` | ✅ | ✅ | R1: 1, R2: 1 | R1: Removed unused `<stdio.h>`. R2: Removed unused `<mferror.h>` |
 | `mp4_muxer.h` | ✅ | ⬜ | 0 | Clean - docstring matches manifest, all types/functions used |
 | `replay_buffer.c` | ✅ | ⬜ | 5 fixed | Removed unused `<stdio.h>`, `<objbase.h>`, `ReplayBuffer_Save`, `ReplayBuffer_IsSaving`, `ReplayBuffer_GetStatus` |
 | `replay_buffer.h` | ✅ | ⬜ | 3 fixed | Removed unused `ReplayBuffer_Save`, `ReplayBuffer_IsSaving`, `ReplayBuffer_GetStatus` declarations |

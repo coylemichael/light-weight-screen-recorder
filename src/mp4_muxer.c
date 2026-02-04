@@ -19,7 +19,6 @@
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
-#include <mferror.h>
 
 /*
  * HEVC format GUID: {43564548-0000-0010-8000-00AA00389B71}
