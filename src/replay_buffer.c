@@ -12,27 +12,10 @@
  * - All errors logged; non-critical errors allow graceful degradation
  * - Returns BOOL to propagate errors; callers must check
  *
- * THREAD TERMINATION STRATEGY:
- * The buffer thread can hang if NVENC/D3D11 enters a bad state (GPU sleep,
- * driver crash, device removal). When this happens, WaitForSingleObject times
- * out and we have two options:
- *
- *   1. ALLOW_TERMINATE_THREAD = 0 (DEFAULT - SAFE):
- *      - Log the hang and leak the thread/encoder resources
- *      - Application remains stable but resources are not freed
- *      - Recommended for production use
- *
- *   2. ALLOW_TERMINATE_THREAD = 1 (DANGEROUS - DEBUG ONLY):
- *      - Call TerminateThread() to forcibly kill the hung thread
- *      - RISKS: Memory leaks, unreleased critical sections, corrupted
- *        D3D11/COM state, potential deadlocks on next operation
- *      - Only enable this if repeated hangs occur and you need to
- *        investigate the root cause or require forced cleanup
- *
- * If you experience repeated thread hangs, investigate:
- *   - GPU power management (disable sleep in NVIDIA Control Panel)
- *   - Driver stability (update/rollback graphics drivers)
- *   - NVENC session limits (max 3 concurrent on consumer GPUs)
+ * THREAD HANG BEHAVIOR:
+ * If the buffer thread hangs (NVENC/D3D11 bad state, GPU sleep, driver crash),
+ * we log the hang and leak resources safely. TerminateThread was attempted but
+ * cannot safely kill NVENC threads from outside - the approach doesn't work.
  */
 
 #include "replay_buffer.h"
@@ -52,16 +35,6 @@
 #include <mmsystem.h>  /* For timeBeginPeriod/timeEndPeriod */
 
 #pragma comment(lib, "winmm.lib")
-
-/*
- * ALLOW_TERMINATE_THREAD - Emergency thread termination toggle
- * 
- * Set to 1 to enable TerminateThread() as last resort for hung buffer threads.
- * Set to 0 (default) to leak resources safely instead of risking corruption.
- * 
- * See file header comment "THREAD TERMINATION STRATEGY" for full details.
- */
-#define ALLOW_TERMINATE_THREAD 0
 
 /* ============================================================================
  * INTERNAL STATE STRUCTURES
@@ -405,57 +378,17 @@ void ReplayBuffer_Stop(ReplayBufferState* state) {
         DWORD waitResult = WaitForSingleObject(state->bufferThread, 5000);
         
         if (waitResult == WAIT_TIMEOUT) {
-            /* Thread is hung! We can't safely clean up the encoder from here
-             * because the hung thread may still be using it.
-             * 
-             * See file header "THREAD TERMINATION STRATEGY" for options. */
-            ReplayLog("WARNING: Buffer thread hung (5s timeout)\n");
-            
-#if ALLOW_TERMINATE_THREAD
-            /* DANGEROUS: TerminateThread is enabled via ALLOW_TERMINATE_THREAD=1
-             * 
-             * This forcibly kills the thread but has serious risks:
-             * - Thread stack memory is leaked (~1MB)
-             * - Any held critical sections remain locked (potential deadlock)
-             * - COM/D3D11 resources may be left in inconsistent state
-             * - NVENC session may not be properly closed (counts against limit)
-             * 
-             * Only use this for debugging hung thread issues. For production,
-             * set ALLOW_TERMINATE_THREAD=0 and accept the resource leak. */
-            ReplayLog("WARNING: Using TerminateThread (ALLOW_TERMINATE_THREAD=1)\n");
-            TerminateThread(state->bufferThread, 1);
-            
-            /* Give terminated thread a moment to die */
-            DWORD termWait = WaitForSingleObject(state->bufferThread, 1000);
-            if (termWait == WAIT_TIMEOUT) {
-                ReplayLog("WARNING: Thread still alive after TerminateThread!\n");
-            }
-            
-            /* Force-null the encoder pointer since thread won't clean up */
-            ReplayVideoState* video = &g_internal.video;
-            if (video->encoder) {
-                ReplayLog("Force-nulling hung encoder (leaked)...\n");
-                /* Mark as leaked so session can be recovered later */
-                NVENCEncoder_MarkLeaked(video->encoder);
-                /* Don't call NVENCEncoder_Destroy - output thread is also hung */
-                video->encoder = NULL;
-            }
-#else
-            /* SAFE DEFAULT: Leak resources rather than risk corruption.
-             * The thread handle will be closed below, but the thread itself
-             * and all its resources (encoder, textures, etc.) are leaked.
-             * This is safer than TerminateThread for production use. */
-            ReplayLog("WARNING: Leaking hung thread resources (ALLOW_TERMINATE_THREAD=0)\n");
-            ReplayLog("  To enable forced termination, set ALLOW_TERMINATE_THREAD=1\n");
+            /* Thread is hung - leak resources safely (TerminateThread doesn't work
+             * for NVENC threads). The thread handle is closed below but the thread
+             * itself and its resources (encoder, textures, etc.) are leaked. */
+            ReplayLog("WARNING: Buffer thread hung (5s timeout), leaking resources\n");
             
             /* Mark encoder as leaked so session can be recovered later */
             ReplayVideoState* video = &g_internal.video;
             if (video->encoder) {
-                ReplayLog("Marking encoder as leaked for later recovery...\n");
                 NVENCEncoder_MarkLeaked(video->encoder);
-                video->encoder = NULL;  /* Leaked intentionally */
+                video->encoder = NULL;
             }
-#endif
         }
         
         CloseHandle(state->bufferThread);
@@ -1098,9 +1031,11 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
             
             attemptCount++;
             
-            // Calculate real wall-clock timestamp for this frame (100-ns units)
-            double realElapsedSec = (double)(currentTime.QuadPart - captureStartTime.QuadPart) / perfFreq.QuadPart;
-            UINT64 realTimestamp = (UINT64)(realElapsedSec * 10000000.0);
+            // Synthetic timestamp: frameCount * interval (like OBS)
+            // This produces smooth playback regardless of actual capture jitter
+            // frameIntervalMs is target interval (e.g., 8.33ms for 120fps)
+            // Convert to 100-ns units: ms * 10000 = 100-ns
+            UINT64 syntheticTimestamp = (UINT64)(frameCount * frameIntervalMs * 10000.0);
             
             // GPU path: capture → color convert → NVENC (all on GPU)
             
@@ -1120,7 +1055,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                         /* Async API: Submit frame (fast, non-blocking)
                          * Output thread will call DrainCallback when frame completes
                          * Returns: 1=success, 0=transient failure, -1=device lost */
-                        int submitResult = NVENCEncoder_SubmitTexture(video->encoder, nv12Texture, realTimestamp);
+                        int submitResult = NVENCEncoder_SubmitTexture(video->encoder, nv12Texture, syntheticTimestamp);
                         QueryPerformanceCounter(&t4);
                         
                         if (submitResult == 1) {
@@ -1230,7 +1165,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                 size_t memKB = FrameBuffer_GetMemoryUsage(&video->frameBuffer) / 1024;
                 int avgKBPerFrame = bufCount > 0 ? (int)(memKB / bufCount) : 0;
                 ReplayLog("Status: %d/%d frames in %.1fs (encode=%.1f fps, attempt=%.1f fps, target=%d fps), buffer=%.1fs (%d samples, %zu MB, %d KB/frame, QP=%d)\n", 
-                          frameCount, attemptCount, realElapsedSec, actualFPS, attemptFPS, fps, duration, bufCount, memMB, avgKBPerFrame, currentQP);
+                          frameCount, attemptCount, logElapsedSec, actualFPS, attemptFPS, fps, duration, bufCount, memMB, avgKBPerFrame, currentQP);
                 
                 /* Log leak tracker status if enabled (rate-limited internally) */
                 LeakTracker_LogStatus();

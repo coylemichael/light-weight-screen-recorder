@@ -1,6 +1,5 @@
 /*
- * Audio Device Enumeration Implementation
- * Uses Windows Core Audio (MMDevice) API
+ * audio_device.c - Enumerate/select WASAPI audio devices
  *
  * ERROR HANDLING PATTERN:
  * - Early return for simple validation checks
@@ -13,6 +12,7 @@
 #define DEFINE_AUDIO_GUIDS  /* This file defines the shared audio GUIDs */
 #include "audio_device.h"
 #include "audio_guids.h"
+#include "logger.h"
 #include "util.h"
 #include "mem_utils.h"
 #include <mmdeviceapi.h>

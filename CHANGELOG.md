@@ -1,9 +1,16 @@
 # Changelog
 
-## [1.3.2] - 2026-02-03
+## [1.3.2] - 2026-02-05
 
-### Code Review (R2 Pass)
-- **encoder.c**: Removed unused `<mferror.h>` include
+### Fixed
+- **Video playback stutter eliminated** - Switched to synthetic timestamps (OBS-style)
+  - Root cause: Wall-clock timestamps reflected capture jitter (4-20ms frame gaps)
+  - Fix: Frame N now gets timestamp `N × frameInterval` regardless of actual capture time
+  - Result: 0ms jitter (was 15.68ms), perfectly uniform frame durations
+  - Verified smooth playback in VLC and mpv
+
+### Fixed (minor)
+- Corrected variable name bug in status logging (`realElapsedSec` → `logElapsedSec`)
 
 ## [1.3.1] - 2026-02-02
 

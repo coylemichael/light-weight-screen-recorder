@@ -40,17 +40,17 @@ Each file is checked against:
 | `frame_buffer.c` | ✅ | ✅ | R1: 5, R2: 0 | R1: Removed unused `util.h`, `<stdio.h>`, `FrameBuffer_WriteToFile`, `FrameBuffer_Clear`; use `SAFE_FREE`. R2: Clean - all includes used, all functions called from replay_buffer.c, proper goto-cleanup pattern, SAFE_FREE in cleanup, size_t overflow protection |
 | `frame_buffer.h` | ✅ | ✅ | R1: 2, R2: 0 | R1: Removed unused `FrameBuffer_WriteToFile`, `FrameBuffer_Clear` declarations. R2: Clean - all includes used (windows.h, nvenc_encoder.h for EncodedFrame, config.h for QualityPreset, mp4_muxer.h for MuxerSample, constants.h for MAX_SEQ_HEADER_SIZE), all functions called from replay_buffer.c |
 | `mp4_muxer.c` | ✅ | ✅ | R1: 1, R2: 1 | R1: Removed unused `<stdio.h>`. R2: Removed unused `<mferror.h>` |
-| `mp4_muxer.h` | ✅ | ⬜ | 0 | Clean - docstring matches manifest, all types/functions used |
-| `replay_buffer.c` | ✅ | ⬜ | 5 fixed | Removed unused `<stdio.h>`, `<objbase.h>`, `ReplayBuffer_Save`, `ReplayBuffer_IsSaving`, `ReplayBuffer_GetStatus` |
-| `replay_buffer.h` | ✅ | ⬜ | 3 fixed | Removed unused `ReplayBuffer_Save`, `ReplayBuffer_IsSaving`, `ReplayBuffer_GetStatus` declarations |
+| `mp4_muxer.h` | ✅ | ✅ | R1: 0, R2: 0 | R1: Clean - docstring matches manifest, all types/functions used. R2: Clean - windows.h for Win types, config.h for QualityPreset, all structs used by replay_buffer.c/frame_buffer.c, both functions called |
+| `replay_buffer.c` | ✅ | ✅ | R1: 5, R2: 1 | R1: Removed unused `<stdio.h>`, `<objbase.h>`, `ReplayBuffer_Save`, `ReplayBuffer_IsSaving`, `ReplayBuffer_GetStatus`. R2: Removed dead `ALLOW_TERMINATE_THREAD` code (~50 lines) - TerminateThread approach doesn't work for NVENC |
+| `replay_buffer.h` | ✅ | ✅ | R1: 3, R2: 2 | R1: Removed unused `ReplayBuffer_Save`, `ReplayBuffer_IsSaving`, `ReplayBuffer_GetStatus` declarations. R2: Removed unused enum values `REPLAY_STATE_SAVING`, `REPLAY_STATE_RECOVERING` |
 
 ## Audio
 
 | File | Reviewed | R2 | Issues | Notes |
 |------|:--------:|:--:|--------|-------|
-| `audio_device.c` | ✅ | ⬜ | 3 fixed | Removed unused `<stdio.h>`, `AudioDevice_GetDefaultOutput`, `AudioDevice_GetDefaultInput` |
-| `audio_device.h` | ✅ | ⬜ | 2 fixed | Removed unused `AudioDevice_GetDefaultOutput`, `AudioDevice_GetDefaultInput` declarations |
-| `audio_capture.c` | ✅ | ⬜ | 4 fixed | Docstring updated; removed unused `<stdio.h>`, `<math.h>`, `<limits.h>`; made `AudioCapture_GetTimestamp` static; removed unused `AudioCapture_HasData` |
+| `audio_device.c` | ✅ | ✅ | R1: 3, R2: 3 | R1: Removed unused `<stdio.h>`, `AudioDevice_GetDefaultOutput`, `AudioDevice_GetDefaultInput`. R2: Added missing `logger.h` include, updated docstring to match manifest, wired `AudioDevice_Shutdown` into main.c cleanup |
+| `audio_device.h` | ✅ | ✅ | R1: 2, R2: 0 | R1: Removed unused `AudioDevice_GetDefaultOutput`, `AudioDevice_GetDefaultInput` declarations. R2: Clean - `<windows.h>` required for BOOL, all types/enums/functions used |
+| `audio_capture.c` | ✅ | ✅ | R1: 4, R2: 2 | R1: Docstring updated; removed unused `<stdio.h>`, `<math.h>`, `<limits.h>`; made `AudioCapture_GetTimestamp` static; removed unused `AudioCapture_HasData`. R2: Removed unused `<functiondiscoverykeys_devpkey.h>`; wired `AudioCapture_Shutdown` into main.c cleanup (was leaking g_audioEnumerator) |
 | `audio_capture.h` | ✅ | ⬜ | 3 fixed | Docstring updated; removed unused `AudioCapture_GetTimestamp`, `AudioCapture_HasData` declarations |
 | `aac_encoder.c` | ✅ | ⬜ | 3 fixed | Removed unused `<stdio.h>`, `AACEncoder_Create`, `AACEncoder_Flush` |
 | `aac_encoder.h` | ✅ | ⬜ | 4 fixed | Docstring updated; removed unused `audio_capture.h`, `AACEncoder_Create`, `AACEncoder_Flush` declarations |

@@ -20,7 +20,6 @@
 #include "mem_utils.h"
 #include <mmdeviceapi.h>
 #include <audioclient.h>
-#include <functiondiscoverykeys_devpkey.h>
 
 /* Individual audio source capture */
 struct AudioCaptureSource {

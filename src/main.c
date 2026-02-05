@@ -69,6 +69,8 @@
 #include "crash_handler.h"
 #include "leak_tracker.h"
 #include "gdiplus_api.h"
+#include "audio_device.h"
+#include "audio_capture.h"
 
 #include "constants.h"
 
@@ -334,6 +336,8 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     Config_Save(&g_config);
     GdiplusAPI_Shutdown(&g_gdip);
     Capture_Shutdown(&g_capture);
+    AudioCapture_Shutdown();
+    AudioDevice_Shutdown();
     MFShutdown();
     CoUninitialize();
     

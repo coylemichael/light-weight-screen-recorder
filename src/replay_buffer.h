@@ -25,10 +25,8 @@ typedef enum {
     REPLAY_STATE_UNINITIALIZED,
     REPLAY_STATE_STARTING,      // Thread created, initializing components
     REPLAY_STATE_CAPTURING,     // Actively capturing frames, ready for saves
-    REPLAY_STATE_SAVING,        // Save in progress
     REPLAY_STATE_STOPPING,      // Shutdown requested
-    REPLAY_STATE_ERROR,         // Fatal error occurred
-    REPLAY_STATE_RECOVERING     // HealthMonitor recovery in progress (renamed from STALLED)
+    REPLAY_STATE_ERROR          // Fatal error occurred
 } ReplayStateEnum;
 
 typedef struct {
