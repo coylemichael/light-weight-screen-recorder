@@ -230,6 +230,12 @@ static CaptureMode g_currentMode = MODE_NONE;
 /* Recording thread */
 static DWORD WINAPI RecordingThread(LPVOID param);
 
+/* Internal recording/overlay state functions */
+static void Overlay_SetMode(CaptureMode mode);
+static void Recording_Start(void);
+static void Recording_Stop(void);
+static void Overlay_SetRecordingState(BOOL isRecording);
+
 /* Window procedures */
 static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
@@ -965,7 +971,7 @@ void Overlay_Destroy(void) {
     }
 }
 
-void Overlay_SetMode(CaptureMode mode) {
+static void Overlay_SetMode(CaptureMode mode) {
     g_currentMode = mode;
     InterlockedExchange(&g_isSelecting, TRUE);
     g_selection.state = SEL_NONE;
@@ -990,14 +996,7 @@ void Overlay_SetMode(CaptureMode mode) {
     InvalidateRect(g_overlayWnd, NULL, TRUE);
 }
 
-BOOL Overlay_GetSelectedRegion(RECT* region) {
-    if (!region) return FALSE;
-    if (IsRectEmpty(&g_selection.selectedRect)) return FALSE;
-    *region = g_selection.selectedRect;
-    return TRUE;
-}
-
-void Recording_Start(void) {
+static void Recording_Start(void) {
     // Thread-safe check: read g_isRecording atomically
     if (InterlockedCompareExchange(&g_isRecording, 0, 0)) return;
     if (IsRectEmpty(&g_selection.selectedRect)) return;
@@ -1073,7 +1072,7 @@ void Recording_Start(void) {
     }
 }
 
-void Recording_Stop(void) {
+static void Recording_Stop(void) {
     // Thread-safe check: read g_isRecording atomically
     if (!InterlockedCompareExchange(&g_isRecording, 0, 0)) return;
     
@@ -1168,7 +1167,7 @@ static DWORD WINAPI RecordingThread(LPVOID param) {
     return 0;
 }
 
-void Overlay_SetRecordingState(BOOL isRecording) {
+static void Overlay_SetRecordingState(BOOL isRecording) {
     if (isRecording) {
         // Get button positions based on recording mode
         HWND modeBtn = NULL;
