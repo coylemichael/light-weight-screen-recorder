@@ -1,6 +1,6 @@
 /*
- * Recording Border Highlight
- * Shows a red border around the capture area during recording
+ * Screen region selection border
+ * Provides red recording border, preview border, and draggable area selector
  */
 
 #ifndef BORDER_H

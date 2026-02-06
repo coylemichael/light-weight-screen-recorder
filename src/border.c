@@ -1,6 +1,6 @@
 /*
- * Recording Border Highlight Implementation
- * Uses a layered window with per-pixel alpha for a clean red border
+ * Screen region selection border
+ * Provides red recording border, preview border, and draggable area selector
  *
  * ERROR HANDLING PATTERN:
  * - Early return for simple validation checks

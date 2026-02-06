@@ -61,10 +61,10 @@ Each file is checked against:
 |------|:--------:|:--:|--------|-------|
 | `overlay.c` | ✅ | ✅ | R1: 8, R2: 2 | R1: Removed unused `<commdlg.h>`, `comdlg32.lib`; removed 7 dead functions: `UpdateCrosshair`, `CaptureToClipboard`, `CaptureToFile`, `LoadIconFromPNG`, `LoadPNGImage`, `DrawPNGImage`, `FreePNGImage`, `LoadSettingsIcon`, `UpdateActionToolbar`; removed unused `g_settingsImage`. R2: Wired `Overlay_Destroy` into main.c cleanup (was never called - leaked tray icon, windows, ActionToolbar, Border); removed unused `Overlay_GetWindow` |
 | `overlay.h` | ✅ | ✅ | R1: 3, R2: 5 | R1: Docstring updated; removed unused `Overlay_ShowSelection`, `Overlay_ShowControls` declarations. R2: Removed unused `"config.h"` include; removed 4 internal-only declarations (made static in .c): `Overlay_SetMode`, `Overlay_GetSelectedRegion` (dead code - never called), `Overlay_SetRecordingState`, `Recording_Start`, `Recording_Stop` |
-| `action_toolbar.c` | ✅ | ⬜ | 2 fixed | Removed unused `<dwmapi.h>`; removed unused `ActionToolbar_GetWindow` |
-| `action_toolbar.h` | ✅ | ⬜ | 2 fixed | Docstring updated; removed unused `ActionToolbar_GetWindow` declaration |
-| `border.c` | ✅ | ⬜ | 4 fixed | Removed unused `<stdlib.h>`, `UpdatePreviewBorderBitmap`, `PreviewBorder_Show`, `Border_IsVisible` |
-| `border.h` | ✅ | ⬜ | 3 fixed | Removed unused `PREVIEW_BORDER_THICKNESS`, `PreviewBorder_Show`, `Border_IsVisible` declarations |
+| `action_toolbar.c` | ✅ | ✅ | R1: 2, R2: 0 | R1: Removed unused `<dwmapi.h>`; removed unused `ActionToolbar_GetWindow`. R2: Clean - all 3 includes used, all 5 public functions called from overlay.c, proper goto-cleanup for GDI resources |
+| `action_toolbar.h` | ✅ | ✅ | R1: 2, R2: 0 | R1: Docstring updated; removed unused `ActionToolbar_GetWindow` declaration. R2: Clean - `<windows.h>` needed for BOOL/HINSTANCE, all 5 functions called from overlay.c |
+| `border.c` | ✅ | ✅ | R1: 4, R2: 1 | R1: Removed unused `<stdlib.h>`, `UpdatePreviewBorderBitmap`, `PreviewBorder_Show`, `Border_IsVisible`. R2: Updated docstring to match FILE_MANIFEST |
+| `border.h` | ✅ | ✅ | R1: 3, R2: 1 | R1: Removed unused `PREVIEW_BORDER_THICKNESS`, `PreviewBorder_Show`, `Border_IsVisible` declarations. R2: Updated docstring to match FILE_MANIFEST |
 
 ## Infrastructure
 
