@@ -1,5 +1,10 @@
 # Changelog
 
+## [1.3.4] - 2026-02-06
+
+### Removed (R2 code review - config)
+- `Config_GetPath()` declaration from config.h - made static in config.c (only used internally)
+
 ## [1.3.3] - 2026-02-06
 
 ### Fixed

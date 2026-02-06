@@ -76,9 +76,6 @@ typedef struct {
     
 } AppConfig;
 
-// Get config file path
-void Config_GetPath(char* buffer, size_t size);
-
 // Load config from INI file
 void Config_Load(AppConfig* config);
 

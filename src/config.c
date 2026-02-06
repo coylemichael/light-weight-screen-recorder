@@ -21,7 +21,7 @@
  */
 static const char* const FORMAT_EXTENSIONS[] = { ".mp4", ".mp4", ".avi", ".wmv" };
 
-void Config_GetPath(char* buffer, size_t size) {
+static void Config_GetPath(char* buffer, size_t size) {
     // Preconditions
     LWSR_ASSERT(buffer != NULL);
     LWSR_ASSERT(size > 0);

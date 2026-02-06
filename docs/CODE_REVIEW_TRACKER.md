@@ -70,8 +70,8 @@ Each file is checked against:
 
 | File | Reviewed | R2 | Issues | Notes |
 |------|:--------:|:--:|--------|-------|
-| `config.c` | ✅ | ⬜ | 2 fixed | Removed unused `Config_GetFormatName` function and `FORMAT_NAMES` array |
-| `config.h` | ✅ | ⬜ | 1 fixed | Removed unused `Config_GetFormatName` declaration |
+| `config.c` | ✅ | ✅ | R1: 2, R2: 1 | R1: Removed unused `Config_GetFormatName` function and `FORMAT_NAMES` array. R2: Made `Config_GetPath` static (only used internally) |
+| `config.h` | ✅ | ✅ | R1: 1, R2: 1 | R1: Removed unused `Config_GetFormatName` declaration. R2: Removed unused `Config_GetPath` declaration (made static in .c) |
 | `logger.c` | ✅ | ⬜ | 4 fixed | Removed unused `Logger_LogThread`, `Logger_IsThreadStalled`, `Logger_GetThreadName`, `Logger_GetHeartbeatAge` |
 | `logger.h` | ✅ | ⬜ | 4 fixed | Removed unused declarations for above 4 functions |
 | `util.c` | ✅ | ⬜ | 2 fixed | Removed unused `Util_CalculateTimestamp`, `Util_CalculateFrameDuration` |
