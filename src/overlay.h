@@ -24,9 +24,6 @@ BOOL Overlay_GetSelectedRegion(RECT* region);
 // Update recording state display
 void Overlay_SetRecordingState(BOOL isRecording);
 
-// Get overlay window handle
-HWND Overlay_GetWindow(void);
-
 // Start recording with current selection
 void Recording_Start(void);
 

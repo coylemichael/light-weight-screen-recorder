@@ -13,6 +13,7 @@
 #include <windows.h>
 
 #include "audio_capture.h"
+#include "audio_device.h"
 #include "audio_guids.h"
 #include "util.h"
 #include "logger.h"

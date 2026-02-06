@@ -997,10 +997,6 @@ BOOL Overlay_GetSelectedRegion(RECT* region) {
     return TRUE;
 }
 
-HWND Overlay_GetWindow(void) {
-    return g_overlayWnd;
-}
-
 void Recording_Start(void) {
     // Thread-safe check: read g_isRecording atomically
     if (InterlockedCompareExchange(&g_isRecording, 0, 0)) return;

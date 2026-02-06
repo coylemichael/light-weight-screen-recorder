@@ -51,15 +51,15 @@ Each file is checked against:
 | `audio_device.c` | ✅ | ✅ | R1: 3, R2: 3 | R1: Removed unused `<stdio.h>`, `AudioDevice_GetDefaultOutput`, `AudioDevice_GetDefaultInput`. R2: Added missing `logger.h` include, updated docstring to match manifest, wired `AudioDevice_Shutdown` into main.c cleanup |
 | `audio_device.h` | ✅ | ✅ | R1: 2, R2: 0 | R1: Removed unused `AudioDevice_GetDefaultOutput`, `AudioDevice_GetDefaultInput` declarations. R2: Clean - `<windows.h>` required for BOOL, all types/enums/functions used |
 | `audio_capture.c` | ✅ | ✅ | R1: 4, R2: 2 | R1: Docstring updated; removed unused `<stdio.h>`, `<math.h>`, `<limits.h>`; made `AudioCapture_GetTimestamp` static; removed unused `AudioCapture_HasData`. R2: Removed unused `<functiondiscoverykeys_devpkey.h>`; wired `AudioCapture_Shutdown` into main.c cleanup (was leaking g_audioEnumerator) |
-| `audio_capture.h` | ✅ | ⬜ | 3 fixed | Docstring updated; removed unused `AudioCapture_GetTimestamp`, `AudioCapture_HasData` declarations |
-| `aac_encoder.c` | ✅ | ⬜ | 3 fixed | Removed unused `<stdio.h>`, `AACEncoder_Create`, `AACEncoder_Flush` |
-| `aac_encoder.h` | ✅ | ⬜ | 4 fixed | Docstring updated; removed unused `audio_capture.h`, `AACEncoder_Create`, `AACEncoder_Flush` declarations |
+| `audio_capture.h` | ✅ | ✅ | R1: 3, R2: 1 | R1: Docstring updated; removed unused `AudioCapture_GetTimestamp`, `AudioCapture_HasData` declarations. R2: Removed unused `"audio_device.h"` include (moved to .c file where needed) |
+| `aac_encoder.c` | ✅ | ✅ | R1: 3, R2: 1 | R1: Removed unused `<stdio.h>`, `AACEncoder_Create`, `AACEncoder_Flush`. R2: Removed unused `<wmcodecdsp.h>` (CLSID defined locally) |
+| `aac_encoder.h` | ✅ | ✅ | R1: 4, R2: 1 | R1: Docstring updated; removed unused `audio_capture.h`, `AACEncoder_Create`, `AACEncoder_Flush` declarations. R2: Removed unused `"constants.h"` |
 
 ## UI
 
 | File | Reviewed | R2 | Issues | Notes |
 |------|:--------:|:--:|--------|-------|
-| `overlay.c` | ✅ | ⬜ | 8 fixed | Removed unused `<commdlg.h>`, `comdlg32.lib`; removed 7 dead functions: `UpdateCrosshair`, `CaptureToClipboard`, `CaptureToFile`, `LoadIconFromPNG`, `LoadPNGImage`, `DrawPNGImage`, `FreePNGImage`, `LoadSettingsIcon`, `UpdateActionToolbar`; removed unused `g_settingsImage` |
+| `overlay.c` | ✅ | ✅ | R1: 8, R2: 2 | R1: Removed unused `<commdlg.h>`, `comdlg32.lib`; removed 7 dead functions: `UpdateCrosshair`, `CaptureToClipboard`, `CaptureToFile`, `LoadIconFromPNG`, `LoadPNGImage`, `DrawPNGImage`, `FreePNGImage`, `LoadSettingsIcon`, `UpdateActionToolbar`; removed unused `g_settingsImage`. R2: Wired `Overlay_Destroy` into main.c cleanup (was never called - leaked tray icon, windows, ActionToolbar, Border); removed unused `Overlay_GetWindow` |
 | `overlay.h` | ✅ | ⬜ | 3 fixed | Docstring updated; removed unused `Overlay_ShowSelection`, `Overlay_ShowControls` declarations |
 | `action_toolbar.c` | ✅ | ⬜ | 2 fixed | Removed unused `<dwmapi.h>`; removed unused `ActionToolbar_GetWindow` |
 | `action_toolbar.h` | ✅ | ⬜ | 2 fixed | Docstring updated; removed unused `ActionToolbar_GetWindow` declaration |
@@ -119,7 +119,7 @@ Each file is checked against:
 ## Progress Summary
 
 - **Total files:** 46
-- **Reviewed:** 0
-- **Compliant:** 0
+- **Reviewed:** 45
+- **Compliant:** 45
 - **Has issues:** 0
-- **Remaining:** 46
+- **Remaining:** 1 (`lwsr.rc`)

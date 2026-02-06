@@ -18,7 +18,6 @@
 #include <mfapi.h>
 #include <mftransform.h>
 #include <mferror.h>
-#include <wmcodecdsp.h>
 
 /*
  * AAC encoder CLSID: {93AF0C51-2275-45d2-A35B-F2BA21CAED00}

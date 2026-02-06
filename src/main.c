@@ -330,6 +330,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     // Cleanup
     Logger_Log("Shutting down (msgs=%lu, hotkeys=%lu)\n", msgCount, hotkeyCount);
     UnregisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE);
+    Overlay_Destroy();  // Must be before ReplayBuffer_Shutdown (stops recording first)
     ReplayBuffer_Shutdown(&g_replayBuffer);
     Logger_Flush();
     Logger_Shutdown();

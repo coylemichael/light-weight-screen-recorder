@@ -6,7 +6,6 @@
 #define AUDIO_CAPTURE_H
 
 #include <windows.h>
-#include "audio_device.h"
 
 // Audio format (fixed for simplicity - all sources resampled to this)
 #define AUDIO_SAMPLE_RATE       48000

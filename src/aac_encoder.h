@@ -6,7 +6,6 @@
 #define AAC_ENCODER_H
 
 #include <windows.h>
-#include "constants.h"
 
 // Forward declaration
 typedef struct AACEncoder AACEncoder;

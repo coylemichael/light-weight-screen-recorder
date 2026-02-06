@@ -1,5 +1,25 @@
 # Changelog
 
+## [1.3.3] - 2026-02-06
+
+### Fixed
+- **Critical cleanup bug: `Overlay_Destroy()` was dead code since v0.9**
+  - Function existed but was never called from main.c shutdown sequence
+  - Consequence: System tray icon leaked (ghost icons), recording thread orphaned on exit,
+    overlay windows leaked, ActionToolbar and Border modules never shut down
+  - Now properly wired into main.c cleanup path
+
+### Removed (R2 code review)
+- `Overlay_GetWindow()` - declared but never called
+- Unused `<wmcodecdsp.h>` include from aac_encoder.c
+- Unused `"constants.h"` include from aac_encoder.h
+- Unused `<functiondiscoverykeys_devpkey.h>` from audio_capture.c
+- Unused `"audio_device.h"` include from audio_capture.h
+
+### Fixed (R2 code review)
+- Wired `AudioCapture_Shutdown()` into main.c (was leaking g_audioEnumerator COM object)
+- Wired `AudioDevice_Shutdown()` into main.c cleanup
+
 ## [1.3.2] - 2026-02-05
 
 ### Fixed
