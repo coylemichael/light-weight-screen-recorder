@@ -98,7 +98,7 @@ if "%BUILD_TYPE%"=="debug" (
     echo Building Lightweight Screen Recorder [DEBUG]...
     cl.exe /nologo /Od /Zi /MDd ^
         /W4 /WX /wd4201 ^
-        /D "DEBUG" /D "_DEBUG" /D "LWSR_DEBUG_MEMORY" /D "WIN32" /D "_WINDOWS" /D "_CRT_SECURE_NO_WARNINGS" /D "NVENCAPI=__stdcall" ^
+        /D "DEBUG" /D "_DEBUG" /D "WIN32" /D "_WINDOWS" /D "_CRT_SECURE_NO_WARNINGS" /D "NVENCAPI=__stdcall" ^
         /Fe"bin\lwsr.exe" ^
         /Fd"bin\lwsr.pdb" ^
         %SOURCES% ^

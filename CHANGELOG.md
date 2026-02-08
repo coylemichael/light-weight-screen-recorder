@@ -1,5 +1,19 @@
 # Changelog
 
+## [1.3.7] - 2026-02-08
+
+### Removed (R2 code review - leak_tracker.h)
+- Redundant `<windows.h>` include from leak_tracker.h - already included via main.h
+
+## [1.3.6] - 2026-02-08
+
+### Removed (YAGNI)
+- **Deleted `mem_utils.c`** - Debug memory tracking implementation that was never used
+  - `DEBUG_MALLOC`/`DEBUG_FREE` macros existed but no code called them
+  - `leak_tracker.c` already provides domain-level tracking (NVENC frames, AAC samples, MF objects)
+  - Removed `LWSR_DEBUG_MEMORY` build flag from debug builds
+- Removed debug tracking section from `mem_utils.h` (kept SAFE_* macros, CHECK_* helpers, MF_LOCK_BUFFER)
+
 ## [1.3.5] - 2026-02-08
 
 ### Changed (R2 code review - cleanup)

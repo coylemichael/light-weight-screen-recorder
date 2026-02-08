@@ -5,9 +5,7 @@
  */
 
 #include "leak_tracker.h"
-#include "config.h"
 #include "logger.h"
-#include <string.h>
 
 /* Global counter instance */
 LeakCounters g_leakCounters = {0};

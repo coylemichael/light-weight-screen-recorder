@@ -5,8 +5,9 @@
  * This header provides macros and utilities for safer memory management:
  * 
  *   1. SAFE_FREE / SAFE_RELEASE - Null-checked free that sets pointer to NULL
- *   2. Debug allocation tracking (optional, enabled via LWSR_DEBUG_MEMORY)
- *   3. Goto-cleanup pattern documentation and helpers
+ *   2. Goto-cleanup pattern documentation and helpers
+ *   3. CHECK_* macros for error handling
+ *   4. MF_LOCK_BUFFER / MF_UNLOCK_BUFFER for Media Foundation
  * 
  * USAGE: Include this header in source files that allocate memory.
  * 
@@ -14,7 +15,6 @@
  *   - Double-free bugs crash the program
  *   - Use-after-free bugs cause undefined behavior
  *   - Setting pointers to NULL after free prevents both issues
- *   - Debug tracking helps identify leaks during development
  */
 
 #ifndef MEM_UTILS_H
@@ -243,45 +243,6 @@
             (lockFlag) = FALSE; \
         } \
     } while (0)
-
-/* ============================================================================
- * DEBUG MEMORY TRACKING (Optional)
- * ============================================================================
- * 
- * When LWSR_DEBUG_MEMORY is defined, these macros track all allocations
- * and can report leaks at shutdown.
- * 
- * In release builds, they expand to regular malloc/free with no overhead.
- */
-
-#ifdef LWSR_DEBUG_MEMORY
-
-/* Forward declarations for debug tracking functions */
-void* MemDebug_Malloc(size_t size, const char* file, int line);
-void* MemDebug_Calloc(size_t count, size_t size, const char* file, int line);
-void* MemDebug_Realloc(void* ptr, size_t size, const char* file, int line);
-void  MemDebug_Free(void* ptr, const char* file, int line);
-void  MemDebug_ReportLeaks(void);
-void  MemDebug_Init(void);
-void  MemDebug_Shutdown(void);
-
-#define DEBUG_MALLOC(size)          MemDebug_Malloc((size), __FILE__, __LINE__)
-#define DEBUG_CALLOC(count, size)   MemDebug_Calloc((count), (size), __FILE__, __LINE__)
-#define DEBUG_REALLOC(ptr, size)    MemDebug_Realloc((ptr), (size), __FILE__, __LINE__)
-#define DEBUG_FREE(ptr)             MemDebug_Free((ptr), __FILE__, __LINE__)
-
-#else
-
-/* Release build: zero overhead, maps directly to stdlib functions */
-#define DEBUG_MALLOC(size)          malloc(size)
-#define DEBUG_CALLOC(count, size)   calloc((count), (size))
-#define DEBUG_REALLOC(ptr, size)    realloc((ptr), (size))
-#define DEBUG_FREE(ptr)             free(ptr)
-#define MemDebug_ReportLeaks()      ((void)0)
-#define MemDebug_Init()             ((void)0)
-#define MemDebug_Shutdown()         ((void)0)
-
-#endif /* LWSR_DEBUG_MEMORY */
 
 /* ============================================================================
  * GOTO-CLEANUP PATTERN DOCUMENTATION

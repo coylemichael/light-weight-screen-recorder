@@ -83,10 +83,10 @@ Each file is checked against:
 
 | File | Reviewed | R2 | Issues | Notes |
 |------|:--------:|:--:|--------|-------|
-| `mem_utils.c` | ✅ | ✅ | R1: 0, R2: 2 | R1: Clean - optional debug code under LWSR_DEBUG_MEMORY. R2: Removed unused `<stdio.h>`, removed unused `s_initOnce` variable (dead code - implementation uses `s_initStarted` instead) |
-| `mem_utils.h` | ✅ | ⬜ | 0 fixed | Clean - unused macros (CHECK_ALLOC, MF_LOCK_BUFFER etc) are documented utility patterns |
-| `leak_tracker.c` | ✅ | ⬜ | 2 fixed | Removed unused `LeakTracker_Reset`, `LeakTracker_HasPotentialLeak` |
-| `leak_tracker.h` | ✅ | ⬜ | 2 fixed | Removed unused declarations for above functions |
+| `mem_utils.c` | ✅ | ✅ | R1: 0, R2: DELETED | R1: Clean - optional debug code under LWSR_DEBUG_MEMORY. R2: Deleted per YAGNI - DEBUG_MALLOC/FREE not used anywhere, leak_tracker.c provides domain-level tracking |
+| `mem_utils.h` | ✅ | ✅ | R1: 0, R2: 1 | R1: Clean - unused macros (CHECK_ALLOC, MF_LOCK_BUFFER etc) are documented utility patterns. R2: Removed unused DEBUG_MALLOC/LWSR_DEBUG_MEMORY section (implementation deleted) |
+| `leak_tracker.c` | ✅ | ✅ | R1: 2, R2: 2 | R1: Removed unused `LeakTracker_Reset`, `LeakTracker_HasPotentialLeak`. R2: Removed unused `<string.h>`, redundant `"config.h"` (already via leak_tracker.h → main.h) |
+| `leak_tracker.h` | ✅ | ✅ | R1: 2, R2: 1 | R1: Removed unused declarations for above functions. R2: Removed redundant `<windows.h>` (already included via main.h) |
 | `crash_handler.c` | ✅ | ⬜ | 0 fixed | Clean - unused `CrashHandler_ForceCrash` is debug/test utility |
 | `crash_handler.h` | ✅ | ⬜ | 0 fixed | Clean |
 

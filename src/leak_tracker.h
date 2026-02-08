@@ -28,8 +28,7 @@
 #ifndef LEAK_TRACKER_H
 #define LEAK_TRACKER_H
 
-#include <windows.h>
-#include "main.h"        /* For extern AppConfig g_config declaration */
+#include "main.h"        /* For extern AppConfig g_config declaration (includes windows.h) */
 
 /* ============================================================================
  * COUNTER STRUCTURE

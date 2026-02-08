@@ -45,7 +45,7 @@ One-liner purpose for each source file. If a file is doing more than this, quest
 
 | File | Purpose |
 |------|---------|
-| `mem_utils.c/h` | SAFE_* macros for cleanup |
+| `mem_utils.h` | SAFE_* macros for cleanup, goto-cleanup pattern helpers |
 | `leak_tracker.c` | Debug allocation tracking |
 | `crash_handler.c` | Minidump on crash |
 
