@@ -1,5 +1,16 @@
 # Changelog
 
+## [1.3.5] - 2026-02-08
+
+### Changed (R2 code review - cleanup)
+- **Renamed `app_context.h` to `main.h`** - honest name for what it does (extern declarations for main.c globals)
+- Removed 4 unused struct definitions from main.h: `AppContext`, `RecordingContext`, `ReplayAudioContext`, `ReplayVideoContext` - YAGNI scaffolding for never-implemented "unified context" architecture
+- Slimmed main.h from 175 lines to 22 lines
+
+### Fixed (R2 code review)
+- **`audio_guids.h` had broken `#ifdef`/`#else` branches** - both branches contained identical code (copy-paste error); simplified to single set of GUID definitions
+- Slimmed audio_guids.h from 52 lines to 25 lines
+
 ## [1.3.4] - 2026-02-06
 
 ### Removed (R2 code review - config)

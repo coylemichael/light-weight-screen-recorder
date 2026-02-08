@@ -8,7 +8,6 @@
 
 #include <windows.h>
 #include "config.h"
-#include "constants.h"
 
 // Calculate video bitrate based on quality preset
 // Uses ShadowPlay-style scaling: base bitrate scales with resolution and FPS

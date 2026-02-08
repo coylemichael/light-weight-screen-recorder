@@ -18,7 +18,7 @@
  * 2. ERROR LOGGING:
  *    - All errors MUST be logged with descriptive context
  *    - Include function name and parameter values when helpful
- *    - Use rate limiting for high-frequency error paths (LOG_RATE_LIMIT)
+ *    - Use rate limiting for high-frequency error paths
  *
  * 3. PATTERN SELECTION:
  *    - Goto-cleanup: Functions allocating multiple COM/heap resources
@@ -78,7 +78,7 @@
  * GLOBAL STATE
  * ============================================================================
  * Thread access patterns documented for each variable.
- * See app_context.h for architectural overview and migration path.
+ * Extern declarations in main.h allow other modules to access these.
  */
 
 /*

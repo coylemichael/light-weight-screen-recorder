@@ -9,7 +9,7 @@
  */
 
 #define COBJMACROS
-#define DEFINE_AUDIO_GUIDS  /* This file defines the shared audio GUIDs */
+#include <initguid.h>       /* Must come before audio_guids.h to define GUIDs */
 #include "audio_device.h"
 #include "audio_guids.h"
 #include "logger.h"

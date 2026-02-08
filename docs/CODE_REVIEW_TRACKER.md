@@ -72,12 +72,12 @@ Each file is checked against:
 |------|:--------:|:--:|--------|-------|
 | `config.c` | ✅ | ✅ | R1: 2, R2: 1 | R1: Removed unused `Config_GetFormatName` function and `FORMAT_NAMES` array. R2: Made `Config_GetPath` static (only used internally) |
 | `config.h` | ✅ | ✅ | R1: 1, R2: 1 | R1: Removed unused `Config_GetFormatName` declaration. R2: Removed unused `Config_GetPath` declaration (made static in .c) |
-| `logger.c` | ✅ | ⬜ | 4 fixed | Removed unused `Logger_LogThread`, `Logger_IsThreadStalled`, `Logger_GetThreadName`, `Logger_GetHeartbeatAge` |
-| `logger.h` | ✅ | ⬜ | 4 fixed | Removed unused declarations for above 4 functions |
-| `util.c` | ✅ | ⬜ | 2 fixed | Removed unused `Util_CalculateTimestamp`, `Util_CalculateFrameDuration` |
-| `util.h` | ✅ | ⬜ | 2 fixed | Removed unused declarations for above 2 functions |
-| `constants.h` | ✅ | ⬜ | 2 fixed | Removed unused `BYTES_PER_PIXEL_RGB24`, `CONFIG_BUFFER_SIZE` constants |
-| `app_context.h` | ✅ | ⬜ | 0 fixed | Clean - unused context structs are documented forward-compatibility scaffolding |
+| `logger.c` | ✅ | ✅ | R1: 4, R2: 1 | R1: Removed unused `Logger_LogThread`, `Logger_IsThreadStalled`, `Logger_GetThreadName`, `Logger_GetHeartbeatAge`. R2: Removed unused `AUDIO_SRC2` from g_threadNames (all 3 source threads share AUDIO_SRC) |
+| `logger.h` | ✅ | ✅ | R1: 4, R2: 1 | R1: Removed unused declarations for above 4 functions. R2: Removed unused `THREAD_AUDIO_SRC2` (all 3 audio source threads share `THREAD_AUDIO_SRC1`) |
+| `util.c` | ✅ | ✅ | R1: 2, R2: 1 | R1: Removed unused `Util_CalculateTimestamp`, `Util_CalculateFrameDuration`. R2: Removed unused `"logger.h"` include (LWSR_ASSERT is in constants.h via util.h) |
+| `util.h` | ✅ | ✅ | R1: 2, R2: 1 | R1: Removed unused declarations for above 2 functions. R2: Removed unused `"constants.h"` include |
+| `constants.h` | ✅ | ✅ | R1: 2, R2: 13 | R1: Removed unused `BYTES_PER_PIXEL_RGB24`, `CONFIG_BUFFER_SIZE`. R2: Removed 13 unused constants: `MF_UNITS_PER_MILLISECOND`, `QP_INTRA_OFFSET`, `NVENC_NUM_BUFFERS`, `AUDIO_DEVICE_ID_MAX_LEN`, `AUDIO_VOLUME_MIN`, `AUDIO_VOLUME_MAX`, `MUTEX_ACQUIRE_TIMEOUT_MS`, `EVENT_WAIT_TIMEOUT_MS`, `THREAD_JOIN_TIMEOUT_MS`, `LOG_RATE_LIMIT`, `CONTROL_WINDOW_TOP_OFFSET`, `GDIP_STROKE_OFFSET`, `OVERLAY_HIDE_SETTLE_MS`; removed duplicate `AAC_LC_PROFILE_LEVEL`/`AAC_OUTPUT_BUFFER_SIZE` definitions; added missing `constants.h` include to util.c |
+| `main.h` | ✅ | ✅ | R1: 0, R2: 4 | R1: (was app_context.h) Clean. R2: Renamed from app_context.h; removed 4 unused structs (AppContext, RecordingContext, ReplayAudioContext, ReplayVideoContext) - YAGNI scaffolding for never-implemented architecture; slimmed from 175 to 22 lines |
 
 ## Safety
 
@@ -96,7 +96,7 @@ Each file is checked against:
 |------|:--------:|:--:|--------|-------|
 | `gdiplus_api.c` | ✅ | ⬜ | 0 fixed | Clean - runtime DLL loading wrapper |
 | `gdiplus_api.h` | ✅ | ⬜ | 0 fixed | Clean - GDI+ type definitions and function table |
-| `audio_guids.h` | ✅ | ⬜ | 0 fixed | Clean - WASAPI GUIDs |
+| `audio_guids.h` | ✅ | ✅ | R1: 0, R2: 1 | R1: Clean. R2: Removed dead code - identical #ifdef/#else branches and unused DEFINE_AUDIO_GUIDS pattern; slimmed from 52 to 25 lines |
 | `nvEncodeAPI.h` | ✅ | ⬜ | 0 fixed | Clean - NVIDIA SDK vendor header (do not modify) |
 
 ## Resources

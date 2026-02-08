@@ -9,7 +9,7 @@
  */
 
 #include "util.h"
-#include "logger.h"
+#include "constants.h"  // For bitrate calculation constants
 
 // Calculate video bitrate based on quality preset
 // Uses ShadowPlay-style scaling: base bitrate scales with resolution and FPS

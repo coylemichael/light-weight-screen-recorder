@@ -39,7 +39,7 @@ One-liner purpose for each source file. If a file is doing more than this, quest
 | `logger.c` | Async file logging + heartbeat tracking |
 | `util.c` | String helpers, path utilities |
 | `constants.h` | Shared constants (buffer counts, sample rates) |
-| `app_context.h` | Shared global state declarations |
+| `main.h` | Extern declarations for globals defined in main.c |
 
 ## Safety
 

@@ -20,8 +20,7 @@ typedef enum {
     THREAD_BUFFER,
     THREAD_NVENC_OUTPUT,
     THREAD_AUDIO_MIX,
-    THREAD_AUDIO_SRC1,
-    THREAD_AUDIO_SRC2,
+    THREAD_AUDIO_SRC1,  // All source capture threads share this ID
     THREAD_WATCHDOG,
     THREAD_MAX
 } ThreadId;

@@ -93,7 +93,6 @@ void Logger_Log(const char* fmt, ...);
  * 32-bit integers overflow at ~4 billion (only 7 minutes in MF units).
  */
 #define MF_UNITS_PER_SECOND         10000000LL
-#define MF_UNITS_PER_MILLISECOND    10000LL
 
 /* ============================================================================
  * PIXEL FORMAT SIZES
@@ -168,18 +167,11 @@ void Logger_Log(const char* fmt, ...);
  * Our presets are tuned for screen recording where sharp text and UI elements
  * are important. We use lower QP values (higher quality) than typical video
  * because compression artifacts on text are very noticeable.
- * 
- * QP_INTRA_OFFSET: Keyframes (I-frames) use a slightly lower QP than
- *   predicted frames (P-frames). This gives keyframes extra quality since
- *   they're the reference point for subsequent frames. Errors in keyframes
- *   propagate to dependent frames, so higher keyframe quality improves
- *   overall video quality.
  */
 #define QP_LOW                      28      // Smaller files, some artifacts
 #define QP_MEDIUM                   24      // Good balance
 #define QP_HIGH                     20      // High quality, larger files
 #define QP_LOSSLESS                 16      // Near-lossless, very large files
-#define QP_INTRA_OFFSET             4       // Keyframe QP = QP - 4
 
 /* ============================================================================
  * BUFFER MANAGEMENT - Sample Storage and Memory
@@ -199,12 +191,6 @@ void Logger_Log(const char* fmt, ...);
  *   allocate 50% more than the minimum needed, reducing the frequency of
  *   expensive reallocations.
  * 
- * NVENC_NUM_BUFFERS: Number of buffers in NVENC's async encoding pipeline.
- *   NVIDIA recommends minimum 4 for async operation. We use 8 to provide
- *   better pipelining - while one buffer is being encoded, others can be
- *   filled with new frames. More buffers increase latency slightly but
- *   improve throughput and reduce dropped frames under load.
- * 
  * MAX_SEQ_HEADER_SIZE: Maximum size for HEVC sequence headers (VPS/SPS/PPS).
  *   These headers contain codec configuration and must be stored separately
  *   for MP4 muxing. 256 bytes is generous; typical headers are 50-100 bytes.
@@ -212,7 +198,6 @@ void Logger_Log(const char* fmt, ...);
 #define MIN_BUFFER_CAPACITY         100
 #define MAX_BUFFER_CAPACITY         100000
 #define BUFFER_CAPACITY_HEADROOM    1.5f
-#define NVENC_NUM_BUFFERS           8
 #define MAX_SEQ_HEADER_SIZE         256
 
 /* ============================================================================
@@ -233,14 +218,10 @@ void Logger_Log(const char* fmt, ...);
  *   desktop audio), we process this many samples at a time. 4096 samples
  *   is a good balance between processing overhead (fewer chunks = less
  *   overhead) and memory locality (smaller chunks = better cache usage).
- * 
- * AUDIO_DEVICE_ID_MAX_LEN: Maximum length for audio device ID strings.
- *   Windows audio device IDs can be quite long (GUIDs + path info).
  */
 #define INITIAL_AUDIO_CAPACITY          1024
 #define AUDIO_CAPACITY_GROWTH_FACTOR    2
 #define AUDIO_MIX_CHUNK_SIZE            4096
-#define AUDIO_DEVICE_ID_MAX_LEN         256
 
 /* ============================================================================
  * AUDIO FORMAT CONSTANTS - Sample Value Normalization
@@ -261,15 +242,13 @@ void Logger_Log(const char* fmt, ...);
  *   - SIGN_MASK identifies negative values (high bit set)
  *   - SIGN_EXTEND fills upper byte with 1s for negative values
  * 
- * AUDIO_VOLUME constants define the user-facing volume slider range (0-100%).
+ * AUDIO_VOLUME_DEFAULT: Default volume level (100%).
  */
 #define AUDIO_16BIT_MAX             32768.0f
 #define AUDIO_16BIT_MAX_SIGNED      32767.0f
 #define AUDIO_24BIT_MAX             8388608.0f
 #define AUDIO_24BIT_SIGN_MASK       0x800000
 #define AUDIO_24BIT_SIGN_EXTEND     0xFF000000
-#define AUDIO_VOLUME_MIN            0
-#define AUDIO_VOLUME_MAX            100
 #define AUDIO_VOLUME_DEFAULT        100
 
 /* ============================================================================
@@ -300,20 +279,6 @@ void Logger_Log(const char* fmt, ...);
  * Timeouts prevent deadlocks and ensure the program remains responsive
  * even when things go wrong. All values in milliseconds.
  * 
- * MUTEX_ACQUIRE_TIMEOUT_MS: How long to wait for a mutex/keyed mutex.
- *   Keyed mutexes coordinate GPU resource access between the capture
- *   device (writing frames) and encode device (reading frames). 100ms
- *   is long enough for any legitimate delay but short enough to detect
- *   real problems quickly.
- * 
- * EVENT_WAIT_TIMEOUT_MS: Timeout for Windows event objects.
- *   Events signal when async operations complete (e.g., encoding finished).
- *   100ms allows periodic checking without busy-waiting.
- * 
- * THREAD_JOIN_TIMEOUT_MS: How long to wait for a thread to exit during
- *   shutdown. 5 seconds is generous - if a thread hasn't exited by then,
- *   something is stuck and we should warn the user.
- * 
  * AUDIO_POLL_INTERVAL_MS: How often to check for new audio data.
  *   WASAPI provides audio in chunks; 5ms polling ensures we catch new
  *   data promptly without excessive CPU usage.
@@ -321,9 +286,6 @@ void Logger_Log(const char* fmt, ...);
  * DORMANT_THRESHOLD_MS: If no audio data arrives for this long, consider
  *   the audio device dormant (possibly muted or disconnected).
  */
-#define MUTEX_ACQUIRE_TIMEOUT_MS    100
-#define EVENT_WAIT_TIMEOUT_MS       100
-#define THREAD_JOIN_TIMEOUT_MS      5000
 #define AUDIO_POLL_INTERVAL_MS      5
 #define DORMANT_THRESHOLD_MS        100.0
 
@@ -338,10 +300,6 @@ void Logger_Log(const char* fmt, ...);
  *   operation (e.g., audio capture), stop retrying and consider it failed.
  *   Prevents infinite loops when something is fundamentally broken.
  * 
- * LOG_RATE_LIMIT: For high-frequency warnings (e.g., "frame dropped"),
- *   only log every Nth occurrence. Prevents log files from growing to
- *   gigabytes when something is persistently wrong.
- * 
  * EVICT_LOG_INTERVAL / AUDIO_EVICT_LOG_INTERVAL: When evicting old samples
  *   from buffers (normal operation in replay mode), only log occasionally.
  *   Buffer eviction happens constantly; we don't need to log every one.
@@ -354,7 +312,6 @@ void Logger_Log(const char* fmt, ...);
  *   freeing enough space to continue operation.
  */
 #define MAX_CONSECUTIVE_ERRORS      100
-#define LOG_RATE_LIMIT              100
 #define EVICT_LOG_INTERVAL          300
 #define AUDIO_EVICT_LOG_INTERVAL    500
 #define MAX_REALLOC_FAIL_LOGS       5
@@ -402,23 +359,6 @@ void Logger_Log(const char* fmt, ...);
 #define MAX_BITRATE_BPS             150000000.0
 
 /* ============================================================================
- * AAC AUDIO ENCODER
- * ============================================================================
- * 
- * AAC-LC (Low Complexity) is the most widely compatible AAC profile,
- * supported by virtually all devices and players.
- * 
- * AAC_LC_PROFILE_LEVEL: MPEG-4 Audio Object Type + Profile Level.
- *   0x29 = 41 decimal = AAC-LC at Level 2 (supports up to 48kHz stereo).
- *   This value is written to the MP4 container's audio config.
- * 
- * AAC_OUTPUT_BUFFER_SIZE: Scratch buffer for encoded AAC frames.
- *   8KB is generous; AAC frames at typical bitrates are 200-500 bytes.
- */
-#define AAC_LC_PROFILE_LEVEL        0x29
-#define AAC_OUTPUT_BUFFER_SIZE      8192
-
-/* ============================================================================
  * WASAPI AUDIO CAPTURE
  * ============================================================================
  * 
@@ -449,20 +389,10 @@ void Logger_Log(const char* fmt, ...);
  * USER INTERFACE CONSTANTS
  * ============================================================================
  * 
- * CONTROL_WINDOW_TOP_OFFSET: The floating control toolbar appears this
- *   many pixels below the top of the captured region. 80px keeps it
- *   visible but out of the way of most title bars.
- * 
- * GDIP_STROKE_OFFSET: When drawing with GDI+, lines are positioned by
- *   their center. Adding 0.5 to coordinates aligns strokes to pixel
- *   boundaries for crisp rendering.
- * 
  * BORDER_COLOR_*: RGB components of the recording indicator border.
  *   Red (220, 50, 50) is the traditional "recording" color and stands
  *   out against most content without being eye-searing.
  */
-#define CONTROL_WINDOW_TOP_OFFSET   80
-#define GDIP_STROKE_OFFSET          0.5f
 #define BORDER_COLOR_R              220
 #define BORDER_COLOR_G              50
 #define BORDER_COLOR_B              50
@@ -531,18 +461,10 @@ void Logger_Log(const char* fmt, ...);
  * 
  * SELECTION_HANDLE_SIZE: Diameter of the resize handles shown at corners
  *   and edges of a completed selection rectangle.
- * 
- * OVERLAY_HIDE_SETTLE_MS: Wait time after hiding overlay windows before
- *   capturing the screen. This allows the window manager to complete the
- *   hide animation and repaint the underlying content. Without this delay,
- *   captures may include ghosting or partially-hidden overlay elements.
- *   Note: This uses RedrawWindow + Sleep rather than just Sleep because
- *   we need to ensure the system has actually processed the hide request.
  */
 #define CONTROL_PANEL_WIDTH         730
 #define CONTROL_PANEL_HEIGHT        44
 #define CROSSHAIR_SIZE              80
 #define SELECTION_HANDLE_SIZE       10
-#define OVERLAY_HIDE_SETTLE_MS      50
 
 #endif // CONSTANTS_H
