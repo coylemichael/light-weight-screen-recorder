@@ -97,7 +97,7 @@ Each file is checked against:
 | `gdiplus_api.c` | ✅ | ✅ | R1: 0, R2: 1 | R1: Clean - runtime DLL loading wrapper. R2: Removed unused `<stdio.h>` |
 | `gdiplus_api.h` | ✅ | ✅ | R1: 0, R2: 4 | R1: Clean - GDI+ type definitions and function table. R2: Removed 4 unused function pointer types and struct members: `fn_GdipAddPathLine`/`AddPathLine`, `fn_GdipStartPathFigure`/`StartPathFigure`, `fn_GdipFillRectangle`/`FillRectangle`, `fn_GdipDrawRectangle`/`DrawRectangle` |
 | `audio_guids.h` | ✅ | ✅ | R1: 0, R2: 1 | R1: Clean. R2: Removed dead code - identical #ifdef/#else branches and unused DEFINE_AUDIO_GUIDS pattern; slimmed from 52 to 25 lines |
-| `nvEncodeAPI.h` | ✅ | ⬜ | 0 fixed | Clean - NVIDIA SDK vendor header (do not modify) |
+| `nvEncodeAPI.h` | ✅ | ✅ | R1: 0, R2: 0 | R1: Clean - NVIDIA SDK vendor header (do not modify). R2: Verified - 4664-line NVIDIA SDK header with MIT license, not project code |
 
 ## Resources
 
