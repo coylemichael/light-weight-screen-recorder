@@ -1,5 +1,45 @@
 # Changelog
 
+## [1.3.8] - 2026-02-08
+
+### R2 Code Review Complete
+Second-pass systematic review of all 46 source files against CODING_BEST_PRACTICE.md.
+
+**Summary:** 70+ issues fixed across R1 and R2 passes. Codebase reduced by ~15-20% dead weight.
+
+### Removed (R2 - unused includes)
+- `<stdio.h>` from gdiplus_api.c
+- `<mferror.h>` from encoder.c, mp4_muxer.c
+- `<d3d11_1.h>` from gpu_converter.h
+- `<string.h>` from leak_tracker.c
+- `"config.h"` from leak_tracker.c (redundant - via leak_tracker.h → main.h)
+- `"logger.h"` from util.c
+- `"constants.h"` from util.h
+
+### Removed (R2 - unused functions/declarations)
+- `NVENCEncoder_IsAvailable`, `NVENCEncoder_ForceCleanupLeaked` from nvenc_encoder.h
+- `Overlay_SetMode`, `Overlay_GetSelectedRegion`, `Overlay_SetRecordingState`, `Recording_Start`, `Recording_Stop` from overlay.h (made static in .c)
+- `Config_GetPath` declaration (made static in config.c)
+- 4 GDI+ function pointers from gdiplus_api.h: `AddPathLine`, `StartPathFigure`, `FillRectangle`, `DrawRectangle`
+
+### Removed (R2 - unused constants/fields)
+- `capturing` field from CaptureState struct
+- `REPLAY_STATE_SAVING`, `REPLAY_STATE_RECOVERING` enum values
+- `THREAD_AUDIO_SRC2` (all 3 audio source threads share `THREAD_AUDIO_SRC1`)
+- 13 constants from constants.h: `MF_UNITS_PER_MILLISECOND`, `QP_INTRA_OFFSET`, `NVENC_NUM_BUFFERS`, `AUDIO_DEVICE_ID_MAX_LEN`, `AUDIO_VOLUME_MIN/MAX`, `MUTEX_ACQUIRE_TIMEOUT_MS`, `EVENT_WAIT_TIMEOUT_MS`, `THREAD_JOIN_TIMEOUT_MS`, `LOG_RATE_LIMIT`, `CONTROL_WINDOW_TOP_OFFSET`, `GDIP_STROKE_OFFSET`, `OVERLAY_HIDE_SETTLE_MS`
+
+### Removed (R2 - dead code)
+- `ALLOW_TERMINATE_THREAD` code block (~50 lines) from replay_buffer.c - TerminateThread approach doesn't work for NVENC
+- Duplicate `AAC_LC_PROFILE_LEVEL`/`AAC_OUTPUT_BUFFER_SIZE` definitions
+
+### Fixed (R2 - resource leaks)
+- Wired `Overlay_Destroy()` into main.c cleanup (was never called - leaked tray icon, windows)
+- Wired `AudioCapture_Shutdown()` into main.c (was leaking g_audioEnumerator)
+- Wired `AudioDevice_Shutdown()` into main.c cleanup
+
+### Changed (R2 - documentation)
+- Updated docstrings in border.c, border.h, audio_device.c to match FILE_MANIFEST.md
+
 ## [1.3.7] - 2026-02-08
 
 ### Removed (R2 code review - leak_tracker.h)
