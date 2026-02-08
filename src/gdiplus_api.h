@@ -74,14 +74,10 @@ typedef GpStatus (WINAPI *fn_GdipDeletePen)(GpPen*);
 typedef GpStatus (WINAPI *fn_GdipCreatePath)(int, GpPath**);
 typedef GpStatus (WINAPI *fn_GdipDeletePath)(GpPath*);
 typedef GpStatus (WINAPI *fn_GdipAddPathArc)(GpPath*, REAL, REAL, REAL, REAL, REAL, REAL);
-typedef GpStatus (WINAPI *fn_GdipAddPathLine)(GpPath*, REAL, REAL, REAL, REAL);
 typedef GpStatus (WINAPI *fn_GdipClosePathFigure)(GpPath*);
-typedef GpStatus (WINAPI *fn_GdipStartPathFigure)(GpPath*);
 
 /* Drawing */
-typedef GpStatus (WINAPI *fn_GdipFillRectangle)(GpGraphics*, GpBrush*, REAL, REAL, REAL, REAL);
 typedef GpStatus (WINAPI *fn_GdipFillEllipse)(GpGraphics*, GpBrush*, REAL, REAL, REAL, REAL);
-typedef GpStatus (WINAPI *fn_GdipDrawRectangle)(GpGraphics*, GpPen*, REAL, REAL, REAL, REAL);
 typedef GpStatus (WINAPI *fn_GdipFillPath)(GpGraphics*, GpBrush*, GpPath*);
 typedef GpStatus (WINAPI *fn_GdipDrawPath)(GpGraphics*, GpPen*, GpPath*);
 
@@ -131,14 +127,10 @@ typedef struct GdiplusFunctions {
     fn_GdipCreatePath               CreatePath;
     fn_GdipDeletePath               DeletePath;
     fn_GdipAddPathArc               AddPathArc;
-    fn_GdipAddPathLine              AddPathLine;
     fn_GdipClosePathFigure          ClosePathFigure;
-    fn_GdipStartPathFigure          StartPathFigure;
     
     /* Drawing */
-    fn_GdipFillRectangle            FillRectangle;
     fn_GdipFillEllipse              FillEllipse;
-    fn_GdipDrawRectangle            DrawRectangle;
     fn_GdipFillPath                 FillPath;
     fn_GdipDrawPath                 DrawPath;
     

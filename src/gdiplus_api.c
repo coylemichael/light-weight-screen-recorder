@@ -7,7 +7,6 @@
 
 #include "gdiplus_api.h"
 #include "logger.h"
-#include <stdio.h>
 
 /* Global shared GDI+ instance */
 GdiplusFunctions g_gdip = {0};
@@ -57,10 +56,7 @@ BOOL GdiplusAPI_Init(GdiplusFunctions* gdi) {
     LOAD_GDIP_FUNC(CreatePath);
     LOAD_GDIP_FUNC(DeletePath);
     LOAD_GDIP_FUNC(AddPathArc);
-    LOAD_GDIP_FUNC(AddPathLine);
     LOAD_GDIP_FUNC(ClosePathFigure);
-    LOAD_GDIP_FUNC(StartPathFigure);
-    LOAD_GDIP_FUNC(FillRectangle);
     LOAD_GDIP_FUNC(FillEllipse);
     LOAD_GDIP_FUNC(FillPath);
     LOAD_GDIP_FUNC(DrawPath);
@@ -77,8 +73,6 @@ BOOL GdiplusAPI_Init(GdiplusFunctions* gdi) {
     /* These have slightly different names - load manually */
     gdi->SetTextRenderingHint = (fn_GdipSetTextRenderingHint)GetProcAddress(gdi->module, "GdipSetTextRenderingHint");
     if (!gdi->SetTextRenderingHint) { Logger_Log("GDI+: Failed to load GdipSetTextRenderingHint\n"); failed = TRUE; }
-    gdi->DrawRectangle = (fn_GdipDrawRectangle)GetProcAddress(gdi->module, "GdipDrawRectangle");
-    if (!gdi->DrawRectangle) { Logger_Log("GDI+: Failed to load GdipDrawRectangle\n"); failed = TRUE; }
     gdi->CreatePen1 = (fn_GdipCreatePen1)GetProcAddress(gdi->module, "GdipCreatePen1");
     if (!gdi->CreatePen1) { Logger_Log("GDI+: Failed to load GdipCreatePen1\n"); failed = TRUE; }
     

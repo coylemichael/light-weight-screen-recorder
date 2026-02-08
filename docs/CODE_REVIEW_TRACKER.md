@@ -88,14 +88,14 @@ Each file is checked against:
 | `leak_tracker.c` | ✅ | ✅ | R1: 2, R2: 2 | R1: Removed unused `LeakTracker_Reset`, `LeakTracker_HasPotentialLeak`. R2: Removed unused `<string.h>`, redundant `"config.h"` (already via leak_tracker.h → main.h) |
 | `leak_tracker.h` | ✅ | ✅ | R1: 2, R2: 1 | R1: Removed unused declarations for above functions. R2: Removed redundant `<windows.h>` (already included via main.h) |
 | `crash_handler.c` | ✅ | ✅ | R1: 0, R2: 0 | R1: Clean - unused `CrashHandler_ForceCrash` is debug/test utility. R2: Clean - all includes used, all functions called, proper volatile LONG + Interlocked patterns |
-| `crash_handler.h` | ✅ | ⬜ | 0 fixed | Clean |
+| `crash_handler.h` | ✅ | ✅ | R1: 0, R2: 0 | R1: Clean. R2: Clean - no includes needed (void-returning prototypes only), docstring aligns with manifest, all functions called from main.c except `CrashHandler_ForceCrash` (debug utility, kept per R1) |
 
 ## External / Vendor
 
 | File | Reviewed | R2 | Issues | Notes |
 |------|:--------:|:--:|--------|-------|
-| `gdiplus_api.c` | ✅ | ⬜ | 0 fixed | Clean - runtime DLL loading wrapper |
-| `gdiplus_api.h` | ✅ | ⬜ | 0 fixed | Clean - GDI+ type definitions and function table |
+| `gdiplus_api.c` | ✅ | ✅ | R1: 0, R2: 1 | R1: Clean - runtime DLL loading wrapper. R2: Removed unused `<stdio.h>` |
+| `gdiplus_api.h` | ✅ | ✅ | R1: 0, R2: 4 | R1: Clean - GDI+ type definitions and function table. R2: Removed 4 unused function pointer types and struct members: `fn_GdipAddPathLine`/`AddPathLine`, `fn_GdipStartPathFigure`/`StartPathFigure`, `fn_GdipFillRectangle`/`FillRectangle`, `fn_GdipDrawRectangle`/`DrawRectangle` |
 | `audio_guids.h` | ✅ | ✅ | R1: 0, R2: 1 | R1: Clean. R2: Removed dead code - identical #ifdef/#else branches and unused DEFINE_AUDIO_GUIDS pattern; slimmed from 52 to 25 lines |
 | `nvEncodeAPI.h` | ✅ | ⬜ | 0 fixed | Clean - NVIDIA SDK vendor header (do not modify) |
 
