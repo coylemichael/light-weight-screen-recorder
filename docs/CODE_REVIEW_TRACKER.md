@@ -101,9 +101,9 @@ Each file is checked against:
 
 ## Resources
 
-| File | Reviewed | Issues | Notes |
-|------|:--------:|--------|-------|
-| `lwsr.rc` | ⬜ | - | Windows resource file (icon, manifest, version) |
+| File | Reviewed | R2 | Issues | Notes |
+|------|:--------:|:--:|--------|-------|
+| `lwsr.rc` | ✅ | ✅ | R1: 0, R2: 0 | R1: Clean - Windows resource file (icon, version info). R2: Clean - `<winver.h>` required for VS_VERSION_INFO macros, icon path valid, not code so excluded from FILE_MANIFEST |
 
 ---
 
@@ -119,7 +119,8 @@ Each file is checked against:
 ## Progress Summary
 
 - **Total files:** 46
-- **Reviewed:** 45
-- **Compliant:** 45
+- **Reviewed:** 46
+- **R2 Reviewed:** 46
+- **Compliant:** 46
 - **Has issues:** 0
-- **Remaining:** 1 (`lwsr.rc`)
+- **Remaining:** 0 ✅
