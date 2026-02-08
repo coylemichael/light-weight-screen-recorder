@@ -26,7 +26,6 @@
 
 #include "mem_utils.h"
 #include "logger.h"
-#include <stdio.h>
 #include <string.h>
 
 /* ============================================================================
@@ -81,8 +80,6 @@ void MemDebug_Init(void) {
     /* Thread-safe initialization using atomic compare-exchange */
     if (InterlockedCompareExchange(&g_initialized, FALSE, FALSE)) return;
     
-    /* Use a static INIT_ONCE to ensure single initialization */
-    static INIT_ONCE s_initOnce = INIT_ONCE_STATIC_INIT;
     static volatile LONG s_initStarted = FALSE;
     
     /* Prevent multiple threads from initializing simultaneously */

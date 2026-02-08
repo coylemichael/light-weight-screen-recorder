@@ -83,7 +83,7 @@ Each file is checked against:
 
 | File | Reviewed | R2 | Issues | Notes |
 |------|:--------:|:--:|--------|-------|
-| `mem_utils.c` | ✅ | ⬜ | 0 fixed | Clean - optional debug code under LWSR_DEBUG_MEMORY |
+| `mem_utils.c` | ✅ | ✅ | R1: 0, R2: 2 | R1: Clean - optional debug code under LWSR_DEBUG_MEMORY. R2: Removed unused `<stdio.h>`, removed unused `s_initOnce` variable (dead code - implementation uses `s_initStarted` instead) |
 | `mem_utils.h` | ✅ | ⬜ | 0 fixed | Clean - unused macros (CHECK_ALLOC, MF_LOCK_BUFFER etc) are documented utility patterns |
 | `leak_tracker.c` | ✅ | ⬜ | 2 fixed | Removed unused `LeakTracker_Reset`, `LeakTracker_HasPotentialLeak` |
 | `leak_tracker.h` | ✅ | ⬜ | 2 fixed | Removed unused declarations for above functions |
