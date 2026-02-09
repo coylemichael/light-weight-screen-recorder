@@ -172,3 +172,64 @@ if (!ptr) return FALSE;     // Release builds too
 6. **Missing Lock() error check** → Always check before using buffer
 7. **Leaking COM activates array** → Free even when count is 0
 8. **NVENC session leak** → Always destroy encoder on all exit paths
+---
+
+# Lessons Learned (R1/R2 Code Review)
+
+Real bugs discovered during systematic review of all 46 source files.
+
+## Bugs That Shipped
+
+| Bug | Version | Fix |
+|-----|---------|-----|
+| `Overlay_Destroy()` never called | v1.3.3 | Wire all `*_Destroy()` into main.c cleanup |
+| Wall-clock timestamps → VFR stutter | v1.3.2 | Use synthetic: `frameNum × interval` for CFR |
+| D3D11 device A + NVENC device B = deadlock | v1.3.0 | Use CUDA path for NVENC, not mixed D3D11 |
+| `Lock()` HRESULT ignored | v1.2.18 | Check hr, track `locked` flag for cleanup |
+| `GetProcAddress()` unchecked | v1.2.15 | Null-check every dynamic load |
+| Field named `DeleteBrush` | v1.2.11 | Avoid Windows macro names (wingdi.h) |
+| `CreateMutex` race | v1.2.15 | Check `ERROR_ALREADY_EXISTS` |
+| Division by zero | v1.2.15 | Guard all divisions, even "impossible" ones |
+| GDI+ not shutdown on early fail | v1.2.15 | Each init failure must cleanup prior inits |
+| 500-line functions | v1.2.12 | Max 100 lines; extract helpers |
+
+## Code Patterns (IMFMediaBuffer, Mutex, CFR)
+
+```c
+// IMFMediaBuffer Lock/Unlock - track locked state
+BYTE* pData = NULL;
+BOOL locked = FALSE;
+hr = buffer->Lock(&pData, NULL, NULL);
+if (FAILED(hr) || !pData) goto cleanup;
+locked = TRUE;
+// ...
+cleanup:
+    if (locked) buffer->Unlock();
+
+// Single-instance mutex - check for existing
+HANDLE mutex = CreateMutexA(NULL, TRUE, "MyAppMutex");
+if (GetLastError() == ERROR_ALREADY_EXISTS) { CloseHandle(mutex); return 0; }
+
+// CFR timestamps - synthetic, not wall-clock (v1.3.2 bug)
+// Wall-clock captures jitter (4-20ms gaps) → VFR → player stutter
+timestamp = frameNumber * frameInterval;  // NOT QueryPerformanceCounter
+```
+
+## Review Statistics (46 files audited)
+
+| Finding | Count | Example |
+|---------|-------|---------|
+| Unused `<stdio.h>` | 10+ | Use `Logger_Log()` instead |
+| Unused functions | 20+ | Grep for callers before shipping |
+| Unused constants | 15+ | constants.h had 13 dead |
+| Docstring drift | 6+ | Compare to FILE_MANIFEST.md |
+| Internal fn in .h | 4+ | Make `static`, remove from header |
+| Identical `#ifdef`/`#else` | 2 | Copy-paste error |
+| Duplicate `#define` | 2 | AAC constants defined twice |
+| Dead `TerminateThread` code | 50 lines | Doesn't release GPU/COM resources |
+
+## YAGNI Scaffolding Signals
+
+Delete if you see: structs with no instances, enums with unused values, "not implemented" stubs, `#if 0` blocks, `#ifdef FUTURE_FEATURE`, identical `#ifdef`/`#else` branches.
+
+Example: main.h had 4 unused "future architecture" structs (175→22 lines after cleanup).

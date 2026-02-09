@@ -2,6 +2,12 @@
 
 Lightweight screen recorder for Windows with instant replay and audio capture. Buffer as much as your RAM allows and save replays instantly. Supports 8K, super ultrawide (32:9), and multi-monitor setups. Requires an NVIDIA GPU.
 
+> *Lighter than a GIF, faster than ShadowPlay.*
+> 
+> *The entire app is smaller than one frame of uncompressed video.*
+> 
+> *2000x smaller than Medal. Better hardware encoding.*
+
 ## Quick Start
 
 1. Download the [latest release](https://github.com/coylemichael/light-weight-screen-recorder/releases/latest) and run `lwsr.exe`
