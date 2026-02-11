@@ -9,11 +9,12 @@ One-liner purpose for each source file. If a file is doing more than this, quest
 | `main.c` | Entry point, instance mutex, window creation, message loop |
 | `capture.c` | DXGI Desktop Duplication - acquire frames from desktop |
 | `encoder.c` | Media Foundation H.264/HEVC/WMV sink writer for traditional recording |
+| `recording.c` | Traditional recording lifecycle (thread, start/stop, state machine) |
 | `gpu_converter.c` | D3D11 Video Processor BGRA→NV12 conversion (zero-copy GPU path) |
 | `nvenc_encoder.c` | CUDA-based NVENC HEVC encoding |
 | `frame_buffer.c` | Circular buffer of encoded video samples |
 | `mp4_muxer.c` | Media Foundation IMFSinkWriter - passthrough mux to MP4 |
-| `replay_buffer.c` | Orchestrates capture→encode→buffer→save pipeline |
+| `replay_buffer.c` | Orchestrates capture→encode→buffer→save pipeline (replay mode) |
 
 ## Audio
 

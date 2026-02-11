@@ -22,8 +22,7 @@ typedef enum {
     MODE_NONE = 0,    // No mode selected (initial state)
     MODE_AREA,
     MODE_WINDOW,
-    MODE_MONITOR,
-    MODE_ALL_MONITORS
+    MODE_MONITOR
 } CaptureMode;
 
 // Quality presets

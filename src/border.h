@@ -1,6 +1,6 @@
 /*
  * Screen region selection border
- * Provides red recording border, preview border, and draggable area selector
+ * Provides red recording border and draggable area selector
  */
 
 #ifndef BORDER_H
@@ -22,11 +22,6 @@ void Border_Show(RECT captureRect);
 
 // Hide the border
 void Border_Hide(void);
-
-// Preview border for settings window
-BOOL PreviewBorder_Init(HINSTANCE hInstance);
-void PreviewBorder_Shutdown(void);
-void PreviewBorder_Hide(void);
 
 // Draggable area selection for custom area mode
 BOOL AreaSelector_Init(HINSTANCE hInstance);

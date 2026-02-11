@@ -243,6 +243,7 @@ void Logger_Log(const char* fmt, ...);
  *   - SIGN_EXTEND fills upper byte with 1s for negative values
  * 
  * AUDIO_VOLUME_DEFAULT: Default volume level (100%).
+ * AUDIO_VOLUME_MAX: Maximum volume level (400% = 4x boost for quiet sources).
  */
 #define AUDIO_16BIT_MAX             32768.0f
 #define AUDIO_16BIT_MAX_SIGNED      32767.0f
@@ -250,6 +251,7 @@ void Logger_Log(const char* fmt, ...);
 #define AUDIO_24BIT_SIGN_MASK       0x800000
 #define AUDIO_24BIT_SIGN_EXTEND     0xFF000000
 #define AUDIO_VOLUME_DEFAULT        100
+#define AUDIO_VOLUME_MAX            400
 
 /* ============================================================================
  * REPLAY BUFFER CONFIGURATION
@@ -450,21 +452,34 @@ void Logger_Log(const char* fmt, ...);
  * OVERLAY UI CONSTANTS
  * ============================================================================
  * 
- * Layout and timing constants for the overlay selection UI.
- * 
- * CONTROL_PANEL_WIDTH/HEIGHT: Dimensions of the floating control toolbar.
- *   730px width accommodates capture mode buttons + icon buttons.
- *   44px height is compact but touch-friendly.
- * 
- * CROSSHAIR_SIZE: Size of the dimension indicator that follows the cursor
- *   during area selection. Shows current width x height.
- * 
- * SELECTION_HANDLE_SIZE: Diameter of the resize handles shown at corners
- *   and edges of a completed selection rectangle.
+ * Layout constants for the overlay selection UI control panel.
+ * All dimensions in pixels. Modify these to adjust the toolbar appearance.
  */
-#define CONTROL_PANEL_WIDTH         730
-#define CONTROL_PANEL_HEIGHT        44
-#define CROSSHAIR_SIZE              80
-#define SELECTION_HANDLE_SIZE       10
+
+/* Control panel button dimensions */
+#define CAPTURE_BTN_WIDTH           130     /* Width of capture mode buttons */
+#define CAPTURE_BTN_HEIGHT          30      /* Height of capture mode buttons */
+#define CAPTURE_BTN_GAP             4       /* Gap between capture buttons */
+#define CAPTURE_BTN_COUNT           3       /* Number of capture mode buttons */
+
+/* Icon button dimensions (Settings, Minimize, Record, Close) */
+#define ICON_BTN_SIZE               28      /* Square icon buttons */
+#define ICON_BTN_GAP                4       /* Gap between icon buttons */
+#define ICON_BTN_COUNT              4       /* Number of icon buttons */
+
+/* Control panel layout */
+#define CONTROL_PANEL_PADDING       8       /* Left/right padding */
+#define CONTROL_PANEL_HEIGHT        44      /* Panel height (touch-friendly) */
+
+/* Calculated control panel width:
+ * padding + (btn_width * btn_count) + (btn_gap * (btn_count-1)) + gap + 
+ * (icon_size * icon_count) + (icon_gap * (icon_count-1)) + padding
+ * = 8 + (130*3) + (4*2) + 16 + (28*4) + (4*3) + 8 = 596
+ */
+#define CONTROL_PANEL_WIDTH         596
+
+/* Other overlay UI constants */
+#define CROSSHAIR_SIZE              80      /* Dimension indicator size */
+#define SELECTION_HANDLE_SIZE       10      /* Resize handle diameter */
 
 #endif // CONSTANTS_H

@@ -50,9 +50,6 @@ BOOL Capture_SetRegion(CaptureState* state, RECT region);
 // Set to capture specific monitor
 BOOL Capture_SetMonitor(CaptureState* state, int monitorIndex);
 
-// Set to capture all monitors
-BOOL Capture_SetAllMonitors(CaptureState* state);
-
 // Get a frame (returns pointer to RGB data)
 BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp);
 

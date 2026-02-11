@@ -476,7 +476,7 @@ int ReplayBuffer_EstimateRAMUsage(int durationSec, int w, int h, int fps, Qualit
 
 /**
  * Initialize capture region based on replay buffer configuration.
- * Sets up monitor bounds or all-monitors capture as configured.
+ * Sets up monitor bounds as configured.
  * 
  * @param state    Replay buffer state with capture source config
  * @param capture  Capture state to configure
@@ -486,16 +486,12 @@ int ReplayBuffer_EstimateRAMUsage(int durationSec, int w, int h, int fps, Qualit
 static BOOL InitCaptureRegion(ReplayBufferState* state, CaptureState* capture, RECT* outRect) {
     SetRectEmpty(outRect);
     
-    if (state->captureSource == MODE_ALL_MONITORS) {
-        Capture_GetAllMonitorsBounds(outRect);
-        Capture_SetAllMonitors(capture);
-    } else {
-        if (!Capture_GetMonitorBoundsByIndex(state->monitorIndex, outRect)) {
-            POINT pt = {0, 0};
-            Capture_GetMonitorFromPoint(pt, outRect, NULL);
-        }
-        Capture_SetMonitor(capture, state->monitorIndex);
+    // Configure monitor capture
+    if (!Capture_GetMonitorBoundsByIndex(state->monitorIndex, outRect)) {
+        POINT pt = {0, 0};
+        Capture_GetMonitorFromPoint(pt, outRect, NULL);
     }
+    Capture_SetMonitor(capture, state->monitorIndex);
     
     return !IsRectEmpty(outRect);
 }

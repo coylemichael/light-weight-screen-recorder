@@ -1,5 +1,22 @@
 # Changelog
 
+## [1.3.9] - 2026-02-11
+
+### Added
+- **Audio volume boost support** - Volume settings now allow 0-400% (up to 4x gain) for quiet sources like microphones
+- Added `AUDIO_VOLUME_MAX` constant (400) in constants.h
+
+### Changed
+- Config validation now uses `AUDIO_VOLUME_MAX` instead of hardcoded 100
+
+### Planned (FEATURE_PLANS.md)
+- **Error Notifications** (new section #9) - Configurable popup/audio notifications when audio or video capture fails
+  - Draggable notification positioning with test button
+  - Windows sounds or custom audio file support
+  - Auto-dismiss with configurable timeout
+  - 30-second cooldown per device to prevent spam
+- Added error notifications reference to Settings Pane Reorganization (General tab)
+
 ## [1.3.8] - 2026-02-08
 
 ### R2 Code Review Complete

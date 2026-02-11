@@ -193,11 +193,11 @@ void Config_Load(AppConfig* config) {
             config->replayFPS != 120 && config->replayFPS != 240)
             config->replayFPS = DEFAULT_FPS;
         if (config->audioVolume1 < 0) config->audioVolume1 = 0;
-        if (config->audioVolume1 > 100) config->audioVolume1 = 100;
+        if (config->audioVolume1 > AUDIO_VOLUME_MAX) config->audioVolume1 = AUDIO_VOLUME_MAX;
         if (config->audioVolume2 < 0) config->audioVolume2 = 0;
-        if (config->audioVolume2 > 100) config->audioVolume2 = 100;
+        if (config->audioVolume2 > AUDIO_VOLUME_MAX) config->audioVolume2 = AUDIO_VOLUME_MAX;
         if (config->audioVolume3 < 0) config->audioVolume3 = 0;
-        if (config->audioVolume3 > 100) config->audioVolume3 = 100;
+        if (config->audioVolume3 > AUDIO_VOLUME_MAX) config->audioVolume3 = AUDIO_VOLUME_MAX;
     }
     
     // Ensure save directory exists (ignore ERROR_ALREADY_EXISTS)

@@ -386,19 +386,6 @@ BOOL Capture_SetMonitor(CaptureState* state, int monitorIndex) {
     return FALSE;
 }
 
-BOOL Capture_SetAllMonitors(CaptureState* state) {
-    // Precondition
-    LWSR_ASSERT(state != NULL);
-    
-    if (!state) return FALSE;
-    
-    RECT bounds;
-    if (Capture_GetAllMonitorsBounds(&bounds)) {
-        return Capture_SetRegion(state, bounds);
-    }
-    return FALSE;
-}
-
 BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
     // Precondition
     LWSR_ASSERT(state != NULL);

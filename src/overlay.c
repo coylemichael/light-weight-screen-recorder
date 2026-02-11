@@ -14,7 +14,6 @@
 #include <windowsx.h>
 #include <commctrl.h>
 #include <shlobj.h>
-#include <shellapi.h>   // For system tray (Shell_NotifyIcon)
 #include <dwmapi.h>
 #include <mmsystem.h>  // For timeBeginPeriod/timeEndPeriod
 #include <stdio.h>
@@ -40,11 +39,14 @@ typedef void* GpImage;
 
 #include "overlay.h"
 #include "encoder.h"
+#include "recording.h"
 #include "config.h"
 #include "replay_buffer.h"
 #include "aac_encoder.h"
 #include "logger.h"
 #include "constants.h"
+#include "ui_draw.h"
+#include "tray_icon.h"
 
 
 #pragma comment(lib, "comctl32.lib")
@@ -69,7 +71,6 @@ extern HWND g_controlWnd;
 #define ID_MODE_AREA       1001
 #define ID_MODE_WINDOW     1002
 #define ID_MODE_MONITOR    1003
-#define ID_MODE_ALL        1004
 #define ID_BTN_CLOSE       1005
 #define ID_BTN_STOP        1006
 #define ID_BTN_MINIMIZE    1020
@@ -131,8 +132,7 @@ extern HWND g_controlWnd;
 #define ID_ACTION_SAVE     3003
 #define ID_ACTION_MARKUP   3004
 
-// System tray
-#define WM_TRAYICON        (WM_USER + 100)
+// System tray menu IDs (WM_TRAYICON is defined in tray_icon.h)
 #define ID_TRAY_SHOW       6001
 #define ID_TRAY_EXIT       6002
 
@@ -175,16 +175,12 @@ typedef struct SelectionUIState {
 } SelectionUIState;
 
 /*
- * RecordingUIState - Recording thread and timing state
- * Note: stopRecording is atomic for thread-safe access
+ * RecordingUIContext - UI-specific recording state (mode button tracking)
+ * The actual recording lifecycle is managed by RecordingState (recording.h)
  */
-typedef struct RecordingUIState {
-    EncoderState encoder;           /* Traditional recording encoder */
-    HANDLE thread;                  /* Recording thread handle */
-    volatile LONG stopRecording;    /* Thread Access: [Any - atomic] */
-    ULONGLONG startTime;            /* Recording start time (64-bit) */
-    CaptureMode recordingMode;      /* Mode that started recording */
-} RecordingUIState;
+typedef struct RecordingUIContext {
+    CaptureMode recordingMode;      /* Which mode started recording (for UI) */
+} RecordingUIContext;
 
 /*
  * OverlayWindowState - Window handles for overlay UI
@@ -195,14 +191,6 @@ typedef struct OverlayWindowState {
     HWND crosshairWnd;
     HWND recordingPanel;            /* Inline timer + stop in control bar */
 } OverlayWindowState;
-
-/*
- * TrayIconState - System tray icon state
- */
-typedef struct TrayIconState {
-    BOOL minimizedToTray;
-    NOTIFYICONDATAA iconData;
-} TrayIconState;
 
 /*
  * InteractionState - UI interaction tracking
@@ -216,9 +204,9 @@ typedef struct InteractionState {
 
 /* Static instances of consolidated state */
 static SelectionUIState g_selection = {0};
-static RecordingUIState g_recording = {0};
+static RecordingUIContext g_recordingUI = {0};  /* UI state only */
+static RecordingState g_recording = {0};        /* Lifecycle (from recording.h) */
 static OverlayWindowState g_windows = {0};
-static TrayIconState g_tray = {0};
 static InteractionState g_interaction = {0};
 
 /* Current capture mode selection (simple enough to leave as scalar) */
@@ -227,13 +215,10 @@ static CaptureMode g_currentMode = MODE_NONE;
 /* Use SELECTION_HANDLE_SIZE from constants.h instead of local define */
 #define HANDLE_SIZE SELECTION_HANDLE_SIZE
 
-/* Recording thread */
-static DWORD WINAPI RecordingThread(LPVOID param);
-
-/* Internal recording/overlay state functions */
+/* Internal overlay state functions */
 static void Overlay_SetMode(CaptureMode mode);
-static void Recording_Start(void);
-static void Recording_Stop(void);
+static void Overlay_StartRecording(void);  /* Wrapper that calls Recording_Start + updates UI */
+static void Overlay_StopRecording(void);   /* Wrapper that calls Recording_Stop + updates UI */
 static void Overlay_SetRecordingState(BOOL isRecording);
 
 /* Window procedures */
@@ -246,12 +231,6 @@ static LRESULT CALLBACK CrosshairWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPA
 static HandlePosition HitTestHandle(POINT pt);
 static void UpdateTimerDisplay(void);
 static void ShowActionToolbar(BOOL show);
-
-// System tray functions
-static void AddTrayIcon(void);
-static void RemoveTrayIcon(void);
-static void MinimizeToTray(void);
-static void RestoreFromTray(void);
 
 // Action toolbar callbacks
 static void ActionToolbar_OnMinimize(void);
@@ -296,94 +275,6 @@ static void CheckAudioError(void) {
     
     Logger_Log("Audio encoder error displayed to user: %d\n", (int)err);
     MessageBoxA(NULL, msg, "Audio Error", MB_OK | MB_ICONWARNING);
-}
-
-// Convert COLORREF to ARGB for GDI+
-static DWORD ColorRefToARGB(COLORREF cr, BYTE alpha) {
-    return ((DWORD)alpha << 24) | 
-           ((DWORD)GetRValue(cr) << 16) | 
-           ((DWORD)GetGValue(cr) << 8) | 
-           (DWORD)GetBValue(cr);
-}
-
-// Draw anti-aliased filled rounded rectangle
-static void DrawRoundedRectAA(HDC hdc, RECT* rect, int radius, COLORREF fillColor, COLORREF borderColor) {
-    if (!g_gdip.CreateFromHDC) return;
-    
-    GpGraphics* graphics = NULL;
-    if (g_gdip.CreateFromHDC(hdc, &graphics) != 0) return;
-    
-    g_gdip.SetSmoothingMode(graphics, SmoothingModeAntiAlias);
-    
-    // Inset by 0.5 to ensure border is fully visible (GDI+ draws strokes centered on path)
-    float x = (float)rect->left + 0.5f;
-    float y = (float)rect->top + 0.5f;
-    float w = (float)(rect->right - rect->left) - 1.0f;
-    float h = (float)(rect->bottom - rect->top) - 1.0f;
-    float r = (float)radius;
-    float d = r * 2.0f;
-    
-    // Create rounded rectangle path
-    GpPath* path = NULL;
-    g_gdip.CreatePath(FillModeAlternate, &path);
-    
-    // Top-left arc
-    g_gdip.AddPathArc(path, x, y, d, d, 180.0f, 90.0f);
-    // Top-right arc
-    g_gdip.AddPathArc(path, x + w - d, y, d, d, 270.0f, 90.0f);
-    // Bottom-right arc
-    g_gdip.AddPathArc(path, x + w - d, y + h - d, d, d, 0.0f, 90.0f);
-    // Bottom-left arc
-    g_gdip.AddPathArc(path, x, y + h - d, d, d, 90.0f, 90.0f);
-    g_gdip.ClosePathFigure(path);
-    
-    // Fill
-    GpSolidFill* brush = NULL;
-    g_gdip.CreateSolidFill(ColorRefToARGB(fillColor, 255), &brush);
-    g_gdip.FillPath(graphics, brush, path);
-    g_gdip.BrushDelete(brush);
-    
-    // Border
-    GpPen* pen = NULL;
-    g_gdip.CreatePen1(ColorRefToARGB(borderColor, 255), 1.0f, UnitPixel, &pen);
-    g_gdip.DrawPath(graphics, pen, path);
-    g_gdip.PenDelete(pen);
-    
-    g_gdip.DeletePath(path);
-    g_gdip.DeleteGraphics(graphics);
-}
-
-// Draw anti-aliased filled circle
-static void DrawCircleAA(HDC hdc, int cx, int cy, int radius, COLORREF color) {
-    if (!g_gdip.CreateFromHDC) return;
-    
-    GpGraphics* graphics = NULL;
-    if (g_gdip.CreateFromHDC(hdc, &graphics) != 0) return;
-    
-    g_gdip.SetSmoothingMode(graphics, SmoothingModeAntiAlias);
-    
-    GpSolidFill* brush = NULL;
-    g_gdip.CreateSolidFill(ColorRefToARGB(color, 255), &brush);
-    g_gdip.FillEllipse(graphics, brush, 
-                    (float)(cx - radius), (float)(cy - radius), 
-                    (float)(radius * 2), (float)(radius * 2));
-    g_gdip.BrushDelete(brush);
-    g_gdip.DeleteGraphics(graphics);
-}
-
-// Apply smooth rounded corners using DWM (Windows 11+)
-static void ApplyRoundedCorners(HWND hwnd) {
-    DWORD pref = 2;  // DWMWCP_ROUND
-    DwmSetWindowAttribute(hwnd, DWMWA_WINDOW_CORNER_PREFERENCE, &pref, sizeof(pref));
-}
-
-// Helper to get primary monitor center position
-static void GetPrimaryMonitorCenter(POINT* pt) {
-    HMONITOR hMon = MonitorFromPoint((POINT){0,0}, MONITOR_DEFAULTTOPRIMARY);
-    MONITORINFO mi = { sizeof(mi) };
-    GetMonitorInfo(hMon, &mi);
-    pt->x = (mi.rcMonitor.left + mi.rcMonitor.right) / 2;
-    pt->y = mi.rcMonitor.top + 80; // Near top
 }
 
 // Draw dotted selection rectangle on a DC
@@ -623,80 +514,6 @@ static void ShowActionToolbar(BOOL show) {
 }
 
 // ============================================================================
-// System Tray Functions
-// ============================================================================
-
-// Load icon from ICO file
-static HICON LoadIconFromICO(const char* filename) {
-    int iconWidth = GetSystemMetrics(SM_CXSMICON);
-    int iconHeight = GetSystemMetrics(SM_CYSMICON);
-    
-    HICON hIcon = (HICON)LoadImageA(NULL, filename, IMAGE_ICON, 
-                                     iconWidth, iconHeight, LR_LOADFROMFILE);
-    return hIcon;
-}
-
-static HICON g_trayHIcon = NULL;  // Keep track of custom icon for cleanup
-
-static void AddTrayIcon(void) {
-    g_tray.iconData.cbSize = sizeof(NOTIFYICONDATAA);
-    g_tray.iconData.hWnd = g_controlWnd;
-    g_tray.iconData.uID = 1;
-    g_tray.iconData.uFlags = NIF_ICON | NIF_MESSAGE | NIF_TIP;
-    g_tray.iconData.uCallbackMessage = WM_TRAYICON;
-    
-    // Try to load custom icon from static folder (prefer .ico for best quality)
-    g_trayHIcon = LoadIconFromICO("static\\lwsr_icon.ico");
-    if (!g_trayHIcon) {
-        // Try relative to executable
-        char exePath[MAX_PATH];
-        GetModuleFileNameA(NULL, exePath, MAX_PATH);
-        char* lastSlash = strrchr(exePath, '\\');
-        if (lastSlash) {
-            size_t remaining = sizeof(exePath) - (lastSlash + 1 - exePath);
-            strncpy(lastSlash + 1, "..\\static\\lwsr_icon.ico", remaining - 1);
-            exePath[sizeof(exePath) - 1] = '\0';
-            g_trayHIcon = LoadIconFromICO(exePath);
-        }
-    }
-    
-    g_tray.iconData.hIcon = g_trayHIcon ? g_trayHIcon : LoadIcon(NULL, IDI_APPLICATION);
-    strncpy(g_tray.iconData.szTip, "LWSR - Screen Recorder", sizeof(g_tray.iconData.szTip) - 1);
-    g_tray.iconData.szTip[sizeof(g_tray.iconData.szTip) - 1] = '\0';
-    Shell_NotifyIconA(NIM_ADD, &g_tray.iconData);
-}
-
-static void RemoveTrayIcon(void) {
-    Shell_NotifyIconA(NIM_DELETE, &g_tray.iconData);
-    if (g_trayHIcon) {
-        DestroyIcon(g_trayHIcon);
-        g_trayHIcon = NULL;
-    }
-}
-
-static void MinimizeToTray(void) {
-    if (g_tray.minimizedToTray) return;
-    
-    // Hide all windows
-    ShowWindow(g_controlWnd, SW_HIDE);
-    ShowWindow(g_overlayWnd, SW_HIDE);
-    ActionToolbar_Hide();
-    if (g_windows.settingsWnd) ShowWindow(g_windows.settingsWnd, SW_HIDE);
-    
-    g_tray.minimizedToTray = TRUE;
-}
-
-static void RestoreFromTray(void) {
-    if (!g_tray.minimizedToTray) return;
-    
-    // Show control panel
-    ShowWindow(g_controlWnd, SW_SHOW);
-    SetForegroundWindow(g_controlWnd);
-    
-    g_tray.minimizedToTray = FALSE;
-}
-
-// ============================================================================
 // Action Toolbar Callbacks
 // ============================================================================
 
@@ -707,11 +524,11 @@ static void ActionToolbar_OnMinimize(void) {
     g_selection.state = SEL_NONE;
     SetRectEmpty(&g_selection.selectedRect);
     InterlockedExchange(&g_isSelecting, FALSE);
-    MinimizeToTray();
+    TrayIcon_Minimize(g_controlWnd, g_overlayWnd, g_windows.settingsWnd);
 }
 
 static void ActionToolbar_OnRecord(void) {
-    Recording_Start();
+    Overlay_StartRecording();
 }
 
 static void ActionToolbar_OnClose(void) {
@@ -759,11 +576,11 @@ static char g_timerText[32] = "00:00";
 
 // Update timer display text
 static void UpdateTimerDisplay(void) {
-    // Thread-safe check
-    if (!g_windows.recordingPanel || !InterlockedCompareExchange(&g_isRecording, 0, 0)) return;
+    // Thread-safe check - use Recording_IsActive instead of raw flag
+    if (!g_windows.recordingPanel || !Recording_IsActive(&g_recording)) return;
     
-    // Update timer text - use GetTickCount64 to avoid overflow issues
-    ULONGLONG elapsed = GetTickCount64() - g_recording.startTime;
+    // Use Recording_GetElapsedMs for timer display
+    ULONGLONG elapsed = Recording_GetElapsedMs(&g_recording);
     int secs = (int)((elapsed / 1000) % 60);
     int mins = (int)((elapsed / 60000) % 60);
     int hours = (int)(elapsed / 3600000);
@@ -869,19 +686,20 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     // Initial overlay bitmap will be set by UpdateOverlayBitmap when mode is selected
     
     // Create control panel (top center) - Windows 11 Snipping Tool style
-    POINT center;
-    GetPrimaryMonitorCenter(&center);
-    
-    int ctrlWidth = CONTROL_PANEL_WIDTH;
-    int ctrlHeight = CONTROL_PANEL_HEIGHT;
+    HMONITOR hMon = MonitorFromPoint((POINT){0,0}, MONITOR_DEFAULTTOPRIMARY);
+    MONITORINFO mi = { sizeof(mi) };
+    GetMonitorInfo(hMon, &mi);
+    int monitorCenterX = (mi.rcMonitor.left + mi.rcMonitor.right) / 2;
+    int panelX = monitorCenterX - CONTROL_PANEL_WIDTH / 2;
+    int panelY = mi.rcMonitor.top + 80;
     
     g_controlWnd = CreateWindowExA(
         WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
         "LWSRControl",
         NULL,
         WS_POPUP | WS_VISIBLE,
-        center.x - ctrlWidth / 2, center.y - ctrlHeight / 2,
-        ctrlWidth, ctrlHeight,
+        panelX, panelY,
+        CONTROL_PANEL_WIDTH, CONTROL_PANEL_HEIGHT,
         NULL, NULL, hInstance, NULL
     );
     
@@ -924,17 +742,17 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     UpdateWindow(g_controlWnd);
     
     // Add system tray icon (always visible)
-    AddTrayIcon();
+    TrayIcon_Add(g_controlWnd, hInstance);
     
     return TRUE;
 }
 
 void Overlay_Destroy(void) {
     // Remove tray icon
-    RemoveTrayIcon();
+    TrayIcon_Remove();
     // Thread-safe check
     if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
-        Recording_Stop();
+        Overlay_StopRecording();
     }
     
     // GDI+ is now shut down globally via g_gdip in main.c
@@ -979,7 +797,7 @@ static void Overlay_SetMode(CaptureMode mode) {
     ShowActionToolbar(FALSE);
     
     // Update overlay based on mode
-    if (mode == MODE_AREA || mode == MODE_WINDOW || mode == MODE_MONITOR || mode == MODE_ALL_MONITORS) {
+    if (mode == MODE_AREA || mode == MODE_WINDOW || mode == MODE_MONITOR) {
         // Show overlay with dark tint
         UpdateOverlayBitmap();
         ShowWindow(g_overlayWnd, SW_SHOW);
@@ -996,9 +814,13 @@ static void Overlay_SetMode(CaptureMode mode) {
     InvalidateRect(g_overlayWnd, NULL, TRUE);
 }
 
-static void Recording_Start(void) {
-    // Thread-safe check: read g_isRecording atomically
-    if (InterlockedCompareExchange(&g_isRecording, 0, 0)) return;
+/*
+ * Overlay_StartRecording - Start recording with UI updates
+ * Delegates actual recording lifecycle to recording.c
+ */
+static void Overlay_StartRecording(void) {
+    // Check if already recording
+    if (Recording_IsActive(&g_recording)) return;
     if (IsRectEmpty(&g_selection.selectedRect)) return;
     
     // Set capture region
@@ -1018,31 +840,29 @@ static void Recording_Start(void) {
     Encoder_GenerateFilename(outputPath, MAX_PATH, 
                              g_config.savePath, g_config.outputFormat);
     
-    // Initialize encoder
-    int fps = Capture_GetRefreshRate(&g_capture);
-    if (fps > 60) fps = 60; // Cap at 60 FPS for encoder compatibility
-    if (!Encoder_Init(&g_recording.encoder, outputPath, 
-                      g_capture.captureWidth, g_capture.captureHeight,
-                      fps, g_config.outputFormat, g_config.quality)) {
+    // Start recording via recording.c
+    if (!Recording_Start(&g_recording, &g_capture, &g_config, outputPath)) {
         char errMsg[512];
         snprintf(errMsg, sizeof(errMsg), 
-            "Failed to initialize encoder.\nPath: %s\nSize: %dx%d\nFPS: %d",
-            outputPath, g_capture.captureWidth, g_capture.captureHeight, fps);
+            "Failed to start recording.\nPath: %s\nSize: %dx%d",
+            outputPath, g_capture.captureWidth, g_capture.captureHeight);
         MessageBoxA(NULL, errMsg, "Error", MB_OK | MB_ICONERROR);
         return;
     }
+    
+    // --- UI updates (overlay-specific) ---
     
     // Hide selection UI (but keep control bar visible)
     ShowWindow(g_overlayWnd, SW_HIDE);
     ShowWindow(g_windows.crosshairWnd, SW_HIDE);
     ActionToolbar_Hide();
     
-    // Start recording - use atomic operations for thread safety
+    // Update global recording flag for other modules
     InterlockedExchange(&g_isRecording, TRUE);
     InterlockedExchange(&g_isSelecting, FALSE);
-    InterlockedExchange(&g_recording.stopRecording, FALSE);
-    g_recording.startTime = GetTickCount64();
-    g_recording.recordingMode = g_currentMode;  // Remember which mode started recording
+    
+    // Remember which mode started recording (for UI button state)
+    g_recordingUI.recordingMode = g_currentMode;
     strncpy(g_timerText, "00:00", sizeof(g_timerText) - 1);
     g_timerText[sizeof(g_timerText) - 1] = '\0';
     
@@ -1054,17 +874,6 @@ static void Recording_Start(void) {
     // Update control panel to show inline timer/stop
     Overlay_SetRecordingState(TRUE);
     
-    // Start recording thread
-    g_recording.thread = CreateThread(NULL, 0, RecordingThread, NULL, 0, NULL);
-    if (!g_recording.thread) {
-        Logger_Log("Recording_Start: CreateThread failed\n");
-        Encoder_Finalize(&g_recording.encoder);  // Clean up encoder on thread failure
-        InterlockedExchange(&g_isRecording, FALSE);
-        Overlay_SetRecordingState(FALSE);
-        Border_Hide();
-        return;
-    }
-    
     // Start time limit timer if configured
     if (g_config.maxRecordingSeconds > 0) {
         SetTimer(g_controlWnd, ID_TIMER_LIMIT, 
@@ -1072,24 +881,20 @@ static void Recording_Start(void) {
     }
 }
 
-static void Recording_Stop(void) {
-    // Thread-safe check: read g_isRecording atomically
-    if (!InterlockedCompareExchange(&g_isRecording, 0, 0)) return;
+/*
+ * Overlay_StopRecording - Stop recording with UI updates
+ * Delegates actual recording lifecycle to recording.c
+ */
+static void Overlay_StopRecording(void) {
+    // Check if not recording
+    if (!Recording_IsActive(&g_recording)) return;
     
-    // Signal recording thread to stop (atomic write with memory barrier)
-    InterlockedExchange(&g_recording.stopRecording, TRUE);
+    // Stop recording via recording.c (blocks until finalized)
+    Recording_Stop(&g_recording);
     
-    // Wait for recording thread
-    if (g_recording.thread) {
-        WaitForSingleObject(g_recording.thread, 5000);
-        CloseHandle(g_recording.thread);
-        g_recording.thread = NULL;
-    }
+    // --- UI updates (overlay-specific) ---
     
-    // Finalize encoder
-    Encoder_Finalize(&g_recording.encoder);
-    
-    // Thread-safe: signal recording stopped
+    // Update global recording flag
     InterlockedExchange(&g_isRecording, FALSE);
     
     // Hide recording border
@@ -1111,69 +916,13 @@ static void Recording_Stop(void) {
     ShowWindow(g_controlWnd, SW_SHOW);
 }
 
-static DWORD WINAPI RecordingThread(LPVOID param) {
-    (void)param;
-    
-    // Request high-resolution timer (1ms instead of 15.6ms)
-    timeBeginPeriod(1);
-    
-    LARGE_INTEGER freq, start, now;
-    QueryPerformanceFrequency(&freq);
-    QueryPerformanceCounter(&start);
-    
-    int fps = Capture_GetRefreshRate(&g_capture);
-    if (fps > 60) fps = 60;
-    
-    // Use frame count for consistent timing
-    UINT64 frameCount = 0;
-    UINT64 frameDuration100ns = 10000000ULL / fps; // 100-nanosecond units for MF
-    double frameIntervalSec = 1.0 / fps;
-    
-    // Thread-safe loop: read stop flag atomically
-    while (!InterlockedCompareExchange(&g_recording.stopRecording, 0, 0)) {
-        QueryPerformanceCounter(&now);
-        double elapsed = (double)(now.QuadPart - start.QuadPart) / freq.QuadPart;
-        double targetTime = frameCount * frameIntervalSec;
-        
-        if (elapsed >= targetTime) {
-            // Use frame-based timestamp for smooth playback
-            UINT64 timestamp = frameCount * frameDuration100ns;
-            BYTE* frame = Capture_GetFrame(&g_capture, NULL); // Ignore DXGI timestamp
-            
-            if (frame) {
-                Encoder_WriteFrame(&g_recording.encoder, frame, timestamp);
-            }
-            
-            frameCount++;
-            
-            // Skip frames if we're falling behind (drop frames rather than stutter)
-            double newElapsed = (double)(now.QuadPart - start.QuadPart) / freq.QuadPart;
-            while ((frameCount * frameIntervalSec) < newElapsed - frameIntervalSec) {
-                frameCount++; // Skip this frame
-            }
-        } else {
-            // Sleep until next frame time - use high precision sleep
-            double sleepTime = (targetTime - elapsed) * 1000.0;
-            if (sleepTime > 2.0) {
-                Sleep((DWORD)(sleepTime - 1.5));
-            } else if (sleepTime > 0.5) {
-                Sleep(1);
-            }
-            // Busy-wait for sub-millisecond precision
-        }
-    }
-    
-    timeEndPeriod(1);
-    return 0;
-}
-
 static void Overlay_SetRecordingState(BOOL isRecording) {
     if (isRecording) {
-        // Get button positions based on recording mode
+        // Get button positions based on recording mode (stored in UI context)
         HWND modeBtn = NULL;
         RECT btnRect = {0};
         
-        switch (g_recording.recordingMode) {
+        switch (g_recordingUI.recordingMode) {
             case MODE_AREA:
                 modeBtn = GetDlgItem(g_controlWnd, ID_MODE_AREA);
                 break;
@@ -1182,9 +931,6 @@ static void Overlay_SetRecordingState(BOOL isRecording) {
                 break;
             case MODE_MONITOR:
                 modeBtn = GetDlgItem(g_controlWnd, ID_MODE_MONITOR);
-                break;
-            case MODE_ALL_MONITORS:
-                modeBtn = GetDlgItem(g_controlWnd, ID_MODE_ALL);
                 break;
             default:
                 modeBtn = GetDlgItem(g_controlWnd, ID_MODE_AREA);
@@ -1203,18 +949,15 @@ static void Overlay_SetRecordingState(BOOL isRecording) {
         HWND btnArea = GetDlgItem(g_controlWnd, ID_MODE_AREA);
         HWND btnWindow = GetDlgItem(g_controlWnd, ID_MODE_WINDOW);
         HWND btnMonitor = GetDlgItem(g_controlWnd, ID_MODE_MONITOR);
-        HWND btnAll = GetDlgItem(g_controlWnd, ID_MODE_ALL);
         
         if (btnArea != modeBtn) EnableWindow(btnArea, FALSE);
         if (btnWindow != modeBtn) EnableWindow(btnWindow, FALSE);
         if (btnMonitor != modeBtn) EnableWindow(btnMonitor, FALSE);
-        if (btnAll != modeBtn) EnableWindow(btnAll, FALSE);
         
         // Invalidate disabled buttons to show grayed state
         InvalidateRect(btnArea, NULL, TRUE);
         InvalidateRect(btnWindow, NULL, TRUE);
         InvalidateRect(btnMonitor, NULL, TRUE);
-        InvalidateRect(btnAll, NULL, TRUE);
         
         // Create recording panel in place of the mode button
         if (!g_windows.recordingPanel) {
@@ -1250,24 +993,20 @@ static void Overlay_SetRecordingState(BOOL isRecording) {
         HWND btnArea = GetDlgItem(g_controlWnd, ID_MODE_AREA);
         HWND btnWindow = GetDlgItem(g_controlWnd, ID_MODE_WINDOW);
         HWND btnMonitor = GetDlgItem(g_controlWnd, ID_MODE_MONITOR);
-        HWND btnAll = GetDlgItem(g_controlWnd, ID_MODE_ALL);
         
         EnableWindow(btnArea, TRUE);
         EnableWindow(btnWindow, TRUE);
         EnableWindow(btnMonitor, TRUE);
-        EnableWindow(btnAll, TRUE);
         
         ShowWindow(btnArea, SW_SHOW);
         ShowWindow(btnWindow, SW_SHOW);
         ShowWindow(btnMonitor, SW_SHOW);
-        ShowWindow(btnAll, SW_SHOW);
         
         InvalidateRect(btnArea, NULL, TRUE);
         InvalidateRect(btnWindow, NULL, TRUE);
         InvalidateRect(btnMonitor, NULL, TRUE);
-        InvalidateRect(btnAll, NULL, TRUE);
         
-        g_recording.recordingMode = MODE_NONE;
+        g_recordingUI.recordingMode = MODE_NONE;
     }
 }
 
@@ -1275,8 +1014,8 @@ static void Overlay_SetRecordingState(BOOL isRecording) {
 static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_USER + 1: // Stop recording signal from second instance
-            if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
-                Recording_Stop();
+            if (Recording_IsActive(&g_recording)) {
+                Overlay_StopRecording();
             } else {
                 PostQuitMessage(0);
             }
@@ -1303,7 +1042,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // Default cursor based on mode
             if (g_currentMode == MODE_AREA) {
                 SetCursor(LoadCursor(NULL, IDC_CROSS));
-            } else if (g_currentMode == MODE_WINDOW || g_currentMode == MODE_MONITOR || g_currentMode == MODE_ALL_MONITORS) {
+            } else if (g_currentMode == MODE_WINDOW || g_currentMode == MODE_MONITOR) {
                 SetCursor(LoadCursor(NULL, IDC_HAND));
             } else {
                 SetCursor(LoadCursor(NULL, IDC_ARROW));
@@ -1489,11 +1228,6 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                         UpdateOverlayBitmap();
                         ShowActionToolbar(TRUE);
                     }
-                } else if (g_currentMode == MODE_ALL_MONITORS) {
-                    Capture_GetAllMonitorsBounds(&g_selection.selectedRect);
-                    g_selection.state = SEL_COMPLETE;
-                    UpdateOverlayBitmap();
-                    ShowActionToolbar(TRUE);
                 }
             }
             return 0;
@@ -1510,7 +1244,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // Check for configurable cancel key
             if (wParam == (WPARAM)g_config.cancelKey) {
                 if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
-                    Recording_Stop();
+                    Overlay_StopRecording();
                 } else if (g_selection.state == SEL_DRAWING || g_selection.state == SEL_MOVING || g_selection.state == SEL_RESIZING) {
                     ReleaseCapture();
                     g_selection.state = SEL_NONE;
@@ -1528,7 +1262,7 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 }
             } else if (wParam == VK_RETURN && g_selection.state == SEL_COMPLETE) {
                 // Enter key starts recording
-                Recording_Start();
+                Overlay_StartRecording();
             }
             return 0;
             
@@ -1729,11 +1463,11 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Symbol");
             
             // Create mode buttons (owner-drawn for Snipping Tool style)
-            // Layout: [Capture Area][Capture Window][Capture Monitor][Capture All Monitors] ... [Settings - O X]
-            int btnX = 8;
-            int btnWidth = 130;  // Standard width for capture buttons
-            int btnHeight = 30;
-            int btnGap = 4;
+            // Layout: [Capture Area][Capture Window][Capture Monitor] ... [Settings - O X]
+            int btnX = CONTROL_PANEL_PADDING;
+            int btnWidth = CAPTURE_BTN_WIDTH;
+            int btnHeight = CAPTURE_BTN_HEIGHT;
+            int btnGap = CAPTURE_BTN_GAP;
             
             CreateWindowW(L"BUTTON", L"Capture Area",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
@@ -1748,16 +1482,11 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             CreateWindowW(L"BUTTON", L"Capture Monitor",
                 WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
                 btnX, 7, btnWidth, btnHeight, hwnd, (HMENU)ID_MODE_MONITOR, g_windows.hInstance, NULL);
-            btnX += btnWidth + btnGap;
             
-            CreateWindowW(L"BUTTON", L"Capture All Monitors",
-                WS_CHILD | WS_VISIBLE | BS_OWNERDRAW,
-                btnX, 7, btnWidth + 20, btnHeight, hwnd, (HMENU)ID_MODE_ALL, g_windows.hInstance, NULL);
-            
-            // Small icon buttons on right side (square 28x28, vertically centered)
-            int iconBtnSize = 28;
-            int iconBtnY = (44 - iconBtnSize) / 2;
-            int rightX = 730 - 8 - iconBtnSize;  // Start from right edge
+            // Small icon buttons on right side (square, vertically centered)
+            int iconBtnSize = ICON_BTN_SIZE;
+            int iconBtnY = (CONTROL_PANEL_HEIGHT - iconBtnSize) / 2;
+            int rightX = CONTROL_PANEL_WIDTH - CONTROL_PANEL_PADDING - iconBtnSize;  // Start from right edge
             
             // Close button (X) - rightmost
             CreateWindowW(L"BUTTON", L"\u2715",
@@ -1802,28 +1531,18 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_AREA), NULL, TRUE);
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_WINDOW), NULL, TRUE);
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_MONITOR), NULL, TRUE);
-                    InvalidateRect(GetDlgItem(hwnd, ID_MODE_ALL), NULL, TRUE);
                     break;
                 case ID_MODE_WINDOW:
                     Overlay_SetMode(MODE_WINDOW);
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_AREA), NULL, TRUE);
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_WINDOW), NULL, TRUE);
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_MONITOR), NULL, TRUE);
-                    InvalidateRect(GetDlgItem(hwnd, ID_MODE_ALL), NULL, TRUE);
                     break;
                 case ID_MODE_MONITOR:
                     Overlay_SetMode(MODE_MONITOR);
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_AREA), NULL, TRUE);
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_WINDOW), NULL, TRUE);
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_MONITOR), NULL, TRUE);
-                    InvalidateRect(GetDlgItem(hwnd, ID_MODE_ALL), NULL, TRUE);
-                    break;
-                case ID_MODE_ALL:
-                    Overlay_SetMode(MODE_ALL_MONITORS);
-                    InvalidateRect(GetDlgItem(hwnd, ID_MODE_AREA), NULL, TRUE);
-                    InvalidateRect(GetDlgItem(hwnd, ID_MODE_WINDOW), NULL, TRUE);
-                    InvalidateRect(GetDlgItem(hwnd, ID_MODE_MONITOR), NULL, TRUE);
-                    InvalidateRect(GetDlgItem(hwnd, ID_MODE_ALL), NULL, TRUE);
                     break;
                 case ID_BTN_SETTINGS:
                     // Toggle settings window
@@ -1854,7 +1573,7 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 case ID_BTN_RECORD:
                     // Toggle recording - thread-safe check
                     if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
-                        Recording_Stop();
+                        Overlay_StopRecording();
                     } else {
                         // If no selection, use full primary monitor
                         if (IsRectEmpty(&g_selection.selectedRect)) {
@@ -1863,7 +1582,7 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                             GetMonitorInfo(hMon, &mi);
                             g_selection.selectedRect = mi.rcMonitor;
                         }
-                        Recording_Start();
+                        Overlay_StartRecording();
                     }
                     // Redraw button to show state change
                     InvalidateRect(GetDlgItem(hwnd, ID_BTN_RECORD), NULL, TRUE);
@@ -1874,7 +1593,7 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     
                     // Stop recording if in progress - thread-safe check
                     if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
-                        Recording_Stop();
+                        Overlay_StopRecording();
                     }
                     
                     // Stop replay buffer
@@ -1889,15 +1608,15 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 }
                 case ID_BTN_MINIMIZE:
                     // Minimize to system tray
-                    MinimizeToTray();
+                    TrayIcon_Minimize(g_controlWnd, g_overlayWnd, g_windows.settingsWnd);
                     break;
                 case ID_BTN_STOP:
-                    Recording_Stop();
+                    Overlay_StopRecording();
                     break;
                 case ID_RECORDING_PANEL:
                     // Click on recording panel stops recording - thread-safe check
                     if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
-                        Recording_Stop();
+                        Overlay_StopRecording();
                     }
                     break;
             }
@@ -1906,7 +1625,7 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         case WM_TIMER:
             if (wParam == ID_TIMER_LIMIT) {
                 // Time limit reached
-                Recording_Stop();
+                Overlay_StopRecording();
             } else if (wParam == ID_TIMER_DISPLAY) {
                 // Update timer display
                 UpdateTimerDisplay();
@@ -1953,12 +1672,11 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 HWND captureBtns[] = {
                     GetDlgItem(hwnd, ID_MODE_AREA),
                     GetDlgItem(hwnd, ID_MODE_WINDOW),
-                    GetDlgItem(hwnd, ID_MODE_MONITOR),
-                    GetDlgItem(hwnd, ID_MODE_ALL)
+                    GetDlgItem(hwnd, ID_MODE_MONITOR)
                 };
                 
                 HWND currentHoveredCapture = NULL;
-                for (int i = 0; i < 4; i++) {
+                for (int i = 0; i < 3; i++) {
                     if (captureBtns[i]) {
                         RECT rc;
                         GetWindowRect(captureBtns[i], &rc);
@@ -2012,7 +1730,7 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             BOOL isSelected = FALSE;
             
             // Check if this is a mode button (capture buttons only)
-            BOOL isModeButton = (ctlId >= ID_MODE_AREA && ctlId <= ID_MODE_ALL);
+            BOOL isModeButton = (ctlId >= ID_MODE_AREA && ctlId <= ID_MODE_MONITOR);
             
             // Check if this is an icon button (no visible border, transparent bg)
             BOOL isIconButton = (ctlId == ID_BTN_SETTINGS || ctlId == ID_BTN_MINIMIZE || 
@@ -2034,8 +1752,7 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 // Check if this mode is selected
                 isSelected = (ctlId == ID_MODE_AREA && g_currentMode == MODE_AREA) ||
                             (ctlId == ID_MODE_WINDOW && g_currentMode == MODE_WINDOW) ||
-                            (ctlId == ID_MODE_MONITOR && g_currentMode == MODE_MONITOR) ||
-                            (ctlId == ID_MODE_ALL && g_currentMode == MODE_ALL_MONITORS);
+                            (ctlId == ID_MODE_MONITOR && g_currentMode == MODE_MONITOR);
             }
             
             // Background color
@@ -2194,7 +1911,7 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         case WM_TRAYICON:
             if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
                 // Left click or double-click on tray icon - restore window
-                RestoreFromTray();
+                TrayIcon_Restore(g_controlWnd);
             } else if (lParam == WM_RBUTTONUP) {
                 // Right click - show context menu
                 POINT pt;
@@ -2211,9 +1928,9 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 DestroyMenu(hMenu);
                 
                 if (cmd == ID_TRAY_SHOW) {
-                    RestoreFromTray();
+                    TrayIcon_Restore(g_controlWnd);
                 } else if (cmd == ID_TRAY_EXIT) {
-                    RemoveTrayIcon();
+                    TrayIcon_Remove();
                     PostQuitMessage(0);
                 }
             }
@@ -2468,8 +2185,7 @@ static void UpdateReplayRAMEstimate(HWND hwndSettings) {
 
 // Update preview border based on current replay capture source
 static void UpdateReplayPreview(void) {
-    // Hide any existing overlays first
-    PreviewBorder_Hide();
+    // Hide any existing overlay first
     AreaSelector_Hide();
     
     // Show appropriate preview based on capture source
@@ -2503,36 +2219,6 @@ static void UpdateReplayPreview(void) {
                 } else {
                     // Native - show overlay covering full monitor (locked, no moving)
                     AreaSelector_Show(monBounds, FALSE);
-                }
-            }
-            break;
-        }
-        case MODE_ALL_MONITORS: {
-            RECT allBounds;
-            if (Capture_GetAllMonitorsBounds(&allBounds)) {
-                // Check if aspect ratio is set (not Native)
-                if (g_config.replayAspectRatio > 0) {
-                    int ratioW, ratioH;
-                    GetAspectRatioDimensions(g_config.replayAspectRatio, &ratioW, &ratioH);
-                    
-                    RECT aspectRect = g_config.replayAreaRect;
-                    int areaW = aspectRect.right - aspectRect.left;
-                    int areaH = aspectRect.bottom - aspectRect.top;
-                    
-                    BOOL needsRecalc = FALSE;
-                    if (areaW <= 0 || areaH <= 0) needsRecalc = TRUE;
-                    if (aspectRect.left < allBounds.left || aspectRect.right > allBounds.right) needsRecalc = TRUE;
-                    if (aspectRect.top < allBounds.top || aspectRect.bottom > allBounds.bottom) needsRecalc = TRUE;
-                    
-                    if (needsRecalc) {
-                        aspectRect = CalculateAspectRect(allBounds, ratioW, ratioH);
-                        g_config.replayAreaRect = aspectRect;
-                    }
-                    
-                    AreaSelector_Show(aspectRect, TRUE);  // Allow moving aspect ratio regions
-                } else {
-                    // Native - show overlay covering all monitors (locked, no moving)
-                    AreaSelector_Show(allBounds, FALSE);
                 }
             }
             break;
@@ -2981,7 +2667,6 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 }
                 SendMessageW(cmbReplaySource, CB_ADDSTRING, 0, (LPARAM)monitorName);
             }
-            SendMessageW(cmbReplaySource, CB_ADDSTRING, 0, (LPARAM)L"All Monitors");
             SendMessageW(cmbReplaySource, CB_ADDSTRING, 0, (LPARAM)L"Specific Window");
             SendMessageW(cmbReplaySource, CB_ADDSTRING, 0, (LPARAM)L"Custom Area");
             
@@ -2991,12 +2676,10 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 // Specific monitor selected
                 sourceIndex = g_config.replayMonitorIndex;
                 if (sourceIndex >= monitorCount) sourceIndex = 0;
-            } else if (g_config.replayCaptureSource == MODE_ALL_MONITORS) {
-                sourceIndex = monitorCount;  // All Monitors is after individual monitors
             } else if (g_config.replayCaptureSource == MODE_WINDOW) {
-                sourceIndex = monitorCount + 1;
+                sourceIndex = monitorCount;  // Window is after individual monitors
             } else if (g_config.replayCaptureSource == MODE_AREA) {
-                sourceIndex = monitorCount + 2;
+                sourceIndex = monitorCount + 1;
             }
             SendMessage(cmbReplaySource, CB_SETCURSEL, sourceIndex, 0);
             y += rowH;
@@ -3023,8 +2706,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SendMessage(cmbAspect, CB_SETCURSEL, g_config.replayAspectRatio, 0);
             
             // Enable/disable aspect ratio based on source
-            BOOL enableAspect = (g_config.replayCaptureSource == MODE_MONITOR || 
-                                 g_config.replayCaptureSource == MODE_ALL_MONITORS);
+            BOOL enableAspect = (g_config.replayCaptureSource == MODE_MONITOR);
             EnableWindow(cmbAspect, enableAspect);
             y += rowH;
             
@@ -3316,8 +2998,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 labelX + 205, y + 4, 300, 20, hwnd, NULL, g_windows.hInstance, NULL);
             SendMessage(lblDebugInfo, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
             
-            // Initialize preview border and area selector
-            PreviewBorder_Init(g_windows.hInstance);
+            // Initialize area selector for capture preview
             AreaSelector_Init(g_windows.hInstance);
             
             // Show preview for current capture source
@@ -3466,16 +3147,13 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                             g_config.replayCaptureSource = MODE_MONITOR;
                             g_config.replayMonitorIndex = sel;
                         } else if (sel == monCount) {
-                            g_config.replayCaptureSource = MODE_ALL_MONITORS;
-                        } else if (sel == monCount + 1) {
                             g_config.replayCaptureSource = MODE_WINDOW;
                         } else {
                             g_config.replayCaptureSource = MODE_AREA;
                         }
                         
                         // Enable/disable aspect ratio dropdown
-                        BOOL enableAspect = (g_config.replayCaptureSource == MODE_MONITOR || 
-                                             g_config.replayCaptureSource == MODE_ALL_MONITORS);
+                        BOOL enableAspect = (g_config.replayCaptureSource == MODE_MONITOR);
                         EnableWindow(GetDlgItem(hwnd, ID_CMB_REPLAY_ASPECT), enableAspect);
                         
                         // Update preview border/area selector
@@ -3750,8 +3428,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             // Save area selector position if visible
             SaveAreaSelectorPosition();
             
-            // Hide preview overlays
-            PreviewBorder_Hide();
+            // Hide preview overlay
             AreaSelector_Hide();
             
             // Save time limit from dropdowns
@@ -3774,8 +3451,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             GetWindowTextA(GetDlgItem(hwnd, ID_EDT_PATH), g_config.savePath, MAX_PATH);
             Config_Save(&g_config);
             
-            // Clean up preview overlays
-            PreviewBorder_Shutdown();
+            // Clean up area selector
             AreaSelector_Shutdown();
             
             // Clean up fonts and brushes

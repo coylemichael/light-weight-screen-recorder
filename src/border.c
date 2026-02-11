@@ -200,64 +200,6 @@ static LRESULT CALLBACK BorderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
 }
 
 /* ============================================================================
- * PREVIEW BORDER STATE (for settings window)
- * ============================================================================
- * Shows a dashed blue preview of the capture area.
- * Thread Access: [Main thread only - UI operations]
- */
-
-/*
- * PreviewBorderState - State for the preview border in settings
- */
-typedef struct PreviewBorderState {
-    HWND wnd;
-    BOOL visible;
-    RECT rect;
-} PreviewBorderState;
-
-static PreviewBorderState g_preview = {0};
-
-BOOL PreviewBorder_Init(HINSTANCE hInstance) {
-    if (!hInstance) return FALSE;
-    
-    WNDCLASSEXA wc = {0};
-    wc.cbSize = sizeof(wc);
-    wc.style = CS_HREDRAW | CS_VREDRAW;
-    wc.lpfnWndProc = BorderWndProc;  // Reuse same proc - click-through
-    wc.hInstance = hInstance;
-    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wc.lpszClassName = "LWSRPreviewBorder";
-    
-    if (!RegisterClassExA(&wc) && GetLastError() != ERROR_CLASS_ALREADY_EXISTS) {
-        return FALSE;
-    }
-    
-    g_preview.wnd = CreateWindowExA(
-        WS_EX_TOPMOST | WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
-        "LWSRPreviewBorder", NULL, WS_POPUP,
-        -9999, -9999, 1, 1,
-        NULL, NULL, hInstance, NULL
-    );
-    
-    return g_preview.wnd != NULL;
-}
-
-void PreviewBorder_Shutdown(void) {
-    if (g_preview.wnd) {
-        DestroyWindow(g_preview.wnd);
-        g_preview.wnd = NULL;
-    }
-    g_preview.visible = FALSE;
-}
-
-void PreviewBorder_Hide(void) {
-    if (g_preview.wnd) {
-        ShowWindow(g_preview.wnd, SW_HIDE);
-    }
-    g_preview.visible = FALSE;
-}
-
-/* ============================================================================
  * AREA SELECTOR STATE (draggable capture region)
  * ============================================================================
  * Provides a resizable/draggable rectangle for custom area selection.
