@@ -1,185 +1,100 @@
----
-name: systematic-code-review
-description: Use when auditing files against project standards, before flagging any issues
----
+# Systematic Code Review
 
-# Systematic Code Auditing
-
-## What's In This File
-
-| Section | Contents |
-|---------|----------|
-| [The Iron Law](#the-iron-law) | No issues flagged without citing standard |
-| [The Manifest Match Rule](#the-manifest-match-rule) | Verify file does what manifest says |
-| [When to Use](#when-to-use) | Review types this applies to |
-| [The Four Phases](#the-four-phases) | Read standards → Check manifest → Review code → Report |
-
----
-
-## Overview
-
-Random issue-flagging wastes time and creates noise. Superficial reviews miss real problems while flagging non-issues.
-
-**Core principle:** ALWAYS verify compliance against documented standards before flagging issues. Opinion-based feedback is failure.
-
-**Violating the letter of this process is violating the spirit of auditing.**
+Use when auditing files against project standards.
 
 ## The Iron Law
 
 ```
-NO ISSUES FLAGGED WITHOUT STANDARD REFERENCE FIRST
+NO ISSUES FLAGGED WITHOUT CITING THE STANDARD
 ```
 
-If you can't cite the specific standard being violated, you cannot flag it.
+If you can't cite the specific rule being violated, you cannot flag it.
 
 ## The Manifest Match Rule
 
-```
-VERIFY THE FILE DOES EXACTLY WHAT THE MANIFEST SAYS - NOTHING MORE, NOTHING LESS
-```
-
-Before reviewing code quality, confirm the file's actual behavior matches FILE_MANIFEST.md:
-- Read the manifest entry for this file
-- Verify each claimed responsibility exists in the code
-- Flag any functionality NOT mentioned in the manifest (scope creep)
-- Flag any missing functionality that IS mentioned (incomplete implementation)
-
-## When to Use
-
-Use for ANY code review:
-- New file audits
-- Change reviews
-- Architecture compliance checks
-- Pre-merge reviews
-
-**Use this ESPECIALLY when:**
-- File looks "messy" (feelings aren't findings)
-- You want to suggest a "better way"
-- Something feels wrong but you can't articulate why
+Before reviewing code quality, verify the file matches [file-manifest.md](../reference/file-manifest.md):
+- Does the docstring align with the manifest entry?
+- Flag functionality NOT mentioned in manifest (scope creep)
+- Flag missing functionality that IS mentioned (incomplete)
 
 ## The Four Phases
 
-You MUST complete each phase before proceeding to the next.
-
 ### Phase 1: Standards Investigation
 
-**BEFORE flagging ANY issue:**
+**Before flagging ANY issue:**
 
-1. **Read Standards Documents Completely**
-   - Don't skim CODING_BEST_PRACTICE.md
-   - Read FILE_MANIFEST.md for this file's purpose
-   - Note specific rules, not general vibes
-   - Understand the WHY behind each standard
+1. **Read standards documents**
+   - [coding-rules.md](../rules/coding-rules.md) - patterns, YAGNI, cleanup
+   - [file-manifest.md](../reference/file-manifest.md) - file purposes
 
-2. **Verify File Context**
-   - What is this file supposed to do per manifest?
-   - Does the docstring ALIGN with the manifest? (can be more detailed, see example below)
-   - Is the scope appropriate?
+2. **Verify file context**
+   - What is this file supposed to do?
+   - Does docstring match manifest?
 
-   **Good docstring example** (nvenc_encoder.c - manifest says "CUDA-based NVENC HEVC encoding"):
-   ```c
-   /*
-    * NVENC Hardware Encoder - CUDA Path
-    * Based directly on OBS nvenc-cuda.c and cuda-helpers.c
-    * 
-    * Flow:
-    * 1. Load nvcuda.dll, get function pointers
-    * 2. Create CUDA context (cuCtxCreate)
-    * 3. Create CUDA arrays for input surfaces (cuArray3DCreate)
-    * 4. Open NVENC session with CUDA device type
-    * 5. For each frame: CPU buffer → CUDA array (cuMemcpy2D) → NVENC encode
-    */
-   ```
-   This aligns with the manifest purpose while adding implementation context.
-
-3. **Check Against Checklist**
-   - Walk through each audit checklist item
+3. **Check against checklist**
+   - Walk through audit checklist items
    - Document findings with line numbers
-   - If not on checklist → question if it's really an issue
 
 ### Phase 2: Evidence Gathering
 
-**Find the evidence before flagging:**
-
-1. **Locate Specific Violations**
+1. **Locate specific violations**
    - Line numbers, not "somewhere in the file"
    - Exact code, not paraphrased
 
-2. **Cite the Standard**
+2. **Cite the standard**
    - Which document? Which section?
    - Quote the rule being violated
 
-3. **Verify It's Actually Wrong**
-   - Is this a violation or a judgment call?
-   - Could there be a valid reason?
-   - Check if pattern is used elsewhere in codebase
+3. **Verify it's actually wrong**
+   - Is this a violation or judgment call?
+   - Check if pattern is used elsewhere
 
 ### Phase 3: Issue Classification
 
-**Categorize before reporting:**
-
-1. **Form Clear Assessment**
-   - State clearly: "Line X violates Y because Z"
-   - Be specific, not vague
-   - One issue per finding
-
-2. **Classify Severity**
+1. **Categorize findings**
    - ⚠️ Violation of documented standard
    - 💡 Suggestion (not a standard, just improvement)
-   - Keep these separate - don't mix opinions with violations
+   - Keep these separate
 
-3. **Verify Before Reporting**
+2. **Verify before reporting**
    - Re-read the standard
    - Re-read the code
    - Are you sure?
 
 ### Phase 4: Documentation
 
-**Report findings, not opinions:**
+Report with structure:
+- ✅ What's compliant
+- ⚠️ Issues found (line number + standard citation + fix)
+- 💡 Suggestions (optional improvements)
 
-1. **Structure Each Finding**
-   - Line number(s)
-   - Standard violated (with citation)
-   - What's wrong
-   - Suggested fix
-
-2. **Summarize Compliance**
-   - ✅ What's compliant (acknowledge good work)
-   - ⚠️ Issues found (with evidence)
-   - 🔧 Suggested fixes (actionable)
-
-## Red Flags - STOP and Follow Process
+## Red Flags - STOP and Return to Phase 1
 
 If you catch yourself thinking:
 - "This looks wrong to me"
 - "I would have done it differently"
-- "This seems inefficient"
-- "Best practice says..."  (which best practice? cite it)
-- "This could be cleaner"
-- "I don't like this pattern"
+- "Best practice says..." (which one? cite it)
 - "Everyone knows you shouldn't..."
-- Flagging issues without line numbers
-- Suggesting rewrites without citing violations
 
-**ALL of these mean: STOP. Return to Phase 1.**
+## Example (LWSR)
 
-## Common Rationalizations
+**Good docstring** (nvenc_encoder.c - manifest says "CUDA-based NVENC HEVC encoding"):
+```c
+/*
+ * NVENC Hardware Encoder - CUDA Path
+ * Flow: Load nvcuda.dll → Create CUDA context → NVENC session → encode
+ */
+```
+This aligns with manifest while adding implementation context. ✅
 
-| Excuse | Reality |
-|--------|---------|
-| "Obviously wrong, don't need citation" | If obvious, citation takes 10 seconds. Do it. |
-| "Common knowledge best practice" | Not in our standards doc? Not a violation. |
-| "I'm trying to help improve the code" | Undocumented suggestions go in 💡, not ⚠️ |
-| "This file is a mess" | Feelings aren't findings. Cite specifics. |
-| "I've seen better ways" | Your preference ≠ project standard |
-| "This will cause bugs" | Prove it. Show the failure case. |
-| "Senior dev said..." | Is it in the standards doc? No? Add it first. |
+**Bad review finding:** "This function is too long"
+**Good review finding:** "Line 245: 150-line function violates coding-rules.md 'Max 100 lines; extract helpers'"
 
 ## Quick Reference
 
-| Phase | Key Activities | Success Criteria |
-|-------|---------------|------------------|
-| **1. Standards** | Read docs, understand rules | Know what to check |
-| **2. Evidence** | Find violations, cite standards | Specific line + specific rule |
-| **3. Classification** | Categorize, verify | Clear severity, confirmed issue |
-| **4. Documentation** | Report with evidence | Actionable, cited findings |
+| Phase | Key Activity | Success Criteria |
+|-------|-------------|------------------|
+| 1. Standards | Read docs, understand rules | Know what to check |
+| 2. Evidence | Find violations, cite standards | Line + rule |
+| 3. Classify | Categorize, verify | ⚠️ vs 💡 |
+| 4. Document | Report with evidence | Actionable findings |
