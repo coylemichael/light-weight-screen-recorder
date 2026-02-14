@@ -1,5 +1,30 @@
 # Changelog
 
+## [1.3.11] - 2026-02-14
+
+### Changed
+- **Recording now uses NVENC hardware encoder** - Same encoding path as replay buffer (symmetric architecture)
+- Deleted `encoder.c`/`encoder.h` (Media Foundation path) - NVIDIA-only now, simpler codebase
+- Added `StreamingMuxer` API to mp4_muxer for real-time MP4 writing (vs batch mode for replay saves)
+- Moved `Encoder_GenerateFilename` to `util.c` as `Util_GenerateRecordingFilename`
+- Updated all shared module docstrings with "SHARED BY:" annotations for clarity
+
+### Fixed
+- **NVENC flush loop** - Flushed frames are now actually written to muxer (was silently discarding)
+- **Division guard** - Added fps=0 protection in recording thread
+
+### Documentation
+- Added "Verify, don't assume" design principle to coding rules
+- Reorganized Design Principles into Scope/Process/Implementation categories
+- Updated FILE_MANIFEST.md - removed encoder.c, updated recording.c description
+
+## [1.3.10] - 2026-02-12
+
+### Changed
+- **Volume controls now editable** - Volume values can be typed directly in addition to using sliders
+- Volume edit boxes use `ES_CENTER` alignment for cleaner appearance
+- Volume sliders now use `TBS_TRANSPARENTBKGND` for better dark theme integration
+
 ## [1.3.9] - 2026-02-11
 
 ### Added
@@ -8,6 +33,7 @@
 
 ### Changed
 - Config validation now uses `AUDIO_VOLUME_MAX` instead of hardcoded 100
+- Volume sliders support 0-400% range to match boost capability
 
 ### Planned (FEATURE_PLANS.md)
 - **Error Notifications** (new section #9) - Configurable popup/audio notifications when audio or video capture fails

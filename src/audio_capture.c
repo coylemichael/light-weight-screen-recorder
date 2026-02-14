@@ -58,46 +58,29 @@ struct AudioCaptureSource {
     LARGE_INTEGER lastRecoveryAttempt;
 };
 
-/*
- * Global MMDevice enumerator for audio capture.
- * Thread Access: [Main thread creates, audio threads use via COM]
- * Lifetime: Init to Shutdown
- */
-static IMMDeviceEnumerator* g_audioEnumerator = NULL;
-
 /* Buffer size constants */
 #define MIX_BUFFER_SIZE (AUDIO_BYTES_PER_SEC * 5)     /* 5 seconds */
 #define SOURCE_BUFFER_SIZE (AUDIO_BYTES_PER_SEC * 2)  /* 2 seconds per source */
 
 BOOL AudioCapture_Init(void) {
-    if (g_audioEnumerator) return TRUE;
-    
-    HRESULT hr = CoCreateInstance(
-        &CLSID_MMDeviceEnumerator_Shared,
-        NULL,
-        CLSCTX_ALL,
-        &IID_IMMDeviceEnumerator_Shared,
-        (void**)&g_audioEnumerator
-    );
-    
-    if (FAILED(hr)) {
-        Logger_Log("AudioCapture_Init: CoCreateInstance failed (0x%08X)\n", hr);
+    // AudioCapture now uses the shared enumerator from AudioDevice
+    // Ensure AudioDevice_Init() was called first
+    if (!AudioDevice_GetEnumerator()) {
+        Logger_Log("AudioCapture_Init: AudioDevice not initialized\n");
         return FALSE;
     }
     return TRUE;
 }
 
 void AudioCapture_Shutdown(void) {
-    if (g_audioEnumerator) {
-        g_audioEnumerator->lpVtbl->Release(g_audioEnumerator);
-        g_audioEnumerator = NULL;
-    }
+    // Enumerator is owned by AudioDevice, nothing to release here
 }
 
 // Create a single capture source
 // Uses goto-cleanup pattern for consistent resource cleanup on all error paths
 static AudioCaptureSource* CreateSource(const char* deviceId) {
-    if (!deviceId || deviceId[0] == '\0' || !g_audioEnumerator) {
+    IMMDeviceEnumerator* enumerator = AudioDevice_GetEnumerator();
+    if (!deviceId || deviceId[0] == '\0' || !enumerator) {
         return NULL;
     }
     
@@ -128,7 +111,7 @@ static AudioCaptureSource* CreateSource(const char* deviceId) {
     WCHAR wideId[256];
     Util_Utf8ToWide(deviceId, wideId, 256);
     
-    hr = g_audioEnumerator->lpVtbl->GetDevice(g_audioEnumerator, wideId, &src->device);
+    hr = enumerator->lpVtbl->GetDevice(enumerator, wideId, &src->device);
     if (FAILED(hr)) goto cleanup;
     
     // Activate audio client
@@ -215,7 +198,8 @@ static LONGLONG AudioCapture_GetTimestamp(AudioCaptureContext* ctx);
  * IMPORTANT: Caller must ensure source thread is stopped before calling.
  */
 static BOOL TryRecoverSource(AudioCaptureSource* src) {
-    if (!src || !g_audioEnumerator) return FALSE;
+    IMMDeviceEnumerator* enumerator = AudioDevice_GetEnumerator();
+    if (!src || !enumerator) return FALSE;
     
     HRESULT hr;
     BOOL audioStarted = FALSE;
@@ -233,7 +217,7 @@ static BOOL TryRecoverSource(AudioCaptureSource* src) {
     WCHAR wideId[256];
     Util_Utf8ToWide(src->deviceId, wideId, 256);
     
-    hr = g_audioEnumerator->lpVtbl->GetDevice(g_audioEnumerator, wideId, &src->device);
+    hr = enumerator->lpVtbl->GetDevice(enumerator, wideId, &src->device);
     if (FAILED(hr)) {
         Logger_Log("Audio source '%s' recovery failed: device not found (0x%08X)\n", src->deviceId, hr);
         goto cleanup;

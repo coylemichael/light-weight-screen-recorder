@@ -1,6 +1,9 @@
 /*
- * NVENC Hardware Encoder - CUDA Path (OBS-style)
- * Based on OBS nvenc-cuda.c
+ * nvenc_encoder.h - NVENC Hardware Encoder (CUDA Path)
+ * 
+ * SHARED BY: replay_buffer.c, recording.c
+ * 
+ * HEVC hardware encoding via NVIDIA NVENC API.
  */
 
 #ifndef NVENC_ENCODER_H

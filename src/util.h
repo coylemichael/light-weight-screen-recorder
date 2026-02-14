@@ -22,6 +22,11 @@ RECT Util_CalculateAspectRect(RECT sourceBounds, int ratioW, int ratioH);
 // Index: 0=Native, 1=16:9, 2=9:16, 3=1:1, 4=4:5, 5=16:10, 6=4:3, 7=21:9, 8=32:9
 void Util_GetAspectRatioDimensions(int aspectIndex, int* ratioW, int* ratioH);
 
+// Generate timestamped output filename for recordings
+// Format: "<basePath>\Recording_YYYY-MM-DD_HH-MM-SS.<ext>"
+void Util_GenerateRecordingFilename(char* buffer, size_t size, 
+                                     const char* basePath, OutputFormat format);
+
 // ============================================================================
 // String Conversion Utilities
 // ============================================================================

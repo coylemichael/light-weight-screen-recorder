@@ -8,7 +8,8 @@ One-liner purpose for each source file. If a file is doing more than this, quest
 |------|---------|
 | `main.c` | Entry point, instance mutex, window creation, message loop |
 | `capture.c` | DXGI Desktop Duplication - acquire frames from desktop |
-| `recording.c` | Direct-to-disk NVENC recording (thread, start/stop, state machine) |
+| `encoder.c` | Media Foundation H.264/HEVC/WMV sink writer for traditional recording |
+| `recording.c` | Traditional recording lifecycle (thread, start/stop, state machine) |
 | `gpu_converter.c` | D3D11 Video Processor BGRA→NV12 conversion (zero-copy GPU path) |
 | `nvenc_encoder.c` | CUDA-based NVENC HEVC encoding |
 | `frame_buffer.c` | Circular buffer of encoded video samples |

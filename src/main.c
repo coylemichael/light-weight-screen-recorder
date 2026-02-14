@@ -62,7 +62,6 @@
 // Forward declarations
 #include "config.h"
 #include "capture.h"
-#include "encoder.h"
 #include "overlay.h"
 #include "replay_buffer.h"
 #include "logger.h"

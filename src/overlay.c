@@ -38,7 +38,7 @@ typedef void* GpImage;
 #endif
 
 #include "overlay.h"
-#include "encoder.h"
+#include "util.h"
 #include "recording.h"
 #include "config.h"
 #include "replay_buffer.h"
@@ -47,6 +47,8 @@ typedef void* GpImage;
 #include "constants.h"
 #include "ui_draw.h"
 #include "tray_icon.h"
+#include "layered_window.h"
+#include "settings_dialog.h"
 
 
 #pragma comment(lib, "comctl32.lib")
@@ -67,64 +69,21 @@ extern volatile LONG g_isSelecting;  // Thread-safe: use InterlockedExchange
 extern HWND g_overlayWnd;
 extern HWND g_controlWnd;
 
-// Control IDs
+// Control IDs - overlay specific
 #define ID_MODE_AREA       1001
 #define ID_MODE_WINDOW     1002
 #define ID_MODE_MONITOR    1003
 #define ID_BTN_CLOSE       1005
 #define ID_BTN_STOP        1006
 #define ID_BTN_MINIMIZE    1020
-#define ID_CHK_MOUSE       1007
-#define ID_CHK_BORDER      1008
-#define ID_CMB_FORMAT      1009
-#define ID_CMB_QUALITY     1010
-#define ID_EDT_PATH        1011
-#define ID_BTN_BROWSE      1012
 #define ID_BTN_SETTINGS    1013
-#define ID_EDT_TIMELIMIT   1014
 #define ID_BTN_RECORD      1015
-#define ID_CMB_HOURS       1016
-#define ID_CMB_MINUTES     1017
-#define ID_CMB_SECONDS     1018
 #define ID_RECORDING_PANEL 1019  // Inline timer + stop button
 #define ID_TIMER_RECORD    2001
 #define ID_TIMER_LIMIT     2002
 #define ID_TIMER_DISPLAY   2003
 #define ID_TIMER_HOVER     2004  // Timer to update hover state on icon buttons
 #define ID_TIMER_REPLAY_CHECK 2005  // Timer to check replay buffer health
-
-// Replay buffer settings control IDs
-#define ID_CHK_REPLAY_ENABLED   4001
-#define ID_CMB_REPLAY_SOURCE    4002
-#define ID_CMB_REPLAY_ASPECT    4003
-#define ID_CMB_REPLAY_STORAGE   4004
-#define ID_STATIC_REPLAY_INFO   4005
-#define ID_BTN_REPLAY_HOTKEY    4006
-#define ID_CMB_REPLAY_HOURS     4007
-#define ID_CMB_REPLAY_MINS      4008
-#define ID_CMB_REPLAY_SECS      4009
-#define ID_CMB_REPLAY_FPS       4010
-#define ID_STATIC_REPLAY_RAM    4011
-#define ID_STATIC_REPLAY_CALC   4012
-
-// Audio capture settings control IDs
-#define ID_CHK_AUDIO_ENABLED    5001
-#define ID_CMB_AUDIO_SOURCE1    5002
-#define ID_CMB_AUDIO_SOURCE2    5003
-#define ID_CMB_AUDIO_SOURCE3    5004
-#define ID_SLD_AUDIO_VOLUME1    5005
-#define ID_SLD_AUDIO_VOLUME2    5006
-#define ID_SLD_AUDIO_VOLUME3    5007
-#define ID_LBL_AUDIO_VOL1       5008
-#define ID_LBL_AUDIO_VOL2       5009
-#define ID_LBL_AUDIO_VOL3       5010
-
-// Debug settings control IDs
-#define ID_CHK_DEBUG_LOGGING    6001
-
-// Settings window dimensions
-#define SETTINGS_WIDTH  620
-#define SETTINGS_HEIGHT 770
 
 // Action toolbar button IDs
 #define ID_ACTION_RECORD   3001
@@ -224,7 +183,6 @@ static void Overlay_SetRecordingState(BOOL isRecording);
 /* Window procedures */
 static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
-static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 static LRESULT CALLBACK CrosshairWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam);
 
 /* Helper functions */
@@ -300,32 +258,15 @@ static void UpdateOverlayBitmap(void) {
     int width = wndRect.right - wndRect.left;
     int height = wndRect.bottom - wndRect.top;
     
-    // Create 32-bit DIB for per-pixel alpha
-    HDC screenDC = GetDC(NULL);
-    HDC memDC = CreateCompatibleDC(screenDC);
-    
-    BITMAPINFO bmi = {0};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height; // Top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    
-    BYTE* pBits = NULL;
-    HBITMAP hBitmap = CreateDIBSection(screenDC, &bmi, DIB_RGB_COLORS, (void**)&pBits, NULL, 0);
-    if (!hBitmap || !pBits) {
-        DeleteDC(memDC);
-        ReleaseDC(NULL, screenDC);
-        return;
-    }
-    HBITMAP oldBitmap = (HBITMAP)SelectObject(memDC, hBitmap);
+    // Create layered bitmap
+    LayeredBitmap lb = {0};
+    if (!LayeredBitmap_Create(&lb, width, height)) return;
     
     // Fill entire overlay with semi-transparent dark (alpha ~100 out of 255)
     int overlayAlpha = 100;
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
-            BYTE* pixel = pBits + (y * width + x) * 4;
+            BYTE* pixel = lb.pixels + (y * width + x) * 4;
             pixel[0] = 0;   // B
             pixel[1] = 0;   // G  
             pixel[2] = 0;   // R
@@ -354,7 +295,7 @@ static void UpdateOverlayBitmap(void) {
         // Clear the selection area (fully transparent)
         for (int y = selTop; y < selBottom; y++) {
             for (int x = selLeft; x < selRight; x++) {
-                BYTE* pixel = pBits + (y * width + x) * 4;
+                BYTE* pixel = lb.pixels + (y * width + x) * 4;
                 pixel[0] = 0;
                 pixel[1] = 0;
                 pixel[2] = 0;
@@ -364,50 +305,41 @@ static void UpdateOverlayBitmap(void) {
         
         // Draw white dotted border around selection
         RECT borderRect = { selLeft, selTop, selRight, selBottom };
-        DrawSelectionBorder(memDC, &borderRect);
+        DrawSelectionBorder(lb.memDC, &borderRect);
         
         // Draw resize handles when selection is complete
         if (g_selection.state == SEL_COMPLETE || g_selection.state == SEL_MOVING || g_selection.state == SEL_RESIZING) {
             HBRUSH whiteBrush = CreateSolidBrush(RGB(255, 255, 255));
-            HBRUSH oldBrush = (HBRUSH)SelectObject(memDC, whiteBrush);
+            HBRUSH oldBrush = (HBRUSH)SelectObject(lb.memDC, whiteBrush);
             HPEN whitePen = CreatePen(PS_SOLID, 1, RGB(200, 200, 200));
-            HPEN oldPen = (HPEN)SelectObject(memDC, whitePen);
+            HPEN oldPen = (HPEN)SelectObject(lb.memDC, whitePen);
             
             int cx = (selLeft + selRight) / 2;
             int cy = (selTop + selBottom) / 2;
             int hs = HANDLE_SIZE / 2;
             
             // Corner handles
-            Ellipse(memDC, selLeft - hs, selTop - hs, selLeft + hs, selTop + hs);           // TL
-            Ellipse(memDC, selRight - hs, selTop - hs, selRight + hs, selTop + hs);         // TR
-            Ellipse(memDC, selLeft - hs, selBottom - hs, selLeft + hs, selBottom + hs);     // BL
-            Ellipse(memDC, selRight - hs, selBottom - hs, selRight + hs, selBottom + hs);   // BR
+            Ellipse(lb.memDC, selLeft - hs, selTop - hs, selLeft + hs, selTop + hs);           // TL
+            Ellipse(lb.memDC, selRight - hs, selTop - hs, selRight + hs, selTop + hs);         // TR
+            Ellipse(lb.memDC, selLeft - hs, selBottom - hs, selLeft + hs, selBottom + hs);     // BL
+            Ellipse(lb.memDC, selRight - hs, selBottom - hs, selRight + hs, selBottom + hs);   // BR
             
             // Edge handles
-            Ellipse(memDC, cx - hs, selTop - hs, cx + hs, selTop + hs);                     // T
-            Ellipse(memDC, cx - hs, selBottom - hs, cx + hs, selBottom + hs);               // B
-            Ellipse(memDC, selLeft - hs, cy - hs, selLeft + hs, cy + hs);                   // L
-            Ellipse(memDC, selRight - hs, cy - hs, selRight + hs, cy + hs);                 // R
+            Ellipse(lb.memDC, cx - hs, selTop - hs, cx + hs, selTop + hs);                     // T
+            Ellipse(lb.memDC, cx - hs, selBottom - hs, cx + hs, selBottom + hs);               // B
+            Ellipse(lb.memDC, selLeft - hs, cy - hs, selLeft + hs, cy + hs);                   // L
+            Ellipse(lb.memDC, selRight - hs, cy - hs, selRight + hs, cy + hs);                 // R
             
-            SelectObject(memDC, oldBrush);
-            SelectObject(memDC, oldPen);
+            SelectObject(lb.memDC, oldBrush);
+            SelectObject(lb.memDC, oldPen);
             DeleteObject(whiteBrush);
             DeleteObject(whitePen);
         }
     }
     
-    // Apply to layered window
-    POINT ptSrc = {0, 0};
-    POINT ptDst = { wndRect.left, wndRect.top };
-    SIZE sizeWnd = { width, height };
-    BLENDFUNCTION blend = { AC_SRC_OVER, 0, 255, AC_SRC_ALPHA };
-    
-    UpdateLayeredWindow(g_overlayWnd, screenDC, &ptDst, &sizeWnd, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
-    
-    SelectObject(memDC, oldBitmap);
-    DeleteObject(hBitmap);
-    DeleteDC(memDC);
-    ReleaseDC(NULL, screenDC);
+    // Apply to layered window and cleanup
+    LayeredBitmap_Apply(&lb, g_overlayWnd, wndRect.left, wndRect.top);
+    LayeredBitmap_Destroy(&lb);
 }
 
 // Hit test for resize handles - returns which handle is under the point
@@ -550,25 +482,17 @@ static void ActionToolbar_OnSettings(void) {
     InterlockedExchange(&g_isSelecting, FALSE);
     
     // Open settings window centered on control panel
-    if (g_windows.settingsWnd) {
-        SendMessage(g_windows.settingsWnd, WM_CLOSE, 0, 0);
-    }
+    SettingsDialog_Close();  // Close if already open
     
     ShowWindow(g_controlWnd, SW_SHOW);
     
     RECT ctrlRect;
     GetWindowRect(g_controlWnd, &ctrlRect);
     int ctrlCenterX = (ctrlRect.left + ctrlRect.right) / 2;
+    int x = ctrlCenterX - SETTINGS_WIDTH / 2;
+    int y = ctrlRect.bottom + 5;
     
-    g_windows.settingsWnd = CreateWindowExA(
-        WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-        "LWSRSettings",
-        NULL,
-        WS_POPUP | WS_VISIBLE | WS_BORDER,
-        ctrlCenterX - SETTINGS_WIDTH / 2, ctrlRect.bottom + 5,
-        SETTINGS_WIDTH, SETTINGS_HEIGHT,
-        g_controlWnd, NULL, g_windows.hInstance, NULL
-    );
+    g_windows.settingsWnd = SettingsDialog_ShowAt(g_windows.hInstance, x, y);
 }
 
 // Timer text for display
@@ -628,21 +552,9 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     wcControl.lpszClassName = "LWSRControl";
     RegisterClassExA(&wcControl);
     
-    // Register settings window class
-    WNDCLASSEXA wcSettings = {0};
-    wcSettings.cbSize = sizeof(wcSettings);
-    wcSettings.style = CS_HREDRAW | CS_VREDRAW;
-    wcSettings.lpfnWndProc = SettingsWndProc;
-    wcSettings.hInstance = hInstance;
-    wcSettings.hCursor = LoadCursor(NULL, IDC_ARROW);
-    wcSettings.hbrBackground = (HBRUSH)(COLOR_3DFACE + 1);
-    wcSettings.lpszClassName = "LWSRSettings";
-    // Load icons from EXE resource at correct sizes for taskbar
-    wcSettings.hIcon = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(1), IMAGE_ICON, 
-                                         GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0);
-    wcSettings.hIconSm = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(1), IMAGE_ICON,
-                                           GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
-    RegisterClassExA(&wcSettings);
+    // Register settings window class (from settings_dialog module)
+    SettingsDialog_Register(hInstance);
+    SettingsDialog_SetExternalHandle(&g_windows.settingsWnd);
     
     // Register crosshair window class
     WNDCLASSEXA wcCross = {0};
@@ -837,7 +749,7 @@ static void Overlay_StartRecording(void) {
     
     // Generate output filename
     char outputPath[MAX_PATH];
-    Encoder_GenerateFilename(outputPath, MAX_PATH, 
+    Util_GenerateRecordingFilename(outputPath, MAX_PATH, 
                              g_config.savePath, g_config.outputFormat);
     
     // Start recording via recording.c
@@ -1288,11 +1200,27 @@ static HFONT g_iconFont = NULL;
 
 /**
  * Draw a mode button (Capture Area, Capture Window, etc.) with selection state.
+ * When settings dialog is open, shows tab labels (Video, Replay, Audio) instead.
  */
 static void DrawModeButton(LPDRAWITEMSTRUCT dis, BOOL isSelected, BOOL isHovered) {
-    COLORREF bgColor, borderColor;
+    BOOL settingsOpen = SettingsDialog_IsVisible();
+    UINT ctlId = dis->CtlID;
     
-    if (isSelected) {
+    /* Determine selection state based on mode */
+    BOOL buttonSelected;
+    if (settingsOpen) {
+        /* When settings is open, highlight based on current tab */
+        SettingsTab currentTab = SettingsDialog_GetCurrentTab();
+        buttonSelected = 
+            (ctlId == ID_MODE_AREA && currentTab == SETTINGS_TAB_GENERAL) ||
+            (ctlId == ID_MODE_WINDOW && currentTab == SETTINGS_TAB_AUDIO) ||
+            (ctlId == ID_MODE_MONITOR && currentTab == SETTINGS_TAB_VIDEO);
+    } else {
+        buttonSelected = isSelected;
+    }
+    
+    COLORREF bgColor, borderColor;
+    if (buttonSelected) {
         bgColor = RGB(0, 95, 184);     /* Windows blue for selected */
         borderColor = RGB(0, 120, 215);
     } else if (isHovered || (dis->itemState & ODS_SELECTED)) {
@@ -1310,16 +1238,34 @@ static void DrawModeButton(LPDRAWITEMSTRUCT dis, BOOL isSelected, BOOL isHovered
     SetBkMode(dis->hDC, TRANSPARENT);
     SetTextColor(dis->hDC, RGB(255, 255, 255));
     
-    WCHAR text[64];
-    GetWindowTextW(dis->hwndItem, text, 64);
+    LPCWSTR text;
+    if (settingsOpen) {
+        /* Show tab labels when settings is open */
+        switch (ctlId) {
+            case ID_MODE_AREA:    text = L"General"; break;
+            case ID_MODE_WINDOW:  text = L"Audio";   break;
+            case ID_MODE_MONITOR: text = L"Video";   break;
+            default:              text = L"";        break;
+        }
+    } else {
+        /* Show capture mode labels normally */
+        switch (ctlId) {
+            case ID_MODE_AREA:    text = L"Capture Area";    break;
+            case ID_MODE_WINDOW:  text = L"Capture Window";  break;
+            case ID_MODE_MONITOR: text = L"Capture Monitor"; break;
+            default:              text = L"";                break;
+        }
+    }
+    
     RECT textRect = dis->rcItem;
     DrawTextW(dis->hDC, text, -1, &textRect, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
 }
 
 /**
  * Draw the record button (red circle when idle, white square when recording).
+ * Grayed out when replay buffer is running (can't record simultaneously).
  */
-static void DrawRecordButton(LPDRAWITEMSTRUCT dis, BOOL isRecording) {
+static void DrawRecordButton(LPDRAWITEMSTRUCT dis, BOOL isRecording, BOOL isDisabled) {
     int cx = (dis->rcItem.left + dis->rcItem.right) / 2;
     int cy = (dis->rcItem.top + dis->rcItem.bottom) / 2;
     
@@ -1329,6 +1275,9 @@ static void DrawRecordButton(LPDRAWITEMSTRUCT dis, BOOL isRecording) {
         RECT stopRect = { cx - 4, cy - 4, cx + 4, cy + 4 };
         FillRect(dis->hDC, &stopRect, iconBrush);
         DeleteObject(iconBrush);
+    } else if (isDisabled) {
+        /* Grayed out circle when replay buffer is running */
+        DrawCircleAA(dis->hDC, cx, cy, 6, RGB(80, 80, 80));
     } else {
         /* Red filled circle (record icon) */
         DrawCircleAA(dis->hDC, cx, cy, 6, RGB(220, 50, 50));
@@ -1526,20 +1475,48 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         case WM_COMMAND:
             switch (LOWORD(wParam)) {
                 case ID_MODE_AREA:
-                    Overlay_SetMode(MODE_AREA);
+                    /* If settings open, toggle General tab; else switch capture mode */
+                    if (SettingsDialog_IsVisible()) {
+                        /* Double-click deselects: if already on General, do nothing (it's default) */
+                        if (SettingsDialog_GetCurrentTab() != SETTINGS_TAB_GENERAL) {
+                            SettingsDialog_SwitchTab(SETTINGS_TAB_GENERAL);
+                        }
+                    } else {
+                        Overlay_SetMode(MODE_AREA);
+                    }
                     // Invalidate all mode buttons
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_AREA), NULL, TRUE);
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_WINDOW), NULL, TRUE);
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_MONITOR), NULL, TRUE);
                     break;
                 case ID_MODE_WINDOW:
-                    Overlay_SetMode(MODE_WINDOW);
+                    /* If settings open, toggle Audio tab; else switch capture mode */
+                    if (SettingsDialog_IsVisible()) {
+                        /* Double-click deselects: if already on Audio, go back to General */
+                        if (SettingsDialog_GetCurrentTab() == SETTINGS_TAB_AUDIO) {
+                            SettingsDialog_SwitchTab(SETTINGS_TAB_GENERAL);
+                        } else {
+                            SettingsDialog_SwitchTab(SETTINGS_TAB_AUDIO);
+                        }
+                    } else {
+                        Overlay_SetMode(MODE_WINDOW);
+                    }
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_AREA), NULL, TRUE);
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_WINDOW), NULL, TRUE);
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_MONITOR), NULL, TRUE);
                     break;
                 case ID_MODE_MONITOR:
-                    Overlay_SetMode(MODE_MONITOR);
+                    /* If settings open, toggle Video tab; else switch capture mode */
+                    if (SettingsDialog_IsVisible()) {
+                        /* Double-click deselects: if already on Video, go back to General */
+                        if (SettingsDialog_GetCurrentTab() == SETTINGS_TAB_VIDEO) {
+                            SettingsDialog_SwitchTab(SETTINGS_TAB_GENERAL);
+                        } else {
+                            SettingsDialog_SwitchTab(SETTINGS_TAB_VIDEO);
+                        }
+                    } else {
+                        Overlay_SetMode(MODE_MONITOR);
+                    }
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_AREA), NULL, TRUE);
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_WINDOW), NULL, TRUE);
                     InvalidateRect(GetDlgItem(hwnd, ID_MODE_MONITOR), NULL, TRUE);
@@ -1547,34 +1524,44 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 case ID_BTN_SETTINGS:
                     // Toggle settings window
                     if (g_windows.settingsWnd) {
-                        // Close settings if already open (use WM_CLOSE to trigger cleanup)
-                        SendMessage(g_windows.settingsWnd, WM_CLOSE, 0, 0);
+                        // Close settings if already open
+                        SettingsDialog_Close();
                     } else {
                         // Open settings below control panel, centered
                         RECT ctrlRect;
                         GetWindowRect(hwnd, &ctrlRect);
                         int ctrlCenterX = (ctrlRect.left + ctrlRect.right) / 2;
+                        int x = ctrlCenterX - SETTINGS_WIDTH / 2;
+                        int y = ctrlRect.bottom + 5;
                         
-                        g_windows.settingsWnd = CreateWindowExA(
-                            WS_EX_TOPMOST | WS_EX_TOOLWINDOW,
-                            "LWSRSettings",
-                            NULL,
-                            WS_POPUP | WS_VISIBLE | WS_BORDER,
-                            ctrlCenterX - SETTINGS_WIDTH / 2, ctrlRect.bottom + 5,
-                            SETTINGS_WIDTH, SETTINGS_HEIGHT,
-                            hwnd, NULL, g_windows.hInstance, NULL
-                        );
-                        
-                        // Refresh settings button to show highlight
-                        HWND settingsBtn = GetDlgItem(hwnd, ID_BTN_SETTINGS);
-                        if (settingsBtn) InvalidateRect(settingsBtn, NULL, TRUE);
+                        g_windows.settingsWnd = SettingsDialog_ShowAt(g_windows.hInstance, x, y);
                     }
+                    
+                    // Refresh all buttons to show new labels/state
+                    InvalidateRect(GetDlgItem(hwnd, ID_MODE_AREA), NULL, TRUE);
+                    InvalidateRect(GetDlgItem(hwnd, ID_MODE_WINDOW), NULL, TRUE);
+                    InvalidateRect(GetDlgItem(hwnd, ID_MODE_MONITOR), NULL, TRUE);
+                    InvalidateRect(GetDlgItem(hwnd, ID_BTN_SETTINGS), NULL, TRUE);
                     break;
                 case ID_BTN_RECORD:
+                    /* Don't allow starting recording while settings are open */
+                    if (SettingsDialog_IsVisible()) {
+                        break;
+                    }
                     // Toggle recording - thread-safe check
                     if (InterlockedCompareExchange(&g_isRecording, 0, 0)) {
                         Overlay_StopRecording();
                     } else {
+                        /* Check if replay buffer is running - can't record simultaneously */
+                        if (g_replayBuffer.isBuffering) {
+                            MessageBoxW(hwnd,
+                                L"Cannot start recording while replay buffer is running.\n\n"
+                                L"Please disable the replay buffer in Settings > Video\n"
+                                L"before starting a manual recording.",
+                                L"Recording Unavailable",
+                                MB_OK | MB_ICONINFORMATION);
+                            break;
+                        }
                         // If no selection, use full primary monitor
                         if (IsRectEmpty(&g_selection.selectedRect)) {
                             HMONITOR hMon = MonitorFromPoint((POINT){0,0}, MONITOR_DEFAULTTOPRIMARY);
@@ -1802,10 +1789,11 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 return TRUE;
             }
             
-            // Record button
+            // Record button - grayed out when replay buffer is running
             if (ctlId == ID_BTN_RECORD) {
                 BOOL isRecording = InterlockedCompareExchange(&g_isRecording, 0, 0) != 0;
-                DrawRecordButton(dis, isRecording);
+                BOOL isDisabled = g_replayBuffer.isBuffering && !isRecording;
+                DrawRecordButton(dis, isRecording, isDisabled);
                 return TRUE;
             }
             
@@ -1945,78 +1933,8 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
-// Helper function to get key name from virtual key code
-static void GetKeyNameFromVK(int vk, char* buffer, int bufferSize) {
-    if (bufferSize < 1) return;
-    buffer[0] = '\0';
-    
-    // Helper macro for safe string copy
-    #define SAFE_COPY(str) do { strncpy(buffer, str, bufferSize - 1); buffer[bufferSize - 1] = '\0'; return; } while(0)
-    
-    // Handle special keys
-    switch (vk) {
-        case VK_F1: SAFE_COPY("F1");
-        case VK_F2: SAFE_COPY("F2");
-        case VK_F3: SAFE_COPY("F3");
-        case VK_F4: SAFE_COPY("F4");
-        case VK_F5: SAFE_COPY("F5");
-        case VK_F6: SAFE_COPY("F6");
-        case VK_F7: SAFE_COPY("F7");
-        case VK_F8: SAFE_COPY("F8");
-        case VK_F9: SAFE_COPY("F9");
-        case VK_F10: SAFE_COPY("F10");
-        case VK_F11: SAFE_COPY("F11");
-        case VK_F12: SAFE_COPY("F12");
-        case VK_ESCAPE: SAFE_COPY("Escape");
-        case VK_TAB: SAFE_COPY("Tab");
-        case VK_RETURN: SAFE_COPY("Enter");
-        case VK_SPACE: SAFE_COPY("Space");
-        case VK_BACK: SAFE_COPY("Backspace");
-        case VK_DELETE: SAFE_COPY("Delete");
-        case VK_INSERT: SAFE_COPY("Insert");
-        case VK_HOME: SAFE_COPY("Home");
-        case VK_END: SAFE_COPY("End");
-        case VK_PRIOR: SAFE_COPY("Page Up");
-        case VK_NEXT: SAFE_COPY("Page Down");
-        case VK_LEFT: SAFE_COPY("Left");
-        case VK_RIGHT: SAFE_COPY("Right");
-        case VK_UP: SAFE_COPY("Up");
-        case VK_DOWN: SAFE_COPY("Down");
-        case VK_PAUSE: SAFE_COPY("Pause");
-        case VK_SCROLL: SAFE_COPY("Scroll Lock");
-        case VK_SNAPSHOT: SAFE_COPY("Print Screen");
-        case VK_NUMLOCK: SAFE_COPY("Num Lock");
-        default:
-            // For letters and numbers, just use the character
-            if ((vk >= 'A' && vk <= 'Z') || (vk >= '0' && vk <= '9')) {
-                if (bufferSize >= 2) {
-                    buffer[0] = (char)vk;
-                    buffer[1] = '\0';
-                }
-                return;
-            }
-            // Numpad keys
-            if (vk >= VK_NUMPAD0 && vk <= VK_NUMPAD9) {
-                snprintf(buffer, bufferSize, "Numpad %d", vk - VK_NUMPAD0);
-                return;
-            }
-            // Default: use scan code
-            UINT scanCode = MapVirtualKey(vk, MAPVK_VK_TO_VSC);
-            if (GetKeyNameTextA(scanCode << 16, buffer, bufferSize) == 0) {
-                snprintf(buffer, bufferSize, "Key 0x%02X", vk);
-            }
-            break;
-    }
-    #undef SAFE_COPY
-}
-
-// Settings window procedure
-static HFONT g_settingsFont = NULL;
-static HFONT g_settingsSmallFont = NULL;
-static HBRUSH g_settingsBgBrush = NULL;
-
 // Helper: Calculate aspect ratio dimensions (returns width:height ratio multiplied by 1000)
-static void GetAspectRatioDimensions(int aspectIndex, int* ratioW, int* ratioH) {
+void GetAspectRatioDimensions(int aspectIndex, int* ratioW, int* ratioH) {
     // 0=Native, 1=16:9, 2=9:16, 3=1:1, 4=4:5, 5=16:10, 6=4:3, 7=21:9, 8=32:9
     switch (aspectIndex) {
         case 1: *ratioW = 16; *ratioH = 9; break;   // 16:9 (YouTube, Standard)
@@ -2059,132 +1977,8 @@ static RECT CalculateAspectRect(RECT monBounds, int aspectW, int aspectH) {
     return result;
 }
 
-// Helper: Populate an audio dropdown with devices
-// Returns the index that matches the given deviceId, or 0 if not found
-static int PopulateAudioDropdown(HWND comboBox, const AudioDeviceList* devices, const char* selectedDeviceId) {
-    if (!comboBox || !devices) return 0;
-    
-    int selectedIdx = 0;
-    int currentIdx = 0;
-    
-    // Add "None (Disabled)" option
-    int itemIdx = (int)SendMessageA(comboBox, CB_ADDSTRING, 0, (LPARAM)"None (Disabled)");
-    SendMessageA(comboBox, CB_SETITEMDATA, itemIdx, (LPARAM)NULL);  // NULL = no device
-    currentIdx++;
-    
-    // Add separator for outputs (system audio)
-    itemIdx = (int)SendMessageA(comboBox, CB_ADDSTRING, 0, (LPARAM)"--- System Audio (Loopback) ---");
-    SendMessageA(comboBox, CB_SETITEMDATA, itemIdx, (LPARAM)NULL);  // Separator - no data
-    currentIdx++;
-    
-    // Add output devices
-    for (int i = 0; i < devices->count; i++) {
-        if (devices->devices[i].type == AUDIO_DEVICE_OUTPUT) {
-            char displayName[160];
-            if (devices->devices[i].isDefault) {
-                snprintf(displayName, sizeof(displayName), "%s (Default)", devices->devices[i].name);
-            } else {
-                strncpy(displayName, devices->devices[i].name, sizeof(displayName) - 1);
-                displayName[sizeof(displayName) - 1] = '\0';
-            }
-            itemIdx = (int)SendMessageA(comboBox, CB_ADDSTRING, 0, (LPARAM)displayName);
-            // Store pointer to device ID (devices array must remain valid!)
-            SendMessageA(comboBox, CB_SETITEMDATA, itemIdx, (LPARAM)devices->devices[i].id);
-            
-            // Check if this is the selected device
-            if (selectedDeviceId && selectedDeviceId[0] != '\0' &&
-                strcmp(devices->devices[i].id, selectedDeviceId) == 0) {
-                selectedIdx = currentIdx;
-            }
-            currentIdx++;
-        }
-    }
-    
-    // Add separator for inputs (microphones)
-    itemIdx = (int)SendMessageA(comboBox, CB_ADDSTRING, 0, (LPARAM)"--- Microphones ---");
-    SendMessageA(comboBox, CB_SETITEMDATA, itemIdx, (LPARAM)NULL);  // Separator - no data
-    currentIdx++;
-    
-    // Add input devices
-    for (int i = 0; i < devices->count; i++) {
-        if (devices->devices[i].type == AUDIO_DEVICE_INPUT) {
-            char displayName[160];
-            if (devices->devices[i].isDefault) {
-                snprintf(displayName, sizeof(displayName), "%s (Default)", devices->devices[i].name);
-            } else {
-                strncpy(displayName, devices->devices[i].name, sizeof(displayName) - 1);
-                displayName[sizeof(displayName) - 1] = '\0';
-            }
-            itemIdx = (int)SendMessageA(comboBox, CB_ADDSTRING, 0, (LPARAM)displayName);
-            // Store pointer to device ID
-            SendMessageA(comboBox, CB_SETITEMDATA, itemIdx, (LPARAM)devices->devices[i].id);
-            
-            // Check if this is the selected device
-            if (selectedDeviceId && selectedDeviceId[0] != '\0' &&
-                strcmp(devices->devices[i].id, selectedDeviceId) == 0) {
-                selectedIdx = currentIdx;
-            }
-            currentIdx++;
-        }
-    }
-    
-    return selectedIdx;
-}
-
-// Update RAM usage estimate label in settings
-static void UpdateReplayRAMEstimate(HWND hwndSettings) {
-    HWND lblRam = GetDlgItem(hwndSettings, ID_STATIC_REPLAY_RAM);
-    HWND lblCalc = GetDlgItem(hwndSettings, ID_STATIC_REPLAY_CALC);
-    if (!lblRam || !lblCalc) return;
-    
-    int durationSecs = g_config.replayDuration;
-    int fps = g_config.replayFPS;
-    
-    // Get monitor resolution for estimate
-    int estWidth = GetSystemMetrics(SM_CXSCREEN);
-    int estHeight = GetSystemMetrics(SM_CYSCREEN);
-    
-    // Adjust for aspect ratio if set
-    if (g_config.replayAspectRatio > 0) {
-        int ratioW, ratioH;
-        GetAspectRatioDimensions(g_config.replayAspectRatio, &ratioW, &ratioH);
-        if (ratioW > 0 && ratioH > 0) {
-            // Calculate effective resolution with aspect ratio applied
-            if (estWidth * ratioH > estHeight * ratioW) {
-                // Monitor is wider - fit to height
-                estWidth = (estHeight * ratioW) / ratioH;
-            } else {
-                // Monitor is taller - fit to width
-                estHeight = (estWidth * ratioH) / ratioW;
-            }
-        }
-    }
-    
-    int ramMB = ReplayBuffer_EstimateRAMUsage(durationSecs, estWidth, estHeight, fps, g_config.quality);
-    
-    // Update explanation text
-    char explainText[256];
-    snprintf(explainText, sizeof(explainText), "When enabled, ~%d MB of RAM is reserved for the video buffer. See the calculation below:", ramMB);
-    SetWindowTextA(lblRam, explainText);
-    
-    // Update calculation text
-    char calcText[128];
-    if (durationSecs >= 60) {
-        int mins = durationSecs / 60;
-        int secs = durationSecs % 60;
-        if (secs > 0) {
-            snprintf(calcText, sizeof(calcText), "%dm %ds @ %d FPS, %dx%d = ~%d MB", mins, secs, fps, estWidth, estHeight, ramMB);
-        } else {
-            snprintf(calcText, sizeof(calcText), "%dm @ %d FPS, %dx%d = ~%d MB", mins, fps, estWidth, estHeight, ramMB);
-        }
-    } else {
-        snprintf(calcText, sizeof(calcText), "%ds @ %d FPS, %dx%d = ~%d MB", durationSecs, fps, estWidth, estHeight, ramMB);
-    }
-    SetWindowTextA(lblCalc, calcText);
-}
-
 // Update preview border based on current replay capture source
-static void UpdateReplayPreview(void) {
+void UpdateReplayPreview(void) {
     // Hide any existing overlay first
     AreaSelector_Hide();
     
@@ -2268,1217 +2062,13 @@ static void UpdateReplayPreview(void) {
 }
 
 // Save area selector position to config
-static void SaveAreaSelectorPosition(void) {
+void SaveAreaSelectorPosition(void) {
     if (AreaSelector_IsVisible()) {
         AreaSelector_GetRect(&g_config.replayAreaRect);
     }
 }
 
-/* ============================================================================
- * SETTINGS WINDOW CREATION HELPERS
- * ============================================================================
- * These functions break up the large WM_CREATE handler into smaller,
- * more manageable sections for each settings category.
- */
-
-/* Settings layout parameters */
-typedef struct {
-    int y;              /* Current Y position */
-    int labelX;         /* X position for labels */
-    int labelW;         /* Label width */
-    int controlX;       /* X position for controls */
-    int controlW;       /* Control width */
-    int rowH;           /* Row height */
-    int contentW;       /* Total content width */
-    HFONT font;         /* Standard font */
-    HFONT smallFont;    /* Small font */
-} SettingsLayout;
-
-/**
- * Create the output format and quality settings controls.
- * Creates dropdowns for format (MP4/AVI/WMV) and quality preset.
- */
-static void CreateOutputSettings(HWND hwnd, SettingsLayout* layout) {
-    /* Format dropdown */
-    HWND lblFormat = CreateWindowW(L"STATIC", L"Output Format", 
-        WS_CHILD | WS_VISIBLE,
-        layout->labelX, layout->y + 5, layout->labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
-    SendMessage(lblFormat, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    
-    HWND cmbFormat = CreateWindowW(L"COMBOBOX", L"",
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-        layout->controlX, layout->y, layout->controlW, 120, hwnd, (HMENU)ID_CMB_FORMAT, g_windows.hInstance, NULL);
-    SendMessage(cmbFormat, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    
-    SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.264) - Best compatibility");
-    SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.265) - Smaller files, less compatible");
-    SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"AVI - Legacy format");
-    SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"WMV - Windows Media");
-    SendMessage(cmbFormat, CB_SETCURSEL, g_config.outputFormat, 0);
-    layout->y += layout->rowH;
-    
-    /* Quality dropdown */
-    HWND lblQuality = CreateWindowW(L"STATIC", L"Quality",
-        WS_CHILD | WS_VISIBLE,
-        layout->labelX, layout->y + 5, layout->labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
-    SendMessage(lblQuality, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    
-    HWND cmbQuality = CreateWindowW(L"COMBOBOX", L"",
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-        layout->controlX, layout->y, layout->controlW, 120, hwnd, (HMENU)ID_CMB_QUALITY, g_windows.hInstance, NULL);
-    SendMessage(cmbQuality, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    
-    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Good ~60 Mbps (YouTube, TikTok)");
-    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"High ~75 Mbps (Discord, Twitter/X)");
-    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Ultra ~90 Mbps (Archival, editing)");
-    SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Lossless ~130 Mbps (No artifacts)");
-    SendMessage(cmbQuality, CB_SETCURSEL, g_config.quality, 0);
-    layout->y += layout->rowH + 8;
-}
-
-/**
- * Create checkbox settings for capture options.
- * Creates checkboxes for mouse cursor and recording border.
- */
-static void CreateCaptureCheckboxes(HWND hwnd, SettingsLayout* layout) {
-    /* Separator line */
-    CreateWindowW(L"STATIC", L"",
-        WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-        layout->labelX, layout->y, layout->contentW, 2, hwnd, NULL, g_windows.hInstance, NULL);
-    layout->y += 14;
-    
-    /* Checkboxes side by side */
-    HWND chkMouse = CreateWindowW(L"BUTTON", L"Capture mouse cursor",
-        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-        layout->labelX, layout->y, 200, 24, hwnd, (HMENU)ID_CHK_MOUSE, g_windows.hInstance, NULL);
-    SendMessage(chkMouse, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    CheckDlgButton(hwnd, ID_CHK_MOUSE, g_config.captureMouse ? BST_CHECKED : BST_UNCHECKED);
-    
-    HWND chkBorder = CreateWindowW(L"BUTTON", L"Show recording border",
-        WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-        layout->labelX + 280, layout->y, 200, 24, hwnd, (HMENU)ID_CHK_BORDER, g_windows.hInstance, NULL);
-    SendMessage(chkBorder, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    CheckDlgButton(hwnd, ID_CHK_BORDER, g_config.showRecordingBorder ? BST_CHECKED : BST_UNCHECKED);
-    layout->y += 38;
-}
-
-/**
- * Create time limit controls with hours/minutes/seconds dropdowns.
- */
-static void CreateTimeLimitControls(HWND hwnd, SettingsLayout* layout) {
-    HWND lblTime = CreateWindowW(L"STATIC", L"Time limit",
-        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-        layout->labelX, layout->y, layout->labelW, 26, hwnd, NULL, g_windows.hInstance, NULL);
-    SendMessage(lblTime, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    
-    /* Calculate time from seconds */
-    int totalSecs = g_config.maxRecordingSeconds;
-    if (totalSecs < 1) totalSecs = 60;
-    int hours = totalSecs / 3600;
-    int mins = (totalSecs % 3600) / 60;
-    int secs = totalSecs % 60;
-    
-    /* Hours dropdown */
-    HWND cmbHours = CreateWindowW(L"COMBOBOX", L"",
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-        layout->controlX, layout->y, 55, 300, hwnd, (HMENU)ID_CMB_HOURS, g_windows.hInstance, NULL);
-    SendMessage(cmbHours, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    SendMessage(cmbHours, CB_SETITEMHEIGHT, (WPARAM)-1, 18);
-    for (int i = 0; i <= 24; i++) {
-        WCHAR buf[8]; wsprintfW(buf, L"%d", i);
-        SendMessageW(cmbHours, CB_ADDSTRING, 0, (LPARAM)buf);
-    }
-    SendMessage(cmbHours, CB_SETCURSEL, hours, 0);
-    
-    HWND lblH = CreateWindowW(L"STATIC", L"h",
-        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-        layout->controlX + 58, layout->y, 15, 26, hwnd, NULL, g_windows.hInstance, NULL);
-    SendMessage(lblH, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    
-    /* Minutes dropdown */
-    HWND cmbMins = CreateWindowW(L"COMBOBOX", L"",
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-        layout->controlX + 78, layout->y, 55, 300, hwnd, (HMENU)ID_CMB_MINUTES, g_windows.hInstance, NULL);
-    SendMessage(cmbMins, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    SendMessage(cmbMins, CB_SETITEMHEIGHT, (WPARAM)-1, 18);
-    for (int i = 0; i <= 59; i++) {
-        WCHAR buf[8]; wsprintfW(buf, L"%d", i);
-        SendMessageW(cmbMins, CB_ADDSTRING, 0, (LPARAM)buf);
-    }
-    SendMessage(cmbMins, CB_SETCURSEL, mins, 0);
-    
-    HWND lblM = CreateWindowW(L"STATIC", L"m",
-        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-        layout->controlX + 136, layout->y, 18, 26, hwnd, NULL, g_windows.hInstance, NULL);
-    SendMessage(lblM, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    
-    /* Seconds dropdown */
-    HWND cmbSecs = CreateWindowW(L"COMBOBOX", L"",
-        WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-        layout->controlX + 158, layout->y, 55, 300, hwnd, (HMENU)ID_CMB_SECONDS, g_windows.hInstance, NULL);
-    SendMessage(cmbSecs, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    SendMessage(cmbSecs, CB_SETITEMHEIGHT, (WPARAM)-1, 18);
-    for (int i = 0; i <= 59; i++) {
-        WCHAR buf[8]; wsprintfW(buf, L"%d", i);
-        SendMessageW(cmbSecs, CB_ADDSTRING, 0, (LPARAM)buf);
-    }
-    SendMessage(cmbSecs, CB_SETCURSEL, secs, 0);
-    
-    HWND lblS = CreateWindowW(L"STATIC", L"s",
-        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-        layout->controlX + 216, layout->y, 15, 26, hwnd, NULL, g_windows.hInstance, NULL);
-    SendMessage(lblS, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    
-    layout->y += layout->rowH;
-}
-
-/**
- * Create save path controls with text field and browse button.
- */
-static void CreateSavePathControls(HWND hwnd, SettingsLayout* layout) {
-    HWND lblPath = CreateWindowW(L"STATIC", L"Save to",
-        WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-        layout->labelX, layout->y + 1, layout->labelW, 22, hwnd, NULL, g_windows.hInstance, NULL);
-    SendMessage(lblPath, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    
-    HWND edtPath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-        WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-        layout->controlX, layout->y, layout->controlW - 80, 22, hwnd, (HMENU)ID_EDT_PATH, g_windows.hInstance, NULL);
-    SendMessage(edtPath, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    SetWindowTextA(edtPath, g_config.savePath);
-    
-    HWND btnBrowse = CreateWindowW(L"BUTTON", L"Browse",
-        WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-        layout->controlX + layout->controlW - 72, layout->y, 72, 22, hwnd, (HMENU)ID_BTN_BROWSE, g_windows.hInstance, NULL);
-    SendMessage(btnBrowse, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    
-    layout->y += layout->rowH + 12;
-}
-
-static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
-    static HFONT g_settingsTitleFont = NULL;
-    
-    switch (msg) {
-        case WM_CREATE: {
-            // Create fonts
-            g_settingsFont = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-            g_settingsSmallFont = CreateFontW(11, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-            g_settingsTitleFont = CreateFontW(16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
-            g_settingsBgBrush = CreateSolidBrush(RGB(32, 32, 32));
-            
-            // Get window width for centering
-            RECT clientRect;
-            GetClientRect(hwnd, &clientRect);
-            int windowW = clientRect.right;
-            
-            int contentW = 560; // Total content width
-            int marginX = (windowW - contentW) / 2; // Center margin
-            
-            int y = 20;
-            int labelX = marginX;
-            int labelW = 110;
-            int controlX = marginX + labelW + 10;
-            int controlW = contentW - labelW - 10;
-            int rowH = 38;
-            
-            // Format dropdown
-            HWND lblFormat = CreateWindowW(L"STATIC", L"Output Format", 
-                WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblFormat, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            HWND cmbFormat = CreateWindowW(L"COMBOBOX", L"",
-                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-                controlX, y, controlW, 120, hwnd, (HMENU)ID_CMB_FORMAT, g_windows.hInstance, NULL);
-            SendMessage(cmbFormat, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.264) - Best compatibility");
-            SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.265) - Smaller files, less compatible");
-            SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"AVI - Legacy format");
-            SendMessageW(cmbFormat, CB_ADDSTRING, 0, (LPARAM)L"WMV - Windows Media");
-            SendMessage(cmbFormat, CB_SETCURSEL, g_config.outputFormat, 0);
-            y += rowH;
-            
-            // Quality dropdown with descriptions
-            HWND lblQuality = CreateWindowW(L"STATIC", L"Quality",
-                WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblQuality, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            HWND cmbQuality = CreateWindowW(L"COMBOBOX", L"",
-                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST,
-                controlX, y, controlW, 120, hwnd, (HMENU)ID_CMB_QUALITY, g_windows.hInstance, NULL);
-            SendMessage(cmbQuality, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Good ~60 Mbps (YouTube, TikTok)");
-            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"High ~75 Mbps (Discord, Twitter/X)");
-            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Ultra ~90 Mbps (Archival, editing)");
-            SendMessageW(cmbQuality, CB_ADDSTRING, 0, (LPARAM)L"Lossless ~130 Mbps (No artifacts)");
-            SendMessage(cmbQuality, CB_SETCURSEL, g_config.quality, 0);
-            y += rowH + 8;
-            
-            // Separator line
-            CreateWindowW(L"STATIC", L"",
-                WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-                labelX, y, contentW, 2, hwnd, NULL, g_windows.hInstance, NULL);
-            y += 14;
-            
-            // Checkboxes side by side
-            HWND chkMouse = CreateWindowW(L"BUTTON", L"Capture mouse cursor",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                labelX, y, 200, 24, hwnd, (HMENU)ID_CHK_MOUSE, g_windows.hInstance, NULL);
-            SendMessage(chkMouse, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            CheckDlgButton(hwnd, ID_CHK_MOUSE, g_config.captureMouse ? BST_CHECKED : BST_UNCHECKED);
-            
-            // Show border checkbox - on the right side
-            HWND chkBorder = CreateWindowW(L"BUTTON", L"Show recording border",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                labelX + 280, y, 200, 24, hwnd, (HMENU)ID_CHK_BORDER, g_windows.hInstance, NULL);
-            SendMessage(chkBorder, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            CheckDlgButton(hwnd, ID_CHK_BORDER, g_config.showRecordingBorder ? BST_CHECKED : BST_UNCHECKED);
-            y += 38;
-            
-            // Time limit - three dropdowns for hours, minutes, seconds
-            HWND lblTime = CreateWindowW(L"STATIC", L"Time limit",
-                WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                labelX, y, labelW, 26, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblTime, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            // Calculate time from seconds
-            int totalSecs = g_config.maxRecordingSeconds;
-            if (totalSecs < 1) totalSecs = 60; // Default to 1 minute minimum
-            int hours = totalSecs / 3600;
-            int mins = (totalSecs % 3600) / 60;
-            int secs = totalSecs % 60;
-            
-            // Hours dropdown (CBS_DROPDOWNLIST for mouse wheel support)
-            HWND cmbHours = CreateWindowW(L"COMBOBOX", L"",
-                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, 55, 300, hwnd, (HMENU)ID_CMB_HOURS, g_windows.hInstance, NULL);
-            SendMessage(cmbHours, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            SendMessage(cmbHours, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
-            for (int i = 0; i <= 24; i++) {
-                WCHAR buf[8]; wsprintfW(buf, L"%d", i);
-                SendMessageW(cmbHours, CB_ADDSTRING, 0, (LPARAM)buf);
-            }
-            SendMessage(cmbHours, CB_SETCURSEL, hours, 0);
-            
-            HWND lblH = CreateWindowW(L"STATIC", L"h",
-                WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                controlX + 58, y, 15, 26, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblH, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            // Minutes dropdown
-            HWND cmbMins = CreateWindowW(L"COMBOBOX", L"",
-                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX + 78, y, 55, 300, hwnd, (HMENU)ID_CMB_MINUTES, g_windows.hInstance, NULL);
-            SendMessage(cmbMins, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            SendMessage(cmbMins, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
-            for (int i = 0; i <= 59; i++) {
-                WCHAR buf[8]; wsprintfW(buf, L"%d", i);
-                SendMessageW(cmbMins, CB_ADDSTRING, 0, (LPARAM)buf);
-            }
-            SendMessage(cmbMins, CB_SETCURSEL, mins, 0);
-            
-            HWND lblM = CreateWindowW(L"STATIC", L"m",
-                WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                controlX + 136, y, 18, 26, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblM, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            // Seconds dropdown
-            HWND cmbSecs = CreateWindowW(L"COMBOBOX", L"",
-                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX + 158, y, 55, 300, hwnd, (HMENU)ID_CMB_SECONDS, g_windows.hInstance, NULL);
-            SendMessage(cmbSecs, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            SendMessage(cmbSecs, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
-            for (int i = 0; i <= 59; i++) {
-                WCHAR buf[8]; wsprintfW(buf, L"%d", i);
-                SendMessageW(cmbSecs, CB_ADDSTRING, 0, (LPARAM)buf);
-            }
-            SendMessage(cmbSecs, CB_SETCURSEL, secs, 0);
-            
-            HWND lblS = CreateWindowW(L"STATIC", L"s",
-                WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                controlX + 216, y, 15, 26, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblS, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            y += rowH;
-            
-            // Save path - aligned with dropdowns
-            HWND lblPath = CreateWindowW(L"STATIC", L"Save to",
-                WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                labelX, y + 1, labelW, 22, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblPath, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            // Edit control - height 22 matches font better for vertical centering
-            HWND edtPath = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
-                WS_CHILD | WS_VISIBLE | ES_AUTOHSCROLL,
-                controlX, y, controlW - 80, 22, hwnd, (HMENU)ID_EDT_PATH, g_windows.hInstance, NULL);
-            SendMessage(edtPath, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            SetWindowTextA(edtPath, g_config.savePath);
-            
-            HWND btnBrowse = CreateWindowW(L"BUTTON", L"Browse",
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                controlX + controlW - 72, y, 72, 22, hwnd, (HMENU)ID_BTN_BROWSE, g_windows.hInstance, NULL);
-            SendMessage(btnBrowse, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            y += rowH + 12;
-            
-            // ===== REPLAY BUFFER SECTION =====
-            // Separator line
-            CreateWindowW(L"STATIC", L"",
-                WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-                labelX, y, contentW, 2, hwnd, NULL, g_windows.hInstance, NULL);
-            y += 14;
-            
-            // Enable replay checkbox
-            HWND chkReplayEnabled = CreateWindowW(L"BUTTON", L"Enable Instant Replay (H.265)",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                labelX, y, 250, 24, hwnd, (HMENU)ID_CHK_REPLAY_ENABLED, g_windows.hInstance, NULL);
-            SendMessage(chkReplayEnabled, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            CheckDlgButton(hwnd, ID_CHK_REPLAY_ENABLED, g_config.replayEnabled ? BST_CHECKED : BST_UNCHECKED);
-            y += 38;
-            
-            // Capture source dropdown
-            HWND lblReplaySource = CreateWindowW(L"STATIC", L"Capture source",
-                WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblReplaySource, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            HWND cmbReplaySource = CreateWindowW(L"COMBOBOX", L"",
-                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, controlW, 200, hwnd, (HMENU)ID_CMB_REPLAY_SOURCE, g_windows.hInstance, NULL);
-            SendMessage(cmbReplaySource, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            // Enumerate and add monitors dynamically
-            int monitorCount = GetSystemMetrics(SM_CMONITORS);
-            WCHAR monitorName[64];
-            for (int i = 0; i < monitorCount; i++) {
-                if (i == 0) {
-                    wsprintfW(monitorName, L"Monitor %d (Primary)", i + 1);
-                } else {
-                    wsprintfW(monitorName, L"Monitor %d", i + 1);
-                }
-                SendMessageW(cmbReplaySource, CB_ADDSTRING, 0, (LPARAM)monitorName);
-            }
-            SendMessageW(cmbReplaySource, CB_ADDSTRING, 0, (LPARAM)L"Specific Window");
-            SendMessageW(cmbReplaySource, CB_ADDSTRING, 0, (LPARAM)L"Custom Area");
-            
-            // Set current selection based on config
-            int sourceIndex = 0;
-            if (g_config.replayCaptureSource == MODE_MONITOR) {
-                // Specific monitor selected
-                sourceIndex = g_config.replayMonitorIndex;
-                if (sourceIndex >= monitorCount) sourceIndex = 0;
-            } else if (g_config.replayCaptureSource == MODE_WINDOW) {
-                sourceIndex = monitorCount;  // Window is after individual monitors
-            } else if (g_config.replayCaptureSource == MODE_AREA) {
-                sourceIndex = monitorCount + 1;
-            }
-            SendMessage(cmbReplaySource, CB_SETCURSEL, sourceIndex, 0);
-            y += rowH;
-            
-            // Aspect ratio dropdown (only enabled for monitor capture)
-            HWND lblAspect = CreateWindowW(L"STATIC", L"Aspect ratio",
-                WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblAspect, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            HWND cmbAspect = CreateWindowW(L"COMBOBOX", L"",
-                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, controlW, 250, hwnd, (HMENU)ID_CMB_REPLAY_ASPECT, g_windows.hInstance, NULL);
-            SendMessage(cmbAspect, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"Native (No change)");
-            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"16:9 (YouTube, Standard)");
-            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"9:16 (TikTok, Shorts, Reels)");
-            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"1:1 (Square - Instagram)");
-            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"4:5 (Instagram Portrait)");
-            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"16:10");
-            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"4:3");
-            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"21:9 (Ultrawide)");
-            SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"32:9 (Super Ultrawide)");
-            SendMessage(cmbAspect, CB_SETCURSEL, g_config.replayAspectRatio, 0);
-            
-            // Enable/disable aspect ratio based on source
-            BOOL enableAspect = (g_config.replayCaptureSource == MODE_MONITOR);
-            EnableWindow(cmbAspect, enableAspect);
-            y += rowH;
-            
-            // Frame rate dropdown
-            HWND lblFPS = CreateWindowW(L"STATIC", L"Frame rate",
-                WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblFPS, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            HWND cmbFPS = CreateWindowW(L"COMBOBOX", L"",
-                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, controlW, 150, hwnd, (HMENU)ID_CMB_REPLAY_FPS, g_windows.hInstance, NULL);
-            SendMessage(cmbFPS, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"30 FPS");
-            SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"60 FPS");
-            SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"120 FPS");
-            SendMessageW(cmbFPS, CB_ADDSTRING, 0, (LPARAM)L"240 FPS");
-            // Set selection based on config
-            int fpsIdx = (g_config.replayFPS >= 240) ? 3 : (g_config.replayFPS >= 120) ? 2 : (g_config.replayFPS >= 60) ? 1 : 0;
-            SendMessage(cmbFPS, CB_SETCURSEL, fpsIdx, 0);
-            y += rowH;
-            
-            // Buffer duration - using dropdowns for proper centering
-            HWND lblReplayDuration = CreateWindowW(L"STATIC", L"Duration",
-                WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblReplayDuration, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            // Calculate hours, minutes, seconds from config
-            int replayTotalSecs = g_config.replayDuration;
-            int replayHours = replayTotalSecs / 3600;
-            int replayMins = (replayTotalSecs % 3600) / 60;
-            int replaySecs = replayTotalSecs % 60;
-            
-            // Hours dropdown
-            HWND cmbReplayHours = CreateWindowW(L"COMBOBOX", L"",
-                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, 55, 300, hwnd, (HMENU)ID_CMB_REPLAY_HOURS, g_windows.hInstance, NULL);
-            SendMessage(cmbReplayHours, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            SendMessage(cmbReplayHours, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
-            for (int i = 0; i <= 24; i++) {
-                WCHAR buf[8]; wsprintfW(buf, L"%d", i);
-                SendMessageW(cmbReplayHours, CB_ADDSTRING, 0, (LPARAM)buf);
-            }
-            SendMessage(cmbReplayHours, CB_SETCURSEL, replayHours, 0);
-            
-            HWND lblReplayH = CreateWindowW(L"STATIC", L"h",
-                WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                controlX + 58, y, 15, 26, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblReplayH, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            // Minutes dropdown
-            HWND cmbReplayMinutes = CreateWindowW(L"COMBOBOX", L"",
-                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX + 78, y, 55, 300, hwnd, (HMENU)ID_CMB_REPLAY_MINS, g_windows.hInstance, NULL);
-            SendMessage(cmbReplayMinutes, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            SendMessage(cmbReplayMinutes, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
-            for (int i = 0; i <= 59; i++) {
-                WCHAR buf[8]; wsprintfW(buf, L"%d", i);
-                SendMessageW(cmbReplayMinutes, CB_ADDSTRING, 0, (LPARAM)buf);
-            }
-            SendMessage(cmbReplayMinutes, CB_SETCURSEL, replayMins, 0);
-            
-            HWND lblReplayM = CreateWindowW(L"STATIC", L"m",
-                WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                controlX + 136, y, 18, 26, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblReplayM, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            // Seconds dropdown
-            HWND cmbReplaySecs = CreateWindowW(L"COMBOBOX", L"",
-                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX + 158, y, 55, 300, hwnd, (HMENU)ID_CMB_REPLAY_SECS, g_windows.hInstance, NULL);
-            SendMessage(cmbReplaySecs, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            SendMessage(cmbReplaySecs, CB_SETITEMHEIGHT, (WPARAM)-1, 18);  // Center text vertically
-            for (int i = 0; i <= 59; i++) {
-                WCHAR buf[8]; wsprintfW(buf, L"%d", i);
-                SendMessageW(cmbReplaySecs, CB_ADDSTRING, 0, (LPARAM)buf);
-            }
-            SendMessage(cmbReplaySecs, CB_SETCURSEL, replaySecs, 0);
-            
-            HWND lblReplayS = CreateWindowW(L"STATIC", L"s",
-                WS_CHILD | WS_VISIBLE | SS_CENTERIMAGE,
-                controlX + 216, y, 15, 26, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblReplayS, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            y += rowH;
-            
-            // Save hotkey button
-            HWND lblHotkey = CreateWindowW(L"STATIC", L"Save hotkey",
-                WS_CHILD | WS_VISIBLE,
-                labelX, y + 6, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblHotkey, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            // Get current hotkey name
-            char hotkeyName[64];
-            GetKeyNameFromVK(g_config.replaySaveKey, hotkeyName, sizeof(hotkeyName));
-            
-            // Create button showing current hotkey - click to change
-            HWND btnHotkey = CreateWindowExA(0, "BUTTON", hotkeyName,
-                WS_CHILD | WS_VISIBLE | BS_PUSHBUTTON,
-                controlX, y + 1, 120, 26, hwnd, (HMENU)ID_BTN_REPLAY_HOTKEY, g_windows.hInstance, NULL);
-            SendMessage(btnHotkey, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            // Hint text - larger and more visible
-            HWND lblHotkeyHint = CreateWindowW(L"STATIC", L"(Click to change)",
-                WS_CHILD | WS_VISIBLE,
-                controlX + 130, y + 7, 140, 24, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblHotkeyHint, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            y += rowH;
-            
-            // RAM explanation and estimate
-            {
-                int durationSecs = g_config.replayDuration;
-                int fps = g_config.replayFPS;
-                int estWidth = GetSystemMetrics(SM_CXSCREEN);
-                int estHeight = GetSystemMetrics(SM_CYSCREEN);
-                
-                // Adjust for aspect ratio if set
-                if (g_config.replayAspectRatio > 0) {
-                    int ratioW, ratioH;
-                    GetAspectRatioDimensions(g_config.replayAspectRatio, &ratioW, &ratioH);
-                    if (ratioW > 0 && ratioH > 0) {
-                        if (estWidth * ratioH > estHeight * ratioW) {
-                            estWidth = (estHeight * ratioW) / ratioH;
-                        } else {
-                            estHeight = (estWidth * ratioH) / ratioW;
-                        }
-                    }
-                }
-                
-                int ramMB = ReplayBuffer_EstimateRAMUsage(durationSecs, estWidth, estHeight, fps, g_config.quality);
-                
-                // Explanation text
-                char explainText[256];
-                snprintf(explainText, sizeof(explainText), "When enabled, ~%d MB of RAM is reserved for the video buffer. See the calculation below:", ramMB);
-                HWND lblExplain = CreateWindowExA(0, "STATIC", explainText,
-                    WS_CHILD | WS_VISIBLE,
-                    labelX, y + 4, contentW, 20, hwnd, (HMENU)ID_STATIC_REPLAY_RAM, g_windows.hInstance, NULL);
-                SendMessage(lblExplain, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-                y += 32;
-                
-                // Calculation breakdown
-                char calcText[128];
-                if (durationSecs >= 60) {
-                    int calcMins = durationSecs / 60;
-                    int calcSecs = durationSecs % 60;
-                    if (calcSecs > 0) {
-                        snprintf(calcText, sizeof(calcText), "%dm %ds @ %d FPS, %dx%d = ~%d MB", calcMins, calcSecs, fps, estWidth, estHeight, ramMB);
-                    } else {
-                        snprintf(calcText, sizeof(calcText), "%dm @ %d FPS, %dx%d = ~%d MB", calcMins, fps, estWidth, estHeight, ramMB);
-                    }
-                } else {
-                    snprintf(calcText, sizeof(calcText), "%ds @ %d FPS, %dx%d = ~%d MB", durationSecs, fps, estWidth, estHeight, ramMB);
-                }
-                
-                HWND lblCalc = CreateWindowExA(0, "STATIC", calcText,
-                    WS_CHILD | WS_VISIBLE,
-                    labelX + 20, y, contentW - 20, 20, hwnd, (HMENU)ID_STATIC_REPLAY_CALC, g_windows.hInstance, NULL);
-                SendMessage(lblCalc, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            }
-            
-            // ============================================================
-            // AUDIO CAPTURE SECTION
-            // ============================================================
-            y += 35;
-            
-            // Divider line
-            CreateWindowExA(0, "STATIC", "",
-                WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-                labelX, y, contentW, 2, hwnd, NULL, g_windows.hInstance, NULL);
-            y += 14;
-            
-            // Enable Audio Capture checkbox
-            HWND chkAudio = CreateWindowExA(0, "BUTTON", "Enable Audio Capture",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                labelX, y, 200, 24, hwnd, (HMENU)ID_CHK_AUDIO_ENABLED, g_windows.hInstance, NULL);
-            SendMessage(chkAudio, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            SendMessage(chkAudio, BM_SETCHECK, g_config.audioEnabled ? BST_CHECKED : BST_UNCHECKED, 0);
-            y += 38;
-            
-            // Enumerate audio devices - MUST be static so CB_SETITEMDATA pointers remain valid
-            // after WM_CREATE returns (they point to device IDs in this struct)
-            static AudioDeviceList audioDevices;
-            AudioDevice_Enumerate(&audioDevices);
-            
-            // Audio Source 1
-            int audioDropW = 260;  // Reduced dropdown width
-            int sliderX = controlX + audioDropW + 10;
-            int sliderW = 100;
-            int volLblX = sliderX + sliderW + 5;
-            int volLblW = 40;
-            
-            HWND lblAudio1 = CreateWindowExA(0, "STATIC", "Audio source 1",
-                WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblAudio1, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            HWND cmbAudio1 = CreateWindowExA(0, "COMBOBOX", "",
-                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, audioDropW, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE1, g_windows.hInstance, NULL);
-            SendMessage(cmbAudio1, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            // Volume slider 1
-            HWND sldVol1 = CreateWindowExA(0, TRACKBAR_CLASSA, "",
-                WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-                sliderX, y + 2, sliderW, 22, hwnd, (HMENU)ID_SLD_AUDIO_VOLUME1, g_windows.hInstance, NULL);
-            SendMessage(sldVol1, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
-            SendMessage(sldVol1, TBM_SETPOS, TRUE, g_config.audioVolume1);
-            
-            char volBuf1[16]; snprintf(volBuf1, sizeof(volBuf1), "%d%%", g_config.audioVolume1);
-            HWND lblVol1 = CreateWindowExA(0, "STATIC", volBuf1,
-                WS_CHILD | WS_VISIBLE,
-                volLblX, y + 5, volLblW, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL1, g_windows.hInstance, NULL);
-            SendMessage(lblVol1, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            y += rowH;
-            
-            // Audio Source 2
-            HWND lblAudio2 = CreateWindowExA(0, "STATIC", "Audio source 2",
-                WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblAudio2, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            HWND cmbAudio2 = CreateWindowExA(0, "COMBOBOX", "",
-                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, audioDropW, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE2, g_windows.hInstance, NULL);
-            SendMessage(cmbAudio2, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            // Volume slider 2
-            HWND sldVol2 = CreateWindowExA(0, TRACKBAR_CLASSA, "",
-                WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-                sliderX, y + 2, sliderW, 22, hwnd, (HMENU)ID_SLD_AUDIO_VOLUME2, g_windows.hInstance, NULL);
-            SendMessage(sldVol2, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
-            SendMessage(sldVol2, TBM_SETPOS, TRUE, g_config.audioVolume2);
-            
-            char volBuf2[16]; snprintf(volBuf2, sizeof(volBuf2), "%d%%", g_config.audioVolume2);
-            HWND lblVol2 = CreateWindowExA(0, "STATIC", volBuf2,
-                WS_CHILD | WS_VISIBLE,
-                volLblX, y + 5, volLblW, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL2, g_windows.hInstance, NULL);
-            SendMessage(lblVol2, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            y += rowH;
-            
-            // Audio Source 3
-            HWND lblAudio3 = CreateWindowExA(0, "STATIC", "Audio source 3",
-                WS_CHILD | WS_VISIBLE,
-                labelX, y + 5, labelW, 20, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblAudio3, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            HWND cmbAudio3 = CreateWindowExA(0, "COMBOBOX", "",
-                WS_CHILD | WS_VISIBLE | CBS_DROPDOWNLIST | WS_VSCROLL,
-                controlX, y, audioDropW, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE3, g_windows.hInstance, NULL);
-            SendMessage(cmbAudio3, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            // Volume slider 3
-            HWND sldVol3 = CreateWindowExA(0, TRACKBAR_CLASSA, "",
-                WS_CHILD | WS_VISIBLE | TBS_HORZ | TBS_NOTICKS,
-                sliderX, y + 2, sliderW, 22, hwnd, (HMENU)ID_SLD_AUDIO_VOLUME3, g_windows.hInstance, NULL);
-            SendMessage(sldVol3, TBM_SETRANGE, TRUE, MAKELONG(0, 100));
-            SendMessage(sldVol3, TBM_SETPOS, TRUE, g_config.audioVolume3);
-            
-            char volBuf3[16]; snprintf(volBuf3, sizeof(volBuf3), "%d%%", g_config.audioVolume3);
-            HWND lblVol3 = CreateWindowExA(0, "STATIC", volBuf3,
-                WS_CHILD | WS_VISIBLE,
-                volLblX, y + 5, volLblW, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL3, g_windows.hInstance, NULL);
-            SendMessage(lblVol3, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            // Populate audio dropdowns using helper function
-            SendMessage(cmbAudio1, CB_SETCURSEL, PopulateAudioDropdown(cmbAudio1, &audioDevices, g_config.audioSource1), 0);
-            SendMessage(cmbAudio2, CB_SETCURSEL, PopulateAudioDropdown(cmbAudio2, &audioDevices, g_config.audioSource2), 0);
-            SendMessage(cmbAudio3, CB_SETCURSEL, PopulateAudioDropdown(cmbAudio3, &audioDevices, g_config.audioSource3), 0);
-            
-            // ============================================================
-            // DEBUG SETTINGS SECTION
-            // ============================================================
-            y += 35;
-            
-            // Divider line
-            CreateWindowExA(0, "STATIC", "",
-                WS_CHILD | WS_VISIBLE | SS_ETCHEDHORZ,
-                labelX, y, contentW, 2, hwnd, NULL, g_windows.hInstance, NULL);
-            y += 14;
-            
-            // Enable Debug Logging checkbox
-            HWND chkDebug = CreateWindowExA(0, "BUTTON", "Enable Debug Logging",
-                WS_CHILD | WS_VISIBLE | BS_AUTOCHECKBOX,
-                labelX, y, 200, 24, hwnd, (HMENU)ID_CHK_DEBUG_LOGGING, g_windows.hInstance, NULL);
-            SendMessage(chkDebug, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            SendMessage(chkDebug, BM_SETCHECK, g_config.debugLogging ? BST_CHECKED : BST_UNCHECKED, 0);
-            
-            // Add description text
-            HWND lblDebugInfo = CreateWindowExA(0, "STATIC", "(Logs are saved to Debug folder next to exe)",
-                WS_CHILD | WS_VISIBLE,
-                labelX + 205, y + 4, 300, 20, hwnd, NULL, g_windows.hInstance, NULL);
-            SendMessage(lblDebugInfo, WM_SETFONT, (WPARAM)g_settingsFont, TRUE);
-            
-            // Initialize area selector for capture preview
-            AreaSelector_Init(g_windows.hInstance);
-            
-            // Show preview for current capture source
-            UpdateReplayPreview();
-            
-            return 0;
-        }
-        
-        case WM_PAINT: {
-            PAINTSTRUCT ps;
-            HDC hdc = BeginPaint(hwnd, &ps);
-            
-            RECT rect;
-            GetClientRect(hwnd, &rect);
-            FillRect(hdc, &rect, g_settingsBgBrush);
-            
-            EndPaint(hwnd, &ps);
-            return 0;
-        }
-        
-        case WM_CTLCOLORSTATIC: {
-            HDC hdcStatic = (HDC)wParam;
-            SetTextColor(hdcStatic, RGB(220, 220, 220));
-            SetBkMode(hdcStatic, TRANSPARENT);
-            return (LRESULT)g_settingsBgBrush;
-        }
-        
-        case WM_CTLCOLORBTN: {
-            HDC hdcBtn = (HDC)wParam;
-            SetTextColor(hdcBtn, RGB(220, 220, 220));
-            SetBkMode(hdcBtn, TRANSPARENT);
-            return (LRESULT)g_settingsBgBrush;
-        }
-        
-        case WM_COMMAND:
-            switch (LOWORD(wParam)) {
-                case ID_CMB_FORMAT:
-                    if (HIWORD(wParam) == CBN_SELCHANGE) {
-                        g_config.outputFormat = (OutputFormat)SendMessage(
-                            GetDlgItem(hwnd, ID_CMB_FORMAT), CB_GETCURSEL, 0, 0);
-                    }
-                    break;
-                    
-                case ID_CMB_QUALITY:
-                    if (HIWORD(wParam) == CBN_SELCHANGE) {
-                        QualityPreset newQuality = (QualityPreset)SendMessage(
-                            GetDlgItem(hwnd, ID_CMB_QUALITY), CB_GETCURSEL, 0, 0);
-                        
-                        // Only restart if quality actually changed
-                        if (newQuality != g_config.quality) {
-                            QualityPreset oldQuality = g_config.quality;
-                            g_config.quality = newQuality;
-                            Logger_Log("Quality changed: %d -> %d\n", oldQuality, newQuality);
-                            
-                            // Hot-reload: restart replay buffer if currently running
-                            if (g_config.replayEnabled && g_replayBuffer.isBuffering) {
-                                Logger_Log("Hot-reloading replay buffer with new quality...\n");
-                                // Reset heartbeat state to prevent stale data triggering false stalls
-                                Logger_ResetHeartbeat(THREAD_BUFFER);
-                                Logger_ResetHeartbeat(THREAD_NVENC_OUTPUT);
-                                ReplayBuffer_Stop(&g_replayBuffer);
-                                ReplayBuffer_Start(&g_replayBuffer, &g_config);
-                                CheckAudioError();
-                                Logger_Log("Replay buffer restarted with quality %d\n", newQuality);
-                            }
-                        }
-                        
-                        // Update RAM estimate since bitrate changed
-                        UpdateReplayRAMEstimate(hwnd);
-                    }
-                    break;
-                    
-                case ID_CHK_MOUSE:
-                    g_config.captureMouse = IsDlgButtonChecked(hwnd, ID_CHK_MOUSE) == BST_CHECKED;
-                    break;
-                    
-                case ID_CHK_BORDER:
-                    g_config.showRecordingBorder = IsDlgButtonChecked(hwnd, ID_CHK_BORDER) == BST_CHECKED;
-                    break;
-                    
-                case ID_CMB_HOURS:
-                case ID_CMB_MINUTES:
-                case ID_CMB_SECONDS:
-                    if (HIWORD(wParam) == CBN_SELCHANGE) {
-                        // Get values from all three dropdowns
-                        int hours = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_HOURS), CB_GETCURSEL, 0, 0);
-                        int mins = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_MINUTES), CB_GETCURSEL, 0, 0);
-                        int secs = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_SECONDS), CB_GETCURSEL, 0, 0);
-                        
-                        // Calculate total seconds (minimum 1 second)
-                        int total = hours * 3600 + mins * 60 + secs;
-                        if (total < 1) total = 1;
-                        g_config.maxRecordingSeconds = total;
-                    }
-                    break;
-                    
-                case ID_BTN_BROWSE: {
-                    BROWSEINFOA bi = {0};
-                    bi.hwndOwner = hwnd;
-                    bi.lpszTitle = "Select Save Folder";
-                    bi.ulFlags = BIF_RETURNONLYFSDIRS | BIF_NEWDIALOGSTYLE;
-                    
-                    PIDLIST_ABSOLUTE pidl = SHBrowseForFolderA(&bi);
-                    if (pidl) {
-                        char path[MAX_PATH];
-                        if (SHGetPathFromIDListA(pidl, path)) {
-                            strncpy(g_config.savePath, path, MAX_PATH - 1);
-                            SetWindowTextA(GetDlgItem(hwnd, ID_EDT_PATH), path);
-                            CreateDirectoryA(path, NULL);
-                        }
-                        CoTaskMemFree(pidl);
-                    }
-                    break;
-                }
-                
-                // Replay buffer settings handlers
-                case ID_CHK_REPLAY_ENABLED: {
-                    BOOL wasEnabled = g_config.replayEnabled;
-                    g_config.replayEnabled = IsDlgButtonChecked(hwnd, ID_CHK_REPLAY_ENABLED) == BST_CHECKED;
-                    Logger_Log("Replay enabled toggled: %d -> %d\n", wasEnabled, g_config.replayEnabled);
-                    
-                    // Start or stop replay buffer based on new state
-                    if (g_config.replayEnabled && !wasEnabled) {
-                        // Starting replay buffer
-                        Logger_Log("Starting replay buffer from settings\n");
-                        ReplayBuffer_Start(&g_replayBuffer, &g_config);
-                        CheckAudioError();
-                        BOOL ok = RegisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE, 0, g_config.replaySaveKey);
-                        Logger_Log("RegisterHotKey from settings: %s (key=0x%02X)\n", ok ? "OK" : "FAILED", g_config.replaySaveKey);
-                    } else if (!g_config.replayEnabled && wasEnabled) {
-                        // Stopping replay buffer
-                        Logger_Log("Stopping replay buffer from settings\n");
-                        UnregisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE);
-                        ReplayBuffer_Stop(&g_replayBuffer);
-                    }
-                    break;
-                }
-                    
-                case ID_CMB_REPLAY_SOURCE:
-                    if (HIWORD(wParam) == CBN_SELCHANGE) {
-                        int sel = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_SOURCE), CB_GETCURSEL, 0, 0);
-                        int monCount = GetSystemMetrics(SM_CMONITORS);
-                        
-                        if (sel < monCount) {
-                            // Individual monitor selected
-                            g_config.replayCaptureSource = MODE_MONITOR;
-                            g_config.replayMonitorIndex = sel;
-                        } else if (sel == monCount) {
-                            g_config.replayCaptureSource = MODE_WINDOW;
-                        } else {
-                            g_config.replayCaptureSource = MODE_AREA;
-                        }
-                        
-                        // Enable/disable aspect ratio dropdown
-                        BOOL enableAspect = (g_config.replayCaptureSource == MODE_MONITOR);
-                        EnableWindow(GetDlgItem(hwnd, ID_CMB_REPLAY_ASPECT), enableAspect);
-                        
-                        // Update preview border/area selector
-                        UpdateReplayPreview();
-                    }
-                    break;
-                    
-                case ID_CMB_REPLAY_HOURS:
-                case ID_CMB_REPLAY_MINS:
-                case ID_CMB_REPLAY_SECS:
-                    // Duration changes - update RAM estimate and hot-reload if running
-                    if (HIWORD(wParam) == CBN_SELCHANGE) {
-                        int h = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_HOURS), CB_GETCURSEL, 0, 0);
-                        int m = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_MINS), CB_GETCURSEL, 0, 0);
-                        int s = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_SECS), CB_GETCURSEL, 0, 0);
-                        int total = h * 3600 + m * 60 + s;
-                        if (total < 1) total = 1;
-                        
-                        // Only restart if duration actually changed
-                        if (total != g_config.replayDuration) {
-                            int oldDuration = g_config.replayDuration;
-                            g_config.replayDuration = total;
-                            Logger_Log("Replay duration changed: %ds -> %ds\n", oldDuration, total);
-                            
-                            // Hot-reload: restart replay buffer if currently running
-                            if (g_config.replayEnabled && g_replayBuffer.isBuffering) {
-                                Logger_Log("Hot-reloading replay buffer with new duration...\n");
-                                // Reset heartbeat state to prevent stale data triggering false stalls
-                                Logger_ResetHeartbeat(THREAD_BUFFER);
-                                Logger_ResetHeartbeat(THREAD_NVENC_OUTPUT);
-                                ReplayBuffer_Stop(&g_replayBuffer);
-                                ReplayBuffer_Start(&g_replayBuffer, &g_config);
-                                CheckAudioError();
-                                Logger_Log("Replay buffer restarted with %ds duration\n", total);
-                            }
-                        }
-                        
-                        UpdateReplayRAMEstimate(hwnd);
-                    }
-                    break;
-                    
-                case ID_CMB_REPLAY_ASPECT:
-                    if (HIWORD(wParam) == CBN_SELCHANGE) {
-                        g_config.replayAspectRatio = (int)SendMessage(
-                            GetDlgItem(hwnd, ID_CMB_REPLAY_ASPECT), CB_GETCURSEL, 0, 0);
-                        
-                        // Force recalculation of area for new aspect ratio
-                        if (g_config.replayAspectRatio > 0) {
-                            // Invalidate saved area to force recalc
-                            g_config.replayAreaRect.left = 0;
-                            g_config.replayAreaRect.top = 0;
-                            g_config.replayAreaRect.right = 0;
-                            g_config.replayAreaRect.bottom = 0;
-                        }
-                        
-                        // Update preview
-                        UpdateReplayPreview();
-                        
-                        // Update RAM estimate (resolution changes with aspect ratio)
-                        UpdateReplayRAMEstimate(hwnd);
-                    }
-                    break;
-                
-                case ID_CMB_REPLAY_FPS:
-                    if (HIWORD(wParam) == CBN_SELCHANGE) {
-                        int idx = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_FPS), CB_GETCURSEL, 0, 0);
-                        int fpsValues[] = { 30, 60, 120, 240 };
-                        int newFPS = (idx >= 0 && idx < 4) ? fpsValues[idx] : 60;
-                        
-                        // Only restart if FPS actually changed
-                        if (newFPS != g_config.replayFPS) {
-                            int oldFPS = g_config.replayFPS;
-                            g_config.replayFPS = newFPS;
-                            Logger_Log("Replay FPS changed: %d -> %d\n", oldFPS, newFPS);
-                            
-                            // Hot-reload: restart replay buffer if currently running
-                            if (g_config.replayEnabled && g_replayBuffer.isBuffering) {
-                                Logger_Log("Hot-reloading replay buffer with new FPS...\n");
-                                // Reset heartbeat state to prevent stale data triggering false stalls
-                                Logger_ResetHeartbeat(THREAD_BUFFER);
-                                Logger_ResetHeartbeat(THREAD_NVENC_OUTPUT);
-                                ReplayBuffer_Stop(&g_replayBuffer);
-                                ReplayBuffer_Start(&g_replayBuffer, &g_config);
-                                CheckAudioError();
-                                Logger_Log("Replay buffer restarted at %d FPS\n", newFPS);
-                            }
-                        }
-                        
-                        // Update RAM estimate
-                        UpdateReplayRAMEstimate(hwnd);
-                    }
-                    break;
-                    
-                case ID_BTN_REPLAY_HOTKEY:
-                    // Enter hotkey capture mode
-                    g_interaction.waitingForHotkey = TRUE;
-                    SetWindowTextA(GetDlgItem(hwnd, ID_BTN_REPLAY_HOTKEY), "Press a key...");
-                    SetFocus(hwnd);  // Focus the window to receive key events
-                    break;
-                    
-                case ID_CHK_AUDIO_ENABLED:
-                    if (IsDlgButtonChecked(hwnd, ID_CHK_AUDIO_ENABLED) == BST_CHECKED) {
-                        // User is trying to enable audio - check if encoder is available
-                        if (!AACEncoder_IsAvailable()) {
-                            MessageBoxA(hwnd,
-                                "AAC audio encoder is not available on this system.\n\n"
-                                "Audio recording requires the Microsoft AAC encoder which is\n"
-                                "included with Windows Media Feature Pack.\n\n"
-                                "On Windows N/KN editions, install the Media Feature Pack from:\n"
-                                "Settings > Apps > Optional features > Add a feature",
-                                "Audio Encoder Not Available",
-                                MB_OK | MB_ICONWARNING);
-                            // Uncheck the checkbox
-                            SendMessage(GetDlgItem(hwnd, ID_CHK_AUDIO_ENABLED), BM_SETCHECK, BST_UNCHECKED, 0);
-                            g_config.audioEnabled = FALSE;
-                        } else {
-                            g_config.audioEnabled = TRUE;
-                        }
-                    } else {
-                        g_config.audioEnabled = FALSE;
-                    }
-                    break;
-                
-                case ID_CHK_DEBUG_LOGGING:
-                    g_config.debugLogging = (IsDlgButtonChecked(hwnd, ID_CHK_DEBUG_LOGGING) == BST_CHECKED);
-                    // Live toggle: start or stop logging immediately
-                    if (g_config.debugLogging && !Logger_IsInitialized()) {
-                        // Start logging
-                        char exePath[MAX_PATH];
-                        char debugFolder[MAX_PATH];
-                        char logFilename[MAX_PATH];
-                        GetModuleFileNameA(NULL, exePath, MAX_PATH);
-                        char* lastSlash = strrchr(exePath, '\\');
-                        if (lastSlash) {
-                            *lastSlash = '\0';
-                            snprintf(debugFolder, sizeof(debugFolder), "%s\\Debug", exePath);
-                            CreateDirectoryA(debugFolder, NULL);
-                            SYSTEMTIME st;
-                            GetLocalTime(&st);
-                            snprintf(logFilename, sizeof(logFilename), "%s\\lwsr_log_%04d%02d%02d_%02d%02d%02d.txt",
-                                    debugFolder, (int)st.wYear, (int)st.wMonth, (int)st.wDay, (int)st.wHour, (int)st.wMinute, (int)st.wSecond);
-                            Logger_Init(logFilename, "w");
-                            Logger_Log("Debug logging enabled (live toggle)\n");
-                        }
-                    } else if (!g_config.debugLogging && Logger_IsInitialized()) {
-                        // Stop logging
-                        Logger_Log("Debug logging disabled (live toggle)\n");
-                        Logger_Shutdown();
-                    }
-                    break;
-                    
-                case ID_CMB_AUDIO_SOURCE1:
-                    if (HIWORD(wParam) == CBN_SELCHANGE) {
-                        int idx = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_AUDIO_SOURCE1), CB_GETCURSEL, 0, 0);
-                        char* deviceId = (char*)SendMessage(GetDlgItem(hwnd, ID_CMB_AUDIO_SOURCE1), CB_GETITEMDATA, idx, 0);
-                        if (deviceId && deviceId != (char*)CB_ERR) {
-                            strncpy(g_config.audioSource1, deviceId, sizeof(g_config.audioSource1) - 1);
-                        } else {
-                            g_config.audioSource1[0] = '\0';
-                        }
-                        // Restart replay buffer to apply new audio source
-                        if (g_replayBuffer.isBuffering) {
-                            ReplayBuffer_Stop(&g_replayBuffer);
-                            ReplayBuffer_Start(&g_replayBuffer, &g_config);
-                            CheckAudioError();
-                        }
-                    }
-                    break;
-                    
-                case ID_CMB_AUDIO_SOURCE2:
-                    if (HIWORD(wParam) == CBN_SELCHANGE) {
-                        int idx = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_AUDIO_SOURCE2), CB_GETCURSEL, 0, 0);
-                        char* deviceId = (char*)SendMessage(GetDlgItem(hwnd, ID_CMB_AUDIO_SOURCE2), CB_GETITEMDATA, idx, 0);
-                        if (deviceId && deviceId != (char*)CB_ERR) {
-                            strncpy(g_config.audioSource2, deviceId, sizeof(g_config.audioSource2) - 1);
-                        } else {
-                            g_config.audioSource2[0] = '\0';
-                        }
-                        // Restart replay buffer to apply new audio source
-                        if (g_replayBuffer.isBuffering) {
-                            ReplayBuffer_Stop(&g_replayBuffer);
-                            ReplayBuffer_Start(&g_replayBuffer, &g_config);
-                            CheckAudioError();
-                        }
-                    }
-                    break;
-                    
-                case ID_CMB_AUDIO_SOURCE3:
-                    if (HIWORD(wParam) == CBN_SELCHANGE) {
-                        int idx = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_AUDIO_SOURCE3), CB_GETCURSEL, 0, 0);
-                        char* deviceId = (char*)SendMessage(GetDlgItem(hwnd, ID_CMB_AUDIO_SOURCE3), CB_GETITEMDATA, idx, 0);
-                        if (deviceId && deviceId != (char*)CB_ERR) {
-                            strncpy(g_config.audioSource3, deviceId, sizeof(g_config.audioSource3) - 1);
-                        } else {
-                            g_config.audioSource3[0] = '\0';
-                        }
-                        // Restart replay buffer to apply new audio source
-                        if (g_replayBuffer.isBuffering) {
-                            ReplayBuffer_Stop(&g_replayBuffer);
-                            ReplayBuffer_Start(&g_replayBuffer, &g_config);
-                            CheckAudioError();
-                        }
-                    }
-                    break;
-            }
-            return 0;
-        
-        case WM_HSCROLL: {
-            // Handle volume slider changes
-            HWND hSlider = (HWND)lParam;
-            int ctrlId = GetDlgCtrlID(hSlider);
-            int pos = (int)SendMessage(hSlider, TBM_GETPOS, 0, 0);
-            char buf[16];
-            
-            if (ctrlId == ID_SLD_AUDIO_VOLUME1) {
-                g_config.audioVolume1 = pos;
-                snprintf(buf, sizeof(buf), "%d%%", pos);
-                SetWindowTextA(GetDlgItem(hwnd, ID_LBL_AUDIO_VOL1), buf);
-            } else if (ctrlId == ID_SLD_AUDIO_VOLUME2) {
-                g_config.audioVolume2 = pos;
-                snprintf(buf, sizeof(buf), "%d%%", pos);
-                SetWindowTextA(GetDlgItem(hwnd, ID_LBL_AUDIO_VOL2), buf);
-            } else if (ctrlId == ID_SLD_AUDIO_VOLUME3) {
-                g_config.audioVolume3 = pos;
-                snprintf(buf, sizeof(buf), "%d%%", pos);
-                SetWindowTextA(GetDlgItem(hwnd, ID_LBL_AUDIO_VOL3), buf);
-            }
-            return 0;
-        }
-        
-        case WM_KEYDOWN:
-        case WM_SYSKEYDOWN:  // For Alt combinations
-            if (g_interaction.waitingForHotkey) {
-                // Get the virtual key code
-                int vk = (int)wParam;
-                
-                // Ignore modifier keys alone
-                if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU || 
-                    vk == VK_LSHIFT || vk == VK_RSHIFT || 
-                    vk == VK_LCONTROL || vk == VK_RCONTROL ||
-                    vk == VK_LMENU || vk == VK_RMENU) {
-                    return 0;
-                }
-                
-                // Unregister old hotkey if replay is enabled
-                if (g_config.replayEnabled) {
-                    Logger_Log("Unregistering old hotkey (key change)\n");
-                    UnregisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE);
-                }
-                
-                // Save the new hotkey
-                g_config.replaySaveKey = vk;
-                Logger_Log("Hotkey changed to VK=0x%02X\n", vk);
-                
-                // Re-register with new hotkey if replay is enabled
-                if (g_config.replayEnabled) {
-                    BOOL ok = RegisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE, 0, g_config.replaySaveKey);
-                    Logger_Log("RegisterHotKey (key change): %s (key=0x%02X)\n", ok ? "OK" : "FAILED", g_config.replaySaveKey);
-                }
-                
-                // Update button text with key name
-                char keyName[64];
-                GetKeyNameFromVK(vk, keyName, sizeof(keyName));
-                SetWindowTextA(GetDlgItem(hwnd, ID_BTN_REPLAY_HOTKEY), keyName);
-                
-                g_interaction.waitingForHotkey = FALSE;
-                return 0;
-            }
-            break;
-            
-        case WM_CLOSE: {
-            // Save area selector position if visible
-            SaveAreaSelectorPosition();
-            
-            // Hide preview overlay
-            AreaSelector_Hide();
-            
-            // Save time limit from dropdowns
-            int hours = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_HOURS), CB_GETCURSEL, 0, 0);
-            int mins = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_MINUTES), CB_GETCURSEL, 0, 0);
-            int secs = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_SECONDS), CB_GETCURSEL, 0, 0);
-            int total = hours * 3600 + mins * 60 + secs;
-            if (total < 1) total = 1;
-            g_config.maxRecordingSeconds = total;
-            
-            // Save replay duration from dropdowns (simple: 3 boxes -> 1 number)
-            int rh = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_HOURS), CB_GETCURSEL, 0, 0);
-            int rm = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_MINS), CB_GETCURSEL, 0, 0);
-            int rs = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_SECS), CB_GETCURSEL, 0, 0);
-            int replayTotal = rh * 3600 + rm * 60 + rs;
-            if (replayTotal < 1) replayTotal = 1;
-            g_config.replayDuration = replayTotal;
-            
-            // Save path
-            GetWindowTextA(GetDlgItem(hwnd, ID_EDT_PATH), g_config.savePath, MAX_PATH);
-            Config_Save(&g_config);
-            
-            // Clean up area selector
-            AreaSelector_Shutdown();
-            
-            // Clean up fonts and brushes
-            if (g_settingsFont) { DeleteObject(g_settingsFont); g_settingsFont = NULL; }
-            if (g_settingsSmallFont) { DeleteObject(g_settingsSmallFont); g_settingsSmallFont = NULL; }
-            if (g_settingsBgBrush) { DeleteObject(g_settingsBgBrush); g_settingsBgBrush = NULL; }
-            
-            DestroyWindow(hwnd);
-            g_windows.settingsWnd = NULL;
-            
-            // Refresh settings button to remove highlight
-            if (g_controlWnd) {
-                HWND settingsBtn = GetDlgItem(g_controlWnd, ID_BTN_SETTINGS);
-                if (settingsBtn) InvalidateRect(settingsBtn, NULL, TRUE);
-            }
-            return 0;
-        }
-        
-        case WM_DESTROY:
-            if (g_settingsFont) { DeleteObject(g_settingsFont); g_settingsFont = NULL; }
-            if (g_settingsSmallFont) { DeleteObject(g_settingsSmallFont); g_settingsSmallFont = NULL; }
-            if (g_settingsBgBrush) { DeleteObject(g_settingsBgBrush); g_settingsBgBrush = NULL; }
-            return 0;
-    }
-    
-    return DefWindowProc(hwnd, msg, wParam, lParam);
-}
+// REMOVED: SETTINGS WINDOW CREATION HELPERS section - now in settings_dialog.c
 
 // Crosshair indicator window procedure
 static LRESULT CALLBACK CrosshairWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {

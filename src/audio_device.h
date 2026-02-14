@@ -37,6 +37,10 @@ BOOL AudioDevice_Init(void);
 // Shutdown audio device enumeration
 void AudioDevice_Shutdown(void);
 
+// Get the shared MMDevice enumerator (for use by audio_capture.c)
+// Returns NULL if not initialized
+struct IMMDeviceEnumerator* AudioDevice_GetEnumerator(void);
+
 // Enumerate all audio devices (both input and output)
 // Returns number of devices found
 int AudioDevice_Enumerate(AudioDeviceList* list);

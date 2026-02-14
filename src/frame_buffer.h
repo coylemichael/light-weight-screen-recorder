@@ -1,6 +1,10 @@
 /*
- * Frame Buffer - Thread-safe circular buffer for encoded video frames
- * Implements duration-based eviction for instant replay
+ * frame_buffer.h - Circular Frame Buffer for Replay
+ * 
+ * USED BY: replay_buffer.c ONLY
+ * 
+ * Thread-safe ring buffer storing last N seconds of encoded HEVC frames.
+ * Recording uses StreamingMuxer instead (writes directly to disk).
  */
 
 #ifndef FRAME_BUFFER_H

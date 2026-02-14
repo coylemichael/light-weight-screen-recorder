@@ -9,7 +9,10 @@
  */
 
 #include "util.h"
-#include "constants.h"  // For bitrate calculation constants
+#include "config.h"      // For Config_GetFormatExtension()
+#include "constants.h"   // For bitrate calculation constants
+#include <time.h>        // For time(), localtime(), strftime()
+#include <stdio.h>       // For snprintf()
 
 // Calculate video bitrate based on quality preset
 // Uses ShadowPlay-style scaling: base bitrate scales with resolution and FPS
@@ -140,4 +143,24 @@ int Util_Utf8ToWide(const char* utf8, WCHAR* wide, int maxLen) {
     int result = MultiByteToWideChar(CP_UTF8, 0, utf8, -1, wide, maxLen);
     if (result > 0) result--;  // Exclude null terminator from count
     return result;
+}
+
+// Generate timestamped output filename for recordings
+void Util_GenerateRecordingFilename(char* buffer, size_t size, 
+                                     const char* basePath, OutputFormat format) {
+    // Preconditions
+    LWSR_ASSERT(buffer != NULL);
+    LWSR_ASSERT(size > 0);
+    LWSR_ASSERT(basePath != NULL);
+    
+    if (!buffer || size == 0 || !basePath) return;
+    
+    time_t now = time(NULL);
+    struct tm* tm_info = localtime(&now);
+    
+    char timestamp[64];
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d_%H-%M-%S", tm_info);
+    
+    snprintf(buffer, size, "%s\\Recording_%s%s", 
+             basePath, timestamp, Config_GetFormatExtension(format));
 }

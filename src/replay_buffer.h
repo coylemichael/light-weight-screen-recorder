@@ -1,10 +1,10 @@
 /*
- * Replay Buffer - ShadowPlay-style instant replay
+ * replay_buffer.h - Instant Replay (ShadowPlay-style)
  * 
- * Architecture: State machine with event-based synchronization
- * - Clear lifecycle states prevent race conditions
- * - Windows events for cross-thread coordination (not just flags)
- * - Minimum buffer requirement before saves allowed
+ * USES: nvenc_encoder, gpu_converter, frame_buffer, mp4_muxer (batch)
+ * 
+ * Continuously captures to RAM ring buffer; saves last N seconds on demand.
+ * State machine with event-based synchronization for thread safety.
  */
 
 #ifndef REPLAY_BUFFER_H

@@ -18,10 +18,17 @@ If the docstring doesn't match the manifest, either:
 
 ## Design Principles
 
+### Scope
 - **YAGNI ruthlessly** - Remove unnecessary features, don't add "just in case" code
+
+### Process  
 - **Ask before adding** - One question at a time, prefer multiple choice
 - **Explore alternatives** - Propose 2-3 approaches with trade-offs before implementing
 - **Incremental validation** - Present designs in sections, validate each before continuing
+
+### Implementation
+- **Defend at point of use** - Each function validates its own preconditions. Don't rely on callers, other threads, or upstream code to have "already handled it."
+- **Verify, don't assume** - Before relying on API behavior, grep for existing usage. Ask: *"If this assumption is wrong, what breaks?"*
 
 ---
 
