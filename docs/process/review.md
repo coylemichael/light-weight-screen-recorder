@@ -2,6 +2,19 @@
 
 Use when auditing files against project standards.
 
+## Contents
+
+| Section | What's There |
+|---------|-------------|
+| [The Iron Law](#the-iron-law) | No issues without citing standard |
+| [Manifest Match](#the-manifest-match-rule) | Verify file matches manifest |
+| [Phase 1](#phase-1-standards-investigation) | Read standards, verify context |
+| [Phase 2](#phase-2-evidence-gathering) | Line numbers, cite rules |
+| [Phase 3](#phase-3-issue-classification) | ⚠️ violations vs 💡 suggestions |
+| [Phase 4](#phase-4-documentation) | Report with evidence |
+| [Red Flags](#red-flags---stop-and-return-to-phase-1) | Opinion-based thinking |
+| [Example](#example-lwsr) | Good/bad review findings |
+
 ## The Iron Law
 
 ```

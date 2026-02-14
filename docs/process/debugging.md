@@ -2,6 +2,18 @@
 
 Use when encountering any bug, crash, or unexpected behavior.
 
+## Contents
+
+| Section | What's There |
+|---------|-------------|
+| [The Iron Law](#the-iron-law) | No fixes without root cause |
+| [Phase 1](#phase-1-root-cause-investigation) | Read errors, reproduce, trace |
+| [Phase 2](#phase-2-pattern-analysis) | Find working examples, verify assumptions |
+| [Phase 3](#phase-3-hypothesis-and-test) | Single theory, test minimally |
+| [Phase 4](#phase-4-implementation) | Fix root cause, verify |
+| [Red Flags](#red-flags---stop-and-return-to-phase-1) | When to stop and restart |
+| [Example](#example-lwsr) | NVENC flush bug walkthrough |
+
 ## The Iron Law
 
 ```
