@@ -51,6 +51,10 @@ void AudioDevice_Shutdown(void) {
     }
 }
 
+IMMDeviceEnumerator* AudioDevice_GetEnumerator(void) {
+    return g_deviceEnumerator;
+}
+
 // Enumerate devices of a specific type (render or capture)
 static int EnumerateDeviceType(AudioDeviceList* list, EDataFlow dataFlow, AudioDeviceType type) {
     int added = 0;

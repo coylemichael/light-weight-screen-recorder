@@ -1,6 +1,12 @@
 /*
- * MP4 Muxer Implementation
- * Writes HEVC (H.265) encoded samples to MP4 file using IMFSinkWriter passthrough
+ * mp4_muxer.c - MP4 Container Muxer (HEVC Passthrough)
+ * 
+ * SHARED BY: replay_buffer.c (batch API), recording.c (streaming API)
+ * 
+ * Writes HEVC-encoded samples to MP4 using IMFSinkWriter passthrough.
+ * Two modes:
+ *   - Batch: MP4Muxer_WriteFile() - write all samples at once (replay saves)
+ *   - Streaming: StreamingMuxer_*() - write frames as they arrive (recording)
  *
  * ERROR HANDLING PATTERN:
  * - Goto-cleanup for functions with multiple resource allocations
@@ -486,4 +492,236 @@ cleanup:
     SAFE_RELEASE(writer);
     
     return result;
+}
+
+/* ============================================================================
+ * STREAMING MUXER IMPLEMENTATION
+ * ============================================================================
+ * Real-time muxing for direct recording (write frames as they arrive).
+ */
+
+struct StreamingMuxer {
+    IMFSinkWriter* writer;
+    DWORD videoStreamIndex;
+    DWORD audioStreamIndex;
+    BOOL hasAudio;
+    BOOL beginWritingCalled;
+    CRITICAL_SECTION lock;          // Thread-safety for concurrent video/audio writes
+    
+    // Stats
+    int videoSamplesWritten;
+    int audioSamplesWritten;
+    int keyframeCount;
+    LONGLONG lastVideoTimestamp;
+    LONGLONG lastAudioTimestamp;
+};
+
+StreamingMuxer* StreamingMuxer_Create(
+    const char* outputPath,
+    const MuxerConfig* videoConfig)
+{
+    return StreamingMuxer_CreateWithAudio(outputPath, videoConfig, NULL);
+}
+
+StreamingMuxer* StreamingMuxer_CreateWithAudio(
+    const char* outputPath,
+    const MuxerConfig* videoConfig,
+    const MuxerAudioConfig* audioConfig)
+{
+    LWSR_ASSERT(outputPath != NULL);
+    LWSR_ASSERT(videoConfig != NULL);
+    
+    if (!outputPath || !videoConfig) return NULL;
+    
+    StreamingMuxer* muxer = NULL;
+    IMFAttributes* attrs = NULL;
+    IMFMediaType* videoType = NULL;
+    IMFMediaType* audioType = NULL;
+    BOOL success = FALSE;
+    
+    // Allocate muxer struct
+    muxer = (StreamingMuxer*)calloc(1, sizeof(StreamingMuxer));
+    if (!muxer) {
+        MuxLog("StreamingMuxer: Failed to allocate muxer struct\n");
+        return NULL;
+    }
+    
+    InitializeCriticalSection(&muxer->lock);
+    
+    MuxLog("StreamingMuxer: Creating %s (%dx%d @ %d fps)\n", 
+           outputPath, videoConfig->width, videoConfig->height, videoConfig->fps);
+    
+    // Convert path to wide string
+    WCHAR wPath[MAX_PATH];
+    MultiByteToWideChar(CP_ACP, 0, outputPath, -1, wPath, MAX_PATH);
+    
+    // Create SinkWriter with hardware acceleration
+    HRESULT hr = MFCreateAttributes(&attrs, 2);
+    if (FAILED(hr)) goto cleanup;
+    
+    attrs->lpVtbl->SetUINT32(attrs, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+    attrs->lpVtbl->SetUINT32(attrs, &MF_LOW_LATENCY, TRUE);
+    
+    hr = MFCreateSinkWriterFromURL(wPath, NULL, attrs, &muxer->writer);
+    if (FAILED(hr)) {
+        MuxLog("StreamingMuxer: MFCreateSinkWriterFromURL failed 0x%08X\n", hr);
+        goto cleanup;
+    }
+    
+    // Create video media type (HEVC passthrough)
+    videoType = CreateHEVCMediaType(videoConfig);
+    if (!videoType) goto cleanup;
+    
+    // Add video stream
+    hr = muxer->writer->lpVtbl->AddStream(muxer->writer, videoType, &muxer->videoStreamIndex);
+    if (FAILED(hr)) {
+        MuxLog("StreamingMuxer: AddStream (video) failed 0x%08X\n", hr);
+        goto cleanup;
+    }
+    
+    // HEVC passthrough: same type for input and output
+    hr = muxer->writer->lpVtbl->SetInputMediaType(muxer->writer, muxer->videoStreamIndex, videoType, NULL);
+    if (FAILED(hr)) {
+        MuxLog("StreamingMuxer: SetInputMediaType (video) failed 0x%08X\n", hr);
+        goto cleanup;
+    }
+    
+    // Add audio stream if config provided
+    if (audioConfig) {
+        audioType = CreateAACMediaType(audioConfig);
+        if (audioType) {
+            hr = muxer->writer->lpVtbl->AddStream(muxer->writer, audioType, &muxer->audioStreamIndex);
+            if (SUCCEEDED(hr)) {
+                hr = muxer->writer->lpVtbl->SetInputMediaType(muxer->writer, muxer->audioStreamIndex, audioType, NULL);
+                if (SUCCEEDED(hr)) {
+                    muxer->hasAudio = TRUE;
+                    MuxLog("StreamingMuxer: Audio stream added (sr=%d, ch=%d)\n", 
+                           audioConfig->sampleRate, audioConfig->channels);
+                }
+            }
+            if (!muxer->hasAudio) {
+                MuxLog("StreamingMuxer: WARNING - Audio stream setup failed, continuing without audio\n");
+            }
+        }
+    }
+    
+    // Begin writing
+    hr = muxer->writer->lpVtbl->BeginWriting(muxer->writer);
+    if (FAILED(hr)) {
+        MuxLog("StreamingMuxer: BeginWriting failed 0x%08X\n", hr);
+        goto cleanup;
+    }
+    muxer->beginWritingCalled = TRUE;
+    
+    MuxLog("StreamingMuxer: Ready for streaming writes\n");
+    success = TRUE;
+    
+cleanup:
+    SAFE_RELEASE(audioType);
+    SAFE_RELEASE(videoType);
+    SAFE_RELEASE(attrs);
+    
+    if (!success) {
+        if (muxer) {
+            SAFE_RELEASE(muxer->writer);
+            DeleteCriticalSection(&muxer->lock);
+            free(muxer);
+        }
+        return NULL;
+    }
+    
+    return muxer;
+}
+
+BOOL StreamingMuxer_WriteVideo(StreamingMuxer* muxer, const MuxerSample* sample) {
+    if (!muxer || !muxer->writer || !sample) return FALSE;
+    if (!sample->data || sample->size == 0) return FALSE;
+    
+    BOOL result = FALSE;
+    
+    EnterCriticalSection(&muxer->lock);
+    
+    if (WriteVideoSampleToWriter(muxer->writer, muxer->videoStreamIndex, sample)) {
+        muxer->videoSamplesWritten++;
+        muxer->lastVideoTimestamp = sample->timestamp;
+        if (sample->isKeyframe) muxer->keyframeCount++;
+        result = TRUE;
+    }
+    
+    LeaveCriticalSection(&muxer->lock);
+    
+    return result;
+}
+
+BOOL StreamingMuxer_WriteAudio(StreamingMuxer* muxer, const MuxerAudioSample* sample) {
+    if (!muxer || !muxer->writer || !muxer->hasAudio || !sample) return FALSE;
+    if (!sample->data || sample->size == 0) return FALSE;
+    
+    BOOL result = FALSE;
+    
+    EnterCriticalSection(&muxer->lock);
+    
+    if (WriteAudioSampleToWriter(muxer->writer, muxer->audioStreamIndex, sample)) {
+        muxer->audioSamplesWritten++;
+        muxer->lastAudioTimestamp = sample->timestamp;
+        result = TRUE;
+    }
+    
+    LeaveCriticalSection(&muxer->lock);
+    
+    return result;
+}
+
+BOOL StreamingMuxer_Close(StreamingMuxer* muxer) {
+    if (!muxer) return FALSE;
+    
+    BOOL result = FALSE;
+    HRESULT hr = S_OK;
+    
+    EnterCriticalSection(&muxer->lock);
+    
+    MuxLog("StreamingMuxer: Closing (video=%d, audio=%d, keyframes=%d)\n",
+           muxer->videoSamplesWritten, muxer->audioSamplesWritten, muxer->keyframeCount);
+    
+    if (muxer->writer && muxer->beginWritingCalled) {
+        DWORD finalizeStart = GetTickCount();
+        hr = muxer->writer->lpVtbl->Finalize(muxer->writer);
+        DWORD finalizeTime = GetTickCount() - finalizeStart;
+        
+        if (FAILED(hr)) {
+            MuxLog("StreamingMuxer: Finalize failed 0x%08X after %u ms\n", hr, finalizeTime);
+        } else {
+            if (finalizeTime > 2000) {
+                MuxLog("StreamingMuxer: Finalize took %u ms (slow disk?)\n", finalizeTime);
+            }
+            result = (muxer->videoSamplesWritten > 0);
+        }
+    }
+    
+    SAFE_RELEASE(muxer->writer);
+    
+    LeaveCriticalSection(&muxer->lock);
+    DeleteCriticalSection(&muxer->lock);
+    
+    MuxLog("StreamingMuxer: Close %s\n", result ? "OK" : "FAILED");
+    free(muxer);
+    
+    return result;
+}
+
+void StreamingMuxer_Abort(StreamingMuxer* muxer) {
+    if (!muxer) return;
+    
+    MuxLog("StreamingMuxer: Aborting (video=%d written before abort)\n", 
+           muxer->videoSamplesWritten);
+    
+    EnterCriticalSection(&muxer->lock);
+    
+    // Release without finalize - file will be corrupted but we exit fast
+    SAFE_RELEASE(muxer->writer);
+    
+    LeaveCriticalSection(&muxer->lock);
+    DeleteCriticalSection(&muxer->lock);
+    
+    free(muxer);
 }

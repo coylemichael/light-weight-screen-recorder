@@ -1,5 +1,9 @@
 /*
- * gpu_converter.h - D3D11 Video Processor BGRA→NV12 conversion (zero-copy GPU path)
+ * gpu_converter.h - D3D11 Video Processor BGRA→NV12 Conversion
+ * 
+ * SHARED BY: replay_buffer.c, recording.c
+ * 
+ * Zero-copy GPU color space conversion for NVENC input.
  */
 
 #ifndef GPU_CONVERTER_H

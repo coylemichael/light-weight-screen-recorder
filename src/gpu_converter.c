@@ -1,5 +1,10 @@
 /*
- * gpu_converter.c - D3D11 Video Processor BGRA→NV12 conversion (zero-copy GPU path)
+ * gpu_converter.c - D3D11 Video Processor BGRA→NV12 Conversion
+ * 
+ * SHARED BY: replay_buffer.c, recording.c
+ * 
+ * Zero-copy GPU color space conversion using D3D11 Video Processor.
+ * Converts captured BGRA textures to NV12 format required by NVENC.
  *
  * ERROR HANDLING PATTERN:
  * - Goto-cleanup (fail label) for Init with multiple resource allocations

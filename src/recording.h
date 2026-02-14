@@ -1,8 +1,12 @@
 /*
- * recording.h - Traditional recording lifecycle management
+ * recording.h - Traditional Recording (NVENC Hardware Path)
  * 
- * Owns the recording thread, capture loop, and encoder coordination.
- * Symmetric with replay_buffer.h - both manage their own lifecycles.
+ * USES: nvenc_encoder, gpu_converter, mp4_muxer (streaming)
+ * 
+ * Direct-to-disk recording; writes frames as they arrive.
+ * Symmetric with replay_buffer.h - both use same encoding modules.
+ * 
+ * TODO: Add audio support (see replay_buffer.c for pattern)
  */
 
 #ifndef RECORDING_H
@@ -10,8 +14,11 @@
 
 #include <windows.h>
 #include "config.h"
-#include "encoder.h"
 #include "capture.h"
+#include "nvenc_encoder.h"
+#include "gpu_converter.h"
+#include "mp4_muxer.h"
+#include "constants.h"
 
 // Recording lifecycle states (matches ReplayStateEnum pattern)
 typedef enum {
@@ -30,8 +37,12 @@ typedef struct {
     HANDLE thread;
     volatile LONG stopRequested;    // Thread-safe stop flag
     
-    // Encoder (owned)
-    EncoderState encoder;
+    // Video pipeline (owned)
+    NVENCEncoder* encoder;          // NVENC hardware encoder
+    GPUConverter gpuConverter;      // BGRA→NV12 GPU conversion
+    StreamingMuxer* muxer;          // MP4 streaming writer
+    BYTE seqHeader[MAX_SEQ_HEADER_SIZE];  // HEVC VPS/SPS/PPS
+    DWORD seqHeaderSize;
     
     // Capture reference (borrowed from caller)
     CaptureState* capture;
@@ -39,9 +50,15 @@ typedef struct {
     // Timing
     ULONGLONG startTime;            // GetTickCount64 when started
     int fps;                        // Actual recording FPS
+    int width;
+    int height;
     
     // Output
     char outputPath[MAX_PATH];
+    
+    // Stats
+    volatile LONG framesCaptured;
+    volatile LONG framesEncoded;
     
     // Callbacks for UI notification (optional)
     HWND notifyWindow;
@@ -53,7 +70,7 @@ void Recording_Init(RecordingState* state);
 
 // Start recording to file
 // capture: Initialized capture state with region already set
-// config: App config for format/quality settings
+// config: App config for format/quality/audio settings
 // Returns FALSE if already recording or initialization fails
 BOOL Recording_Start(RecordingState* state, CaptureState* capture, 
                      const AppConfig* config, const char* outputPath);

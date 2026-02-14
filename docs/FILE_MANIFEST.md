@@ -8,8 +8,7 @@ One-liner purpose for each source file. If a file is doing more than this, quest
 |------|---------|
 | `main.c` | Entry point, instance mutex, window creation, message loop |
 | `capture.c` | DXGI Desktop Duplication - acquire frames from desktop |
-| `encoder.c` | Media Foundation H.264/HEVC/WMV sink writer for traditional recording |
-| `recording.c` | Traditional recording lifecycle (thread, start/stop, state machine) |
+| `recording.c` | Direct-to-disk NVENC recording (thread, start/stop, state machine) |
 | `gpu_converter.c` | D3D11 Video Processor BGRA→NV12 conversion (zero-copy GPU path) |
 | `nvenc_encoder.c` | CUDA-based NVENC HEVC encoding |
 | `frame_buffer.c` | Circular buffer of encoded video samples |
@@ -20,7 +19,7 @@ One-liner purpose for each source file. If a file is doing more than this, quest
 
 | File | Purpose |
 |------|---------|
-| `audio_device.c` | Enumerate/select WASAPI audio devices |
+| `audio_device.c` | Enumerate/select WASAPI devices, owns shared IMMDeviceEnumerator |
 | `audio_capture.c` | WASAPI capture + mixing from up to 3 sources |
 | `aac_encoder.c` | Media Foundation AAC encoding |
 
@@ -29,8 +28,12 @@ One-liner purpose for each source file. If a file is doing more than this, quest
 | File | Purpose |
 |------|---------|
 | `overlay.c` | Recording indicator overlay window + hotkey handling |
+| `settings_dialog.c` | Settings window UI creation and event handling |
 | `action_toolbar.c` | Custom floating toolbar with smooth rounded corners for selection UI |
 | `border.c` | Screen region selection border |
+| `layered_window.c` | DIB + UpdateLayeredWindow helper for transparent overlays |
+| `ui_draw.c` | Shared UI drawing utilities |
+| `tray_icon.c` | System tray icon management |
 
 ## Infrastructure
 

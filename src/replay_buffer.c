@@ -1,9 +1,11 @@
 /*
- * Replay Buffer - ShadowPlay-style instant replay
+ * replay_buffer.c - Instant Replay (ShadowPlay-style)
  * 
- * Uses RAM-based circular buffer of encoded HEVC samples.
- * On save: muxes buffered samples to MP4 (no re-encoding).
- * Full GPU pipeline: DXGI capture → GPU color convert → NVENC (native API)
+ * USES: nvenc_encoder.c, gpu_converter.c, frame_buffer.c, mp4_muxer.c (batch)
+ * 
+ * Continuously captures to RAM-based circular buffer of encoded HEVC frames.
+ * On save: muxes buffered frames to MP4 (no re-encoding needed).
+ * Pipeline: DXGI capture → GPU color convert → NVENC → FrameBuffer ring
  *
  * ERROR HANDLING PATTERN:
  * - Early return for simple validation/precondition checks

@@ -14,4 +14,14 @@ BOOL Overlay_Create(HINSTANCE hInstance);
 // Destroy overlay windows
 void Overlay_Destroy(void);
 
+// Helper function to calculate aspect ratio dimensions
+// Used by settings dialog for replay preview
+void GetAspectRatioDimensions(int aspectIndex, int* ratioW, int* ratioH);
+
+// Update the replay capture source preview overlay
+void UpdateReplayPreview(void);
+
+// Save the current area selector position to config
+void SaveAreaSelectorPosition(void);
+
 #endif // OVERLAY_H

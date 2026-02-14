@@ -1,7 +1,11 @@
 /*
- * Frame Buffer Implementation
- * Thread-safe circular buffer for encoded video frames
- * Muxing responsibility delegated to mp4_muxer module
+ * frame_buffer.c - Circular Frame Buffer for Replay
+ * 
+ * USED BY: replay_buffer.c ONLY
+ * 
+ * Thread-safe circular buffer storing encoded HEVC frames.
+ * Maintains a rolling window of the last N seconds for instant replay saves.
+ * Recording uses StreamingMuxer instead (no buffering needed).
  *
  * ERROR HANDLING PATTERN:
  * - Early return for simple validation/precondition checks

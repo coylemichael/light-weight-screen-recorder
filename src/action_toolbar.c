@@ -14,6 +14,7 @@
 #include <windows.h>
 #include <windowsx.h>  // GET_X_LPARAM, GET_Y_LPARAM
 #include "gdiplus_api.h"
+#include "layered_window.h"
 
 // windowsx.h defines DeleteFont/SelectFont macros that conflict with GDI+ function names
 #undef DeleteFont
@@ -190,51 +191,17 @@ static void UpdateToolbarBitmap(void) {
     int width = TOOLBAR_WIDTH;
     int height = TOOLBAR_HEIGHT;
     
-    HDC screenDC = NULL;
-    HDC memDC = NULL;
-    HBITMAP hBitmap = NULL;
-    HBITMAP oldBitmap = NULL;
-    
-    // Create 32-bit DIB
-    BITMAPINFO bmi = {0};
-    bmi.bmiHeader.biSize = sizeof(BITMAPINFOHEADER);
-    bmi.bmiHeader.biWidth = width;
-    bmi.bmiHeader.biHeight = -height; // Top-down
-    bmi.bmiHeader.biPlanes = 1;
-    bmi.bmiHeader.biBitCount = 32;
-    bmi.bmiHeader.biCompression = BI_RGB;
-    
-    void* bits = NULL;
-    screenDC = GetDC(NULL);
-    if (!screenDC) return;
-    
-    memDC = CreateCompatibleDC(screenDC);
-    if (!memDC) goto cleanup;
-    
-    hBitmap = CreateDIBSection(screenDC, &bmi, DIB_RGB_COLORS, &bits, NULL, 0);
-    if (!hBitmap) goto cleanup;
-    
-    oldBitmap = SelectObject(memDC, hBitmap);
+    LayeredBitmap lb = {0};
+    if (!LayeredBitmap_Create(&lb, width, height)) return;
     
     // Paint using GDI+
-    PaintToolbar(memDC, width, height);
+    PaintToolbar(lb.memDC, width, height);
     
-    // Update layered window
-    POINT ptSrc = {0, 0};
-    SIZE sizeWnd = {width, height};
-    BLENDFUNCTION blend = {AC_SRC_OVER, 0, 255, AC_SRC_ALPHA};
-    
+    // Apply and cleanup
     RECT wr;
     GetWindowRect(g_ui.wnd, &wr);
-    POINT ptDst = {wr.left, wr.top};
-    
-    UpdateLayeredWindow(g_ui.wnd, screenDC, &ptDst, &sizeWnd, memDC, &ptSrc, 0, &blend, ULW_ALPHA);
-    
-cleanup:
-    if (oldBitmap) SelectObject(memDC, oldBitmap);
-    if (hBitmap) DeleteObject(hBitmap);
-    if (memDC) DeleteDC(memDC);
-    if (screenDC) ReleaseDC(NULL, screenDC);
+    LayeredBitmap_Apply(&lb, g_ui.wnd, wr.left, wr.top);
+    LayeredBitmap_Destroy(&lb);
 }
 
 // Hit test to find which button is under the cursor
