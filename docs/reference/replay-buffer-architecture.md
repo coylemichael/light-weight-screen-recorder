@@ -2,6 +2,14 @@
 
 **Status**: ✅ Implemented (Jan 2026)
 
+## Contents
+
+| Section | What's There |
+|---------|-------------|
+| [Overview](#overview) | ShadowPlay-style instant replay concept |
+| [Pipeline](#pipeline) | Video/audio capture → buffer → save flow |
+| [Components](#components) | NVENC, GPU converter, audio, muxer, buffer |
+
 ## Overview
 
 ShadowPlay-style instant replay: RAM-based circular buffer of HEVC samples via NVIDIA NVENC hardware encoder. On-demand MP4 muxing - no disk I/O during buffering, instant save without re-encoding.

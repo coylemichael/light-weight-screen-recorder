@@ -2,14 +2,24 @@
 
 One-liner purpose for each source file. If a file is doing more than this, question it.
 
+## Contents
+
+| Section | What's There |
+|---------|-------------|
+| [Core Pipeline](#core-pipeline) | Main, capture, encoding, recording, replay |
+| [Audio](#audio) | WASAPI capture, AAC encoding |
+| [UI](#ui) | Overlay, settings, toolbar, border |
+| [Infrastructure](#infrastructure) | Config, logging, utilities |
+| [Safety](#safety) | Memory tracking, crash handling |
+| [External](#external) | GDI+, NVENC SDK headers |
+
 ## Core Pipeline
 
 | File | Purpose |
 |------|---------|
 | `main.c` | Entry point, instance mutex, window creation, message loop |
 | `capture.c` | DXGI Desktop Duplication - acquire frames from desktop |
-| `encoder.c` | Media Foundation H.264/HEVC/WMV sink writer for traditional recording |
-| `recording.c` | Traditional recording lifecycle (thread, start/stop, state machine) |
+| `recording.c` | Direct-to-disk NVENC recording (thread, start/stop, state machine) |
 | `gpu_converter.c` | D3D11 Video Processor BGRA→NV12 conversion (zero-copy GPU path) |
 | `nvenc_encoder.c` | CUDA-based NVENC HEVC encoding |
 | `frame_buffer.c` | Circular buffer of encoded video samples |

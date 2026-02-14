@@ -1,10 +1,24 @@
 # Coding Best Practice
 
-Project-specific coding patterns and audit checklist. For architecture details, see [REPLAY_BUFFER_ARCHITECTURE.md](REPLAY_BUFFER_ARCHITECTURE.md).
+Project-specific coding patterns and audit checklist. For architecture details, see [replay-buffer-architecture.md](../reference/replay-buffer-architecture.md).
+
+## Contents
+
+| Section | What's There |
+|---------|-------------|
+| [File Header Requirement](#file-header-requirement) | Docstring matching manifest |
+| [Design Principles](#design-principles) | YAGNI, verify assumptions |
+| [Audit Checklist](#audit-checklist) | Questions for code review |
+| [C Best Practices](#c-best-practices) | Goto-cleanup, SAFE_* macros |
+| [Thread Safety](#thread-safety) | Interlocked, Windows events |
+| [COM Initialization](#com-initialization) | CoInitializeEx pattern |
+| [Error Handling](#error-handling) | HRESULT, NULL checks |
+| [Common Pitfalls](#common-pitfalls) | Known bugs to avoid |
+| [Lessons Learned](#lessons-learned-r1r2-code-review) | Real bugs from R1/R2 review |
 
 ## File Header Requirement
 
-Every `.c` file MUST have a docstring matching its [FILE_MANIFEST.md](FILE_MANIFEST.md) entry:
+Every `.c` file MUST have a docstring matching its [file-manifest.md](../reference/file-manifest.md) entry:
 
 ```c
 /*
@@ -34,7 +48,7 @@ If the docstring doesn't match the manifest, either:
 
 # Audit Checklist
 
-Questions to ask when reviewing any file. See [FILE_MANIFEST.md](FILE_MANIFEST.md) for what each file should do.
+Questions to ask when reviewing any file. See [file-manifest.md](../reference/file-manifest.md) for what each file should do.
 
 ## YAGNI Questions
 

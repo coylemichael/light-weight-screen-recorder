@@ -2,12 +2,25 @@
 
 Track review status of each source file against our coding standards.
 
+## Contents
+
+| Section | What's There |
+|---------|-------------|
+| [Review Criteria](#review-criteria) | What we check against |
+| [Review Checklist](#review-checklist-per-file) | 10-point checklist |
+| [Core Pipeline](#core-pipeline) | Main, capture, encoding, replay |
+| [Audio](#audio) | WASAPI, AAC |
+| [UI](#ui) | Overlay, settings, toolbar |
+| [Infrastructure](#infrastructure) | Config, logging, utilities |
+| [Safety](#safety) | Memory tracking, crash handling |
+| [Progress Summary](#progress-summary) | 44/44 files reviewed |
+
 ## Review Criteria
 
 Each file is checked against:
-- [CODING_BEST_PRACTICE.md](CODING_BEST_PRACTICE.md) - Patterns, YAGNI, resource management
-- [FILE_MANIFEST.md](FILE_MANIFEST.md) - File header matches purpose
-- [debugging.md](skills/debugging.md) - Error handling, tracing
+- [coding-rules.md](../rules/coding-rules.md) - Patterns, YAGNI, resource management
+- [file-manifest.md](../reference/file-manifest.md) - File header matches purpose
+- [debugging.md](../process/debugging.md) - Error handling, tracing
 
 ## Review Checklist Per File
 
@@ -33,8 +46,6 @@ Each file is checked against:
 | `capture.h` | ✅ | ✅ | R1: 3, R2: 1 | R1: Docstring updated, removed unused `MonitorEnumProc`, `Capture_EnumMonitors`, `Capture_ReleaseFrame`. R2: Removed unused `capturing` field from CaptureState |
 | `gpu_converter.c` | ✅ | ✅ | R1: 2, R2: 0 | R1: Docstring updated to match manifest; manifest updated (zero-copy, no CPU readback). R2: Clean - all includes used, goto-cleanup pattern, SAFE_RELEASE, FAILED() checks |
 | `gpu_converter.h` | ✅ | ✅ | R1: 1, R2: 1 | R1: Docstring updated. R2: Removed unused `<d3d11_1.h>` |
-| `encoder.c` | ✅ | ✅ | R1: 2, R2: 1 | R1: Docstring updated; removed unused `Encoder_GetOutputPath`; added to FILE_MANIFEST.md. R2: Removed unused `<mferror.h>` |
-| `encoder.h` | ✅ | ✅ | R1: 2, R2: 0 | R1: Docstring updated; removed unused `Encoder_GetOutputPath` declaration. R2: Clean - all MF headers required by mfreadwrite.h dependencies, all functions called |
 | `nvenc_encoder.c` | ✅ | ✅ | R1: 2, R2: 0 | R1: Removed unused `<stdio.h>`; removed 3 dead code stubs. R2: Clean - all includes used (leak_tracker.h, constants.h), all functions called from replay_buffer.c, proper goto-cleanup via NVENCEncoder_Destroy |
 | `nvenc_encoder.h` | ✅ | ✅ | R1: 0, R2: 2 | R1: Docstring aligns with manifest (detailed OK). R2: Removed unused `NVENCEncoder_IsAvailable`, `NVENCEncoder_ForceCleanupLeaked` |
 | `frame_buffer.c` | ✅ | ✅ | R1: 5, R2: 0 | R1: Removed unused `util.h`, `<stdio.h>`, `FrameBuffer_WriteToFile`, `FrameBuffer_Clear`; use `SAFE_FREE`. R2: Clean - all includes used, all functions called from replay_buffer.c, proper goto-cleanup pattern, SAFE_FREE in cleanup, size_t overflow protection |
@@ -118,9 +129,11 @@ Each file is checked against:
 
 ## Progress Summary
 
-- **Total files:** 46
-- **Reviewed:** 46
-- **R2 Reviewed:** 46
-- **Compliant:** 46
+- **Total files:** 44
+- **Reviewed:** 44
+- **R2 Reviewed:** 44
+- **Compliant:** 44
 - **Has issues:** 0
 - **Remaining:** 0 ✅
+
+*Note: encoder.c/encoder.h deleted in v1.3.11 NVENC migration*

@@ -2,6 +2,14 @@
 
 Use before any non-trivial change: new features, refactors, architecture changes.
 
+## Contents
+
+| Section | What's There |
+|---------|-------------|
+| [The Process](#the-process) | Understand → Explore → Present → Approve |
+| [Key Principles](#key-principles) | One question, multiple choice, YAGNI |
+| [Example](#example-lwsr) | LWSR-specific good/bad example |
+
 ## The Process
 
 ### 1. Understand First
