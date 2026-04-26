@@ -46,6 +46,8 @@ typedef struct {
     CRITICAL_SECTION lock;      // Thread safety
     BOOL initialized;
     
+    int evictLogCounter;        // Log throttle (resets on buffer restart)
+    
 } FrameBuffer;
 
 // Initialize buffer for given duration

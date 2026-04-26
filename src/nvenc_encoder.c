@@ -18,6 +18,7 @@
 #include "logger.h"
 #include "constants.h"
 #include "leak_tracker.h"
+#include "mem_utils.h"
 #include <stdlib.h>
 #include <string.h>
 
@@ -131,8 +132,6 @@ typedef struct {
 // ============================================================================
 
 #define NUM_BUFFERS 4
-#define GOP_LENGTH_SECONDS 2
-#define MF_UNITS_PER_SECOND 10000000LL
 
 // ============================================================================
 // Encoder State
@@ -164,6 +163,10 @@ struct NVENCEncoder {
     
     // Frame counter
     uint64_t frameNumber;
+    
+    // Cached staging texture for SubmitTexture (avoid per-frame GPU alloc)
+    ID3D11Texture2D* stagingTexture;
+    ID3D11DeviceContext* stagingCtx;
     
     // Callback
     EncodedFrameCallback frameCallback;
@@ -760,6 +763,10 @@ void NVENCEncoder_Destroy(NVENCEncoder* enc) {
     // Free CUDA context
     cuda_ctx_free(enc);
     
+    // Release cached staging texture
+    SAFE_RELEASE(enc->stagingTexture);
+    SAFE_RELEASE(enc->stagingCtx);
+    
     if (enc->nvencLib) {
         FreeLibrary(enc->nvencLib);
     }
@@ -774,45 +781,37 @@ void NVENCEncoder_Destroy(NVENCEncoder* enc) {
 int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Texture, LONGLONG timestamp) {
     if (!enc || !nv12Texture) return 0;
     
-    // Get device context
-    ID3D11Device* device = NULL;
-    ID3D11DeviceContext* ctx = NULL;
-    nv12Texture->lpVtbl->GetDevice(nv12Texture, &device);
-    if (!device) return 0;
-    device->lpVtbl->GetImmediateContext(device, &ctx);
-    device->lpVtbl->Release(device);
-    if (!ctx) return 0;
-    
-    // Create staging texture for CPU readback
-    D3D11_TEXTURE2D_DESC texDesc;
-    nv12Texture->lpVtbl->GetDesc(nv12Texture, &texDesc);
-    
-    texDesc.Usage = D3D11_USAGE_STAGING;
-    texDesc.BindFlags = 0;
-    texDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-    texDesc.MiscFlags = 0;
-    
-    ID3D11Texture2D* staging = NULL;
-    nv12Texture->lpVtbl->GetDevice(nv12Texture, &device);
-    HRESULT hr = device->lpVtbl->CreateTexture2D(device, &texDesc, NULL, &staging);
-    device->lpVtbl->Release(device);
-    
-    if (FAILED(hr) || !staging) {
-        ctx->lpVtbl->Release(ctx);
-        return 0;
+    // Create staging texture on first use (cached to avoid per-frame GPU alloc)
+    if (!enc->stagingTexture) {
+        ID3D11Device* device = NULL;
+        nv12Texture->lpVtbl->GetDevice(nv12Texture, &device);
+        if (!device) return 0;
+        
+        device->lpVtbl->GetImmediateContext(device, &enc->stagingCtx);
+        
+        D3D11_TEXTURE2D_DESC texDesc;
+        nv12Texture->lpVtbl->GetDesc(nv12Texture, &texDesc);
+        texDesc.Usage = D3D11_USAGE_STAGING;
+        texDesc.BindFlags = 0;
+        texDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        texDesc.MiscFlags = 0;
+        
+        HRESULT hr = device->lpVtbl->CreateTexture2D(device, &texDesc, NULL, &enc->stagingTexture);
+        device->lpVtbl->Release(device);
+        
+        if (FAILED(hr) || !enc->stagingTexture) {
+            SAFE_RELEASE(enc->stagingCtx);
+            return 0;
+        }
     }
     
     // Copy GPU texture to staging
-    ctx->lpVtbl->CopyResource(ctx, (ID3D11Resource*)staging, (ID3D11Resource*)nv12Texture);
+    enc->stagingCtx->lpVtbl->CopyResource(enc->stagingCtx, (ID3D11Resource*)enc->stagingTexture, (ID3D11Resource*)nv12Texture);
     
     // Map staging texture
     D3D11_MAPPED_SUBRESOURCE mapped;
-    hr = ctx->lpVtbl->Map(ctx, (ID3D11Resource*)staging, 0, D3D11_MAP_READ, 0, &mapped);
-    if (FAILED(hr)) {
-        staging->lpVtbl->Release(staging);
-        ctx->lpVtbl->Release(ctx);
-        return 0;
-    }
+    HRESULT hr = enc->stagingCtx->lpVtbl->Map(enc->stagingCtx, (ID3D11Resource*)enc->stagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) return 0;
     
     // NV12: Y plane at offset 0, UV plane at offset height * pitch
     BYTE* data[2];
@@ -826,10 +825,8 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Texture, 
     // Call new interface
     int result = NVENCEncoder_SubmitFrame(enc, data, linesize, timestamp);
     
-    // Cleanup
-    ctx->lpVtbl->Unmap(ctx, (ID3D11Resource*)staging, 0);
-    staging->lpVtbl->Release(staging);
-    ctx->lpVtbl->Release(ctx);
+    // Unmap (texture stays allocated for next frame)
+    enc->stagingCtx->lpVtbl->Unmap(enc->stagingCtx, (ID3D11Resource*)enc->stagingTexture, 0);
     
     return result;
 }

@@ -116,7 +116,7 @@ void Config_Load(AppConfig* config) {
         config->outputFormat = (OutputFormat)GetPrivateProfileIntA(
             "Recording", "Format", FORMAT_MP4, configPath);
         config->quality = (QualityPreset)GetPrivateProfileIntA(
-            "Recording", "Quality", QUALITY_HIGH, configPath);
+            "Recording", "Quality", QUALITY_LOSSLESS, configPath);
         config->captureMouse = GetPrivateProfileIntA(
             "Recording", "CaptureMouse", TRUE, configPath);
         config->showRecordingBorder = GetPrivateProfileIntA(
@@ -130,7 +130,7 @@ void Config_Load(AppConfig* config) {
         config->replayEnabled = GetPrivateProfileIntA(
             "ReplayBuffer", "Enabled", FALSE, configPath);
         config->replayDuration = GetPrivateProfileIntA(
-            "ReplayBuffer", "Duration", 60, configPath);
+            "ReplayBuffer", "Duration", REPLAY_DURATION_DEFAULT, configPath);
         config->replayCaptureSource = (CaptureMode)GetPrivateProfileIntA(
             "ReplayBuffer", "CaptureSource", MODE_MONITOR, configPath);
         config->replayMonitorIndex = GetPrivateProfileIntA(

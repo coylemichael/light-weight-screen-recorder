@@ -180,6 +180,13 @@ typedef struct AreaSelectorState {
 
 static AreaSelectorState g_area = {0};
 
+/* Cached GDI resources for area selector painting (avoid per-paint allocs) */
+static HBRUSH g_areaFillBrush = NULL;
+static HPEN   g_areaBorderPen = NULL;
+static HBRUSH g_areaHandleBrush = NULL;
+static HPEN   g_areaHandlePen = NULL;
+static HFONT  g_areaFont = NULL;
+
 #define RESIZE_HANDLE_SIZE 8
 #define MIN_AREA_SIZE 100
 
@@ -205,47 +212,46 @@ static LRESULT CALLBACK AreaSelectorWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
             RECT rc;
             GetClientRect(hwnd, &rc);
             
+            // Create cached GDI resources on first paint
+            if (!g_areaFillBrush) {
+                g_areaFillBrush = CreateSolidBrush(RGB(255, 50, 50));
+                g_areaBorderPen = CreatePen(PS_SOLID, 2, RGB(255, 0, 0));
+                g_areaHandleBrush = CreateSolidBrush(RGB(255, 255, 255));
+                g_areaHandlePen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));
+                g_areaFont = CreateFontA(14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, 
+                                         ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                                         CLEARTYPE_QUALITY, DEFAULT_PITCH, "Segoe UI");
+            }
+            
             // Semi-transparent fill
-            HBRUSH fillBrush = CreateSolidBrush(RGB(255, 50, 50));
-            HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, fillBrush);
-            HPEN borderPen = CreatePen(PS_SOLID, 2, RGB(255, 0, 0));
-            HPEN oldPen = (HPEN)SelectObject(hdc, borderPen);
+            HBRUSH oldBrush = (HBRUSH)SelectObject(hdc, g_areaFillBrush);
+            HPEN oldPen = (HPEN)SelectObject(hdc, g_areaBorderPen);
             
             Rectangle(hdc, 0, 0, rc.right, rc.bottom);
             
             // Draw resize handles at corners (only if not locked)
             if (!g_area.locked) {
-                HBRUSH handleBrush = CreateSolidBrush(RGB(255, 255, 255));
-                HPEN handlePen = CreatePen(PS_SOLID, 1, RGB(255, 255, 255));  // White pen to match fill
-                SelectObject(hdc, handleBrush);
-                SelectObject(hdc, handlePen);
+                SelectObject(hdc, g_areaHandleBrush);
+                SelectObject(hdc, g_areaHandlePen);
                 
                 // Corner handles
                 Rectangle(hdc, 0, 0, RESIZE_HANDLE_SIZE, RESIZE_HANDLE_SIZE);
                 Rectangle(hdc, rc.right - RESIZE_HANDLE_SIZE, 0, rc.right, RESIZE_HANDLE_SIZE);
                 Rectangle(hdc, 0, rc.bottom - RESIZE_HANDLE_SIZE, RESIZE_HANDLE_SIZE, rc.bottom);
                 Rectangle(hdc, rc.right - RESIZE_HANDLE_SIZE, rc.bottom - RESIZE_HANDLE_SIZE, rc.right, rc.bottom);
-                DeleteObject(handleBrush);
-                DeleteObject(handlePen);
-                SelectObject(hdc, borderPen);  // Restore border pen
+                SelectObject(hdc, g_areaBorderPen);  // Restore border pen
             }
             
             // Draw text in center
             SetBkMode(hdc, TRANSPARENT);
             SetTextColor(hdc, RGB(255, 255, 255));
-            HFONT font = CreateFontA(14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE, 
-                                     ANSI_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                                     CLEARTYPE_QUALITY, DEFAULT_PITCH, "Segoe UI");
-            HFONT oldFont = (HFONT)SelectObject(hdc, font);
+            HFONT oldFont = (HFONT)SelectObject(hdc, g_areaFont);
             const char* text = g_area.locked ? "Capture Area" : "Drag to move, corners to resize";
             DrawTextA(hdc, text, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
             
             SelectObject(hdc, oldFont);
             SelectObject(hdc, oldPen);
             SelectObject(hdc, oldBrush);
-            DeleteObject(font);
-            DeleteObject(fillBrush);
-            DeleteObject(borderPen);
             
             EndPaint(hwnd, &ps);
             return 0;
@@ -365,6 +371,13 @@ void AreaSelector_Shutdown(void) {
         g_area.wnd = NULL;
     }
     g_area.visible = FALSE;
+    
+    // Release cached GDI resources
+    if (g_areaFillBrush)   { DeleteObject(g_areaFillBrush);   g_areaFillBrush = NULL; }
+    if (g_areaBorderPen)   { DeleteObject(g_areaBorderPen);   g_areaBorderPen = NULL; }
+    if (g_areaHandleBrush) { DeleteObject(g_areaHandleBrush); g_areaHandleBrush = NULL; }
+    if (g_areaHandlePen)   { DeleteObject(g_areaHandlePen);   g_areaHandlePen = NULL; }
+    if (g_areaFont)        { DeleteObject(g_areaFont);        g_areaFont = NULL; }
 }
 
 void AreaSelector_Show(RECT initialRect, BOOL allowMove) {

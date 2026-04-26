@@ -1,5 +1,28 @@
 # Changelog
 
+## [1.3.12] - 2026-04-26
+
+### Fixed
+- **Aspect ratio selection was mapping to wrong ratios** — Settings dropdown stored combo index instead of the correct `Util_GetAspectRatioDimensions` index. Selecting "21:9" produced 1:1 (square) output. Now uses `CB_SETITEMDATA`/`CB_GETITEMDATA` for correct mapping.
+- **Staging texture allocated every frame in NVENC encoder** — `NVENCEncoder_SubmitTexture()` was calling `CreateTexture2D`+`Release` per frame (60 GPU allocs/sec). Cached as struct field, released in `NVENCEncoder_Destroy()`.
+- **NULL dereference in AAC encoder error path** — `AACEncoder_CreateEx()` called raw `Release()` on potentially NULL `outputType`/`inputType`. Replaced with `SAFE_RELEASE()`.
+- **Config default mismatches** — INI fallback for Quality was `QUALITY_HIGH` (should be `QUALITY_LOSSLESS`); replay duration fallback was `60` (should be `REPLAY_DURATION_DEFAULT` = 15).
+- **Static counters persisted across replay buffer restarts** — `evictLogCounter`, `audioEvictLogCounter`, `reallocFailCount` were `static` locals that never reset. Moved to struct members.
+- **Duplicate `#define`s in nvenc_encoder.c** — `GOP_LENGTH_SECONDS` and `MF_UNITS_PER_SECOND` redefined locally despite being in `constants.h`.
+- **GDI/GDI+ resources recreated every paint** — `border.c` and `action_toolbar.c` allocated brushes/pens/fonts per paint. Cached as file-scope statics with cleanup in shutdown.
+- **`g_encoderCtx` data race** — Added `MemoryBarrier()` between struct writes and callback registration for ARM64 correctness.
+- **Pixel init loop inefficiency** — Overlay's nested BGRA byte loop replaced with single-pass 32-bit fill.
+
+### Changed
+- COM threading model documented in `main.c` (STA main thread, MTA buffer thread, no cross-thread marshaling)
+- `/GS-` rationale documented in `build.bat`
+- `Capture_GetMonitorFromPoint()` comment clarified (always returns 0, actual matching in `Capture_SetRegion`)
+- Stale "TODO: Add audio support" in `recording.h` replaced with factual note
+- `config.h` aspect ratio comment updated to reference `Util_GetAspectRatioDimensions`
+
+### Removed
+- `docs/process/brainstorm.md`, `docs/process/debugging.md`, `docs/process/review.md` — consolidated
+
 ## [1.3.11] - 2026-02-14
 
 ### Changed

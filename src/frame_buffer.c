@@ -74,9 +74,8 @@ static void EvictOldFrames(FrameBuffer* buf, LONGLONG newTimestamp) {
     }
     
     // Log eviction occasionally to show buffer is working
-    static int evictLogCounter = 0;
-    evictLogCounter++;
-    if (evicted > 0 && (evictLogCounter % EVICT_LOG_INTERVAL) == 0 && buf->count > 0) {
+    buf->evictLogCounter++;
+    if (evicted > 0 && (buf->evictLogCounter % EVICT_LOG_INTERVAL) == 0 && buf->count > 0) {
         double span = (double)(newTimestamp - buf->frames[buf->tail].timestamp) / 10000000.0;
         BufLog("Eviction: removed %d frames, count now %d, span=%.2fs\n", 
                evicted, buf->count, span);

@@ -28,6 +28,7 @@
 #include "util.h"
 #include "logger.h"
 #include "audio_capture.h"
+#include "audio_device.h"
 #include "aac_encoder.h"
 #include "mp4_muxer.h"
 #include "gpu_converter.h"
@@ -73,6 +74,8 @@ typedef struct ReplayAudioState {
     LONGLONG maxDuration;               /* Max buffer duration (100-ns units) */
     CRITICAL_SECTION lock;              /* Protects samples array */
     BOOL lockInitialized;               /* Track CS initialization */
+    int audioEvictLogCounter;           /* Log throttle (resets on buffer restart) */
+    int reallocFailCount;               /* Realloc failure log cap (resets on buffer restart) */
 } ReplayAudioState;
 
 /*
@@ -140,9 +143,8 @@ static void AudioEncoderCallback(const AACSample* sample, void* userData) {
         }
         
         /* Log eviction periodically */
-        static int audioEvictLogCounter = 0;
-        audioEvictLogCounter++;
-        if (evicted > 0 && (audioEvictLogCounter % AUDIO_EVICT_LOG_INTERVAL) == 0) {
+        audio->audioEvictLogCounter++;
+        if (evicted > 0 && (audio->audioEvictLogCounter % AUDIO_EVICT_LOG_INTERVAL) == 0) {
             double spanSec = 0;
             if (audio->sampleCount > 0) {
                 spanSec = (sample->timestamp - audio->samples[0].timestamp) / (double)MF_UNITS_PER_SECOND;
@@ -184,8 +186,7 @@ static void AudioEncoderCallback(const AACSample* sample, void* userData) {
                 audio->samples = newArr;
                 audio->sampleCapacity = newCapacity;
             } else {
-                static int reallocFailCount = 0;
-                if (++reallocFailCount <= MAX_REALLOC_FAIL_LOGS) {
+                if (++audio->reallocFailCount <= MAX_REALLOC_FAIL_LOGS) {
                     ReplayLog("WARNING: Audio buffer realloc failed (count=%d, capacity=%d)\n", 
                               audio->sampleCount, newCapacity);
                 }
@@ -603,6 +604,12 @@ static BOOL InitAudioPipeline(ReplayBufferState* state, ReplayAudioState* audio,
     if (!state->audioEnabled) return FALSE;
     if (!state->audioSource1[0] && !state->audioSource2[0] && !state->audioSource3[0]) return FALSE;
     
+    /* Ensure audio device enumerator is initialized on this thread */
+    if (!AudioDevice_Init()) {
+        ReplayLog("InitAudioPipeline: AudioDevice_Init failed\n");
+        return FALSE;
+    }
+    
     ReplayLog("Audio capture enabled, sources: [%s] [%s] [%s]\n",
               state->audioSource1[0] ? state->audioSource1 : "none",
               state->audioSource2[0] ? state->audioSource2 : "none",
@@ -804,6 +811,43 @@ static BOOL HandleSaveRequest(ReplayBufferState* state, ReplayVideoState* video,
     videoConfig.seqHeader = video->frameBuffer.seqHeaderSize > 0 ? video->frameBuffer.seqHeader : NULL;
     videoConfig.seqHeaderSize = video->frameBuffer.seqHeaderSize;
     
+    /* Trim audio to match video duration.
+     * Video starts from the first keyframe (skipping leading P-frames), but audio
+     * has the full buffer duration. Without trimming, audio is longer than video
+     * which causes A/V desync (audio plays content from before the video starts). */
+    if (audioCopy && audioCount > 0 && videoSamples && videoCount > 0) {
+        LONGLONG videoDuration = videoSamples[videoCount - 1].timestamp + videoSamples[videoCount - 1].duration;
+        LONGLONG audioDuration = audioCopy[audioCount - 1].timestamp + audioCopy[audioCount - 1].duration;
+        
+        if (audioDuration > videoDuration) {
+            LONGLONG excess = audioDuration - videoDuration;
+            int trimCount = 0;
+            
+            /* Skip audio samples from the front that fall within the excess */
+            while (trimCount < audioCount && 
+                   (audioCopy[trimCount].timestamp + audioCopy[trimCount].duration) <= excess) {
+                if (audioCopy[trimCount].data) free(audioCopy[trimCount].data);
+                audioCopy[trimCount].data = NULL;
+                trimCount++;
+            }
+            
+            if (trimCount > 0) {
+                /* Shift remaining samples and rebase timestamps */
+                int newCount = audioCount - trimCount;
+                LONGLONG newBase = audioCopy[trimCount].timestamp;
+                
+                for (int i = 0; i < newCount; i++) {
+                    audioCopy[i] = audioCopy[trimCount + i];
+                    audioCopy[i].timestamp -= newBase;
+                }
+                
+                ReplayLog("  Audio trimmed: removed %d samples (%.2fs excess), %d remain\n",
+                          trimCount, (double)excess / 10000000.0, newCount);
+                audioCount = newCount;
+            }
+        }
+    }
+    
     /* Mux to file */
     if (audioCopy && audioCount > 0) {
         ReplayLog("  Starting save (audio+video path, %d audio samples)...\n", audioCount);
@@ -843,6 +887,14 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     ReplayBufferState* state = (ReplayBufferState*)param;
     if (!state) return 1;
     
+    /* Initialize COM on this thread for WASAPI audio device access */
+    HRESULT hrCom = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    if (FAILED(hrCom) && hrCom != RPC_E_CHANGED_MODE) {
+        ReplayLog("BufferThread: CoInitializeEx failed (0x%08X)\n", hrCom);
+        InterlockedExchange(&state->state, REPLAY_STATE_ERROR);
+        return 1;
+    }
+    
     /* Reset internal state at start of each run to prevent stale state
      * NOTE: We only zero the video state, not audio state.
      * The audio critical section was initialized in ReplayBuffer_Init
@@ -867,6 +919,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     if (!InitCaptureRegion(state, capture, &rect)) {
         ReplayLog("InitCaptureRegion failed\n");
         InterlockedExchange(&state->state, REPLAY_STATE_ERROR);
+        CoUninitialize();
         return 1;
     }
     
@@ -882,6 +935,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     if (width <= 0 || height <= 0) {
         ReplayLog("Invalid capture size: %dx%d\n", width, height);
         InterlockedExchange(&state->state, REPLAY_STATE_ERROR);
+        CoUninitialize();
         return 1;
     }
     
@@ -890,8 +944,15 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
         ReplayLog("Capture_SetRegion failed - cannot capture region %d,%d,%d,%d\n",
                   rect.left, rect.top, rect.right, rect.bottom);
         InterlockedExchange(&state->state, REPLAY_STATE_ERROR);
+        CoUninitialize();
         return 1;
     }
+    
+    // Re-read actual dimensions from capture state - Capture_SetRegion may clamp
+    // the rect to the DXGI output bounds and re-apply even-rounding. Using the
+    // capture's actual dimensions guarantees zero resizing in the pipeline.
+    width = capture->captureWidth;
+    height = capture->captureHeight;
     
     state->frameWidth = width;
     state->frameHeight = height;
@@ -909,6 +970,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     
     if (!InitVideoPipeline(capture, video, &gpuConverter, width, height, fps)) {
         InterlockedExchange(&state->state, REPLAY_STATE_ERROR);
+        CoUninitialize();
         return 1;
     }
     
@@ -1194,6 +1256,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     }
     ShutdownVideoPipeline(video, &gpuConverter);
     
+    CoUninitialize();
     ReplayLog("BufferThread exit\n");
     return 0;
 }

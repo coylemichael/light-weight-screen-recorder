@@ -5,8 +5,7 @@
  * 
  * Direct-to-disk recording; writes frames as they arrive.
  * Symmetric with replay_buffer.h - both use same encoding modules.
- * 
- * TODO: Add audio support (see replay_buffer.c for pattern)
+ * Audio recording is handled by replay_buffer only (by design).
  */
 
 #ifndef RECORDING_H

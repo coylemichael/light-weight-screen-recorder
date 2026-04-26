@@ -84,9 +84,8 @@ BOOL Capture_GetMonitorFromPoint(POINT pt, RECT* monitorRect, int* monitorIndex)
     
     *monitorRect = mi.rcMonitor;
     
-    // Find the DXGI output index for this monitor
-    // Note: Returns 0 as default; caller should use Capture_SetRegion 
-    // which will find the correct output automatically
+    // Always returns 0 — actual DXGI output matching is done by Capture_SetRegion().
+    // This parameter exists for API symmetry; callers should not rely on the value.
     *monitorIndex = 0;
     
     return TRUE;
@@ -339,12 +338,16 @@ BOOL Capture_SetRegion(CaptureState* state, RECT region) {
         return FALSE;
     }
     
-    state->captureWidth = state->captureRect.right - state->captureRect.left;
-    state->captureHeight = state->captureRect.bottom - state->captureRect.top;
+    int newWidth = (state->captureRect.right - state->captureRect.left) & ~1;
+    int newHeight = (state->captureRect.bottom - state->captureRect.top) & ~1;
     
-    // Ensure even dimensions for video encoding
-    state->captureWidth &= ~1;
-    state->captureHeight &= ~1;
+    // Release GPU texture if dimensions changed (will be recreated on next frame)
+    if (state->gpuTexture && (newWidth != state->captureWidth || newHeight != state->captureHeight)) {
+        SAFE_RELEASE(state->gpuTexture);
+    }
+    
+    state->captureWidth = newWidth;
+    state->captureHeight = newHeight;
     state->captureRect.right = state->captureRect.left + state->captureWidth;
     state->captureRect.bottom = state->captureRect.top + state->captureHeight;
     
@@ -637,6 +640,9 @@ BOOL Capture_ReinitDuplication(CaptureState* state) {
     if (!state) return FALSE;
     if (!state->initialized || !state->adapter) return FALSE;
     
+    // Save capture region BEFORE InitDuplicationForOutput resets it to full monitor
+    RECT savedRect = state->captureRect;
+    
     // Release old duplication and GPU texture (has stale frames)
     ReleaseDuplication(state);
     SAFE_RELEASE(state->gpuTexture);
@@ -646,8 +652,7 @@ BOOL Capture_ReinitDuplication(CaptureState* state) {
         return FALSE;
     }
     
-    // Restore capture region
-    RECT savedRect = state->captureRect;
+    // Restore capture region (aspect-ratio crop)
     if (!Capture_SetRegion(state, savedRect)) {
         return FALSE;
     }

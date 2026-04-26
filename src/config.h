@@ -51,7 +51,7 @@ typedef struct {
     int replayMonitorIndex;          // Which monitor (if MODE_MONITOR)
     int replaySaveKey;               // Hotkey to save replay (default: F9)
     RECT replayAreaRect;             // Custom area for replay (if MODE_AREA)
-    int replayAspectRatio;           // 0=Native, 1=16:9, 2=16:10, 3=4:3, 4=21:9, 5=32:9
+    int replayAspectRatio;           // See Util_GetAspectRatioDimensions: 0=Native, 1=16:9, 6=4:3, 7=21:9, etc.
     int replayFPS;                   // 30, 60, 120, or 240
     
     // Audio capture settings

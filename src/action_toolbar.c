@@ -63,6 +63,11 @@ typedef struct ToolbarUIState {
 
 static ToolbarUIState g_ui = {0};
 
+/* Cached GDI+ resources for toolbar painting (avoid per-paint font lookups) */
+static GpFontFamily* g_cachedFontFamily = NULL;
+static GpFont*       g_cachedFont = NULL;
+static GpStringFormat* g_cachedFormat = NULL;
+
 /* Toolbar dimensions (constants) */
 #define TOOLBAR_WIDTH 180
 #define TOOLBAR_HEIGHT 36
@@ -129,19 +134,17 @@ static void PaintToolbar(HDC hdc, int width, int height) {
         g_gdip.DeletePath(bgPath);
     }
     
-    // Draw buttons
-    GpFontFamily* fontFamily = NULL;
-    GpFont* font = NULL;
-    GpStringFormat* format = NULL;
-    
-    g_gdip.CreateFontFamilyFromName(L"Segoe UI", NULL, &fontFamily);
-    if (fontFamily) {
-        g_gdip.CreateFont(fontFamily, 11.0f, 0, 2, &font); // 2 = UnitPixel... actually UnitPoint is better
-    }
-    g_gdip.CreateStringFormat(0, 0, &format);
-    if (format) {
-        g_gdip.SetStringFormatAlign(format, 1); // StringAlignmentCenter
-        g_gdip.SetStringFormatLineAlign(format, 1); // StringAlignmentCenter
+    // Create cached font resources on first paint
+    if (!g_cachedFontFamily) {
+        g_gdip.CreateFontFamilyFromName(L"Segoe UI", NULL, &g_cachedFontFamily);
+        if (g_cachedFontFamily) {
+            g_gdip.CreateFont(g_cachedFontFamily, 11.0f, 0, 2, &g_cachedFont);
+        }
+        g_gdip.CreateStringFormat(0, 0, &g_cachedFormat);
+        if (g_cachedFormat) {
+            g_gdip.SetStringFormatAlign(g_cachedFormat, 1); // StringAlignmentCenter
+            g_gdip.SetStringFormatLineAlign(g_cachedFormat, 1); // StringAlignmentCenter
+        }
     }
     
     for (int i = 0; i < BTN_COUNT; i++) {
@@ -164,22 +167,18 @@ static void PaintToolbar(HDC hdc, int width, int height) {
         }
         
         // Draw text
-        if (font && format) {
+        if (g_cachedFont && g_cachedFormat) {
             typedef struct { REAL X, Y, Width, Height; } RectF;
             RectF textRect = { (REAL)r->left, (REAL)r->top, (REAL)(r->right - r->left), (REAL)(r->bottom - r->top) };
             
             GpSolidFill* textBrush = NULL;
             g_gdip.CreateSolidFill(COLOR_TEXT, &textBrush);
             if (textBrush) {
-                g_gdip.DrawString(g, g_ui.buttons[i].text, -1, font, &textRect, format, textBrush);
+                g_gdip.DrawString(g, g_ui.buttons[i].text, -1, g_cachedFont, &textRect, g_cachedFormat, textBrush);
                 g_gdip.BrushDelete(textBrush);
             }
         }
     }
-    
-    if (format) g_gdip.DeleteStringFormat(format);
-    if (font) g_gdip.DeleteFont(font);
-    if (fontFamily) g_gdip.DeleteFontFamily(fontFamily);
     
     g_gdip.DeleteGraphics(g);
 }
@@ -358,7 +357,12 @@ void ActionToolbar_Shutdown(void) {
         DestroyWindow(g_ui.wnd);
         g_ui.wnd = NULL;
     }
-    // GDI+ shutdown handled globally by main.c
+    
+    // Release cached GDI+ font resources
+    if (g_cachedFormat)     { g_gdip.DeleteStringFormat(g_cachedFormat); g_cachedFormat = NULL; }
+    if (g_cachedFont)       { g_gdip.DeleteFont(g_cachedFont);          g_cachedFont = NULL; }
+    if (g_cachedFontFamily) { g_gdip.DeleteFontFamily(g_cachedFontFamily); g_cachedFontFamily = NULL; }
+    
     g_ui.initialized = FALSE;
 }
 

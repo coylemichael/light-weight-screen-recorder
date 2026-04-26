@@ -117,6 +117,7 @@ if "%BUILD_TYPE%"=="debug" (
         %LIBS% %RESOURCES%
 ) else (
     echo Building Lightweight Screen Recorder [RELEASE]...
+    REM /GS- disables stack buffer security checks for perf (no user-controlled input buffers)
     cl.exe /nologo /O2 /GL /GS- /MD ^
         /W4 /WX /wd4201 ^
         /D "NDEBUG" /D "WIN32" /D "_WINDOWS" /D "_CRT_SECURE_NO_WARNINGS" /D "NVENCAPI=__stdcall" ^

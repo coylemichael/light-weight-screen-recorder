@@ -141,6 +141,10 @@ BOOL Recording_Start(RecordingState* state, CaptureState* capture,
     g_encoderCtx.framesEncoded = &state->framesEncoded;
     g_encoderCtx.frameDuration = frameDuration;
     
+    // Ensure all g_encoderCtx writes are visible before encoder thread reads them.
+    // Safe on x86 (strong ordering) but required for ARM64 Windows correctness.
+    MemoryBarrier();
+    
     // Set encoder callback for async frame delivery
     NVENCEncoder_SetCallback(state->encoder, EncoderCallback, &g_encoderCtx);
     

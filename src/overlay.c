@@ -262,16 +262,13 @@ static void UpdateOverlayBitmap(void) {
     LayeredBitmap lb = {0};
     if (!LayeredBitmap_Create(&lb, width, height)) return;
     
-    // Fill entire overlay with semi-transparent dark (alpha ~100 out of 255)
-    int overlayAlpha = 100;
-    for (int y = 0; y < height; y++) {
-        for (int x = 0; x < width; x++) {
-            BYTE* pixel = lb.pixels + (y * width + x) * 4;
-            pixel[0] = 0;   // B
-            pixel[1] = 0;   // G  
-            pixel[2] = 0;   // R
-            pixel[3] = (BYTE)overlayAlpha; // A - explicit cast
-        }
+    // Fill entire overlay with semi-transparent dark (BGRA 0,0,0,alpha)
+    // Use 32-bit fill — single pass instead of per-byte writes
+    DWORD overlayPixel = 100u << 24;  // alpha=100, RGB=0
+    DWORD* pixels32 = (DWORD*)lb.pixels;
+    int pixelCount = width * height;
+    for (int i = 0; i < pixelCount; i++) {
+        pixels32[i] = overlayPixel;
     }
     
     // If we have a selection (drawing or complete), punch a clear hole

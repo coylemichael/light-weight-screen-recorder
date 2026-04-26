@@ -247,7 +247,9 @@ static void UpdateReplayRAMEstimate(HWND hwnd) {
     
     if (srcIdx < monCount) {
         /* Get monitor dimensions and apply aspect ratio */
-        int aspectIdx = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_ASPECT), CB_GETCURSEL, 0, 0);
+        HWND cmbAspect = GetDlgItem(hwnd, ID_CMB_REPLAY_ASPECT);
+        int sel = (int)SendMessage(cmbAspect, CB_GETCURSEL, 0, 0);
+        int aspectIdx = (int)SendMessage(cmbAspect, CB_GETITEMDATA, sel, 0);
         
         /* Default to primary monitor dimensions */
         width = GetSystemMetrics(SM_CXSCREEN);
@@ -655,16 +657,29 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
     
-    /* Aspect dropdown */
+    /* Aspect dropdown — item data stores the Util_GetAspectRatioDimensions index */
     HWND cmbAspect = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST,
         layout->controlX, layout->y, 180, 120, hwnd, (HMENU)ID_CMB_REPLAY_ASPECT, s_hInstance, NULL);
     SendMessage(cmbAspect, WM_SETFONT, (WPARAM)layout->font, TRUE);
-    SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"Native (full screen)");
-    SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"16:9 (centered)");
-    SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"4:3 (centered)");
-    SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)L"21:9 (ultrawide)");
-    SendMessage(cmbAspect, CB_SETCURSEL, g_config.replayAspectRatio, 0);
+    
+    /* Each entry: {label, aspectIndex matching Util_GetAspectRatioDimensions} */
+    struct { const WCHAR* label; int aspectIdx; } aspectItems[] = {
+        { L"Native (full screen)", 0 },
+        { L"16:9 (centered)",      1 },
+        { L"4:3 (centered)",       6 },
+        { L"21:9 (ultrawide)",     7 },
+    };
+    int aspectItemCount = sizeof(aspectItems) / sizeof(aspectItems[0]);
+    int selectedComboIdx = 0;
+    for (int i = 0; i < aspectItemCount; i++) {
+        int idx = (int)SendMessageW(cmbAspect, CB_ADDSTRING, 0, (LPARAM)aspectItems[i].label);
+        SendMessage(cmbAspect, CB_SETITEMDATA, idx, (LPARAM)aspectItems[i].aspectIdx);
+        if (aspectItems[i].aspectIdx == g_config.replayAspectRatio) {
+            selectedComboIdx = idx;
+        }
+    }
+    SendMessage(cmbAspect, CB_SETCURSEL, selectedComboIdx, 0);
     BOOL enableAspect = (g_config.replayCaptureSource == MODE_MONITOR);
     EnableWindow(cmbAspect, enableAspect);
     AddToSection(cmbAspect, s_videoControls, &s_videoControlCount);
@@ -1097,8 +1112,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     
                 case ID_CMB_REPLAY_ASPECT:
                     if (HIWORD(wParam) == CBN_SELCHANGE) {
-                        g_config.replayAspectRatio = (int)SendMessage(
-                            GetDlgItem(hwnd, ID_CMB_REPLAY_ASPECT), CB_GETCURSEL, 0, 0);
+                        HWND cmbAspect = GetDlgItem(hwnd, ID_CMB_REPLAY_ASPECT);
+                        int sel = (int)SendMessage(cmbAspect, CB_GETCURSEL, 0, 0);
+                        g_config.replayAspectRatio = (int)SendMessage(cmbAspect, CB_GETITEMDATA, sel, 0);
                         
                         if (g_config.replayAspectRatio > 0) {
                             g_config.replayAreaRect.left = 0;

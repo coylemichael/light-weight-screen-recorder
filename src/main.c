@@ -190,7 +190,9 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
         return 0;
     }
     
-    // Initialize COM
+    // Initialize COM - STA for main thread (UI message pump).
+    // Buffer thread uses MTA (COINIT_MULTITHREADED) separately.
+    // COM objects must not be passed between threads without marshaling.
     HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     if (FAILED(hr)) {
         MessageBoxA(NULL, "Failed to initialize COM", "Error", MB_OK | MB_ICONERROR);

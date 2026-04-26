@@ -293,8 +293,7 @@ AACEncoder* AACEncoder_CreateEx(AACEncoderError* outError) {
     hr = encoder->transform->lpVtbl->SetOutputType(encoder->transform, 0, encoder->outputType, 0);
     if (FAILED(hr)) {
         // Try getting available output type
-        encoder->outputType->lpVtbl->Release(encoder->outputType);
-        encoder->outputType = NULL;
+        SAFE_RELEASE(encoder->outputType);
         
         hr = encoder->transform->lpVtbl->GetOutputAvailableType(encoder->transform, 0, 0, &encoder->outputType);
         if (SUCCEEDED(hr)) {
@@ -308,8 +307,7 @@ AACEncoder* AACEncoder_CreateEx(AACEncoderError* outError) {
     encoder->inputType = CreatePCMType();
     hr = encoder->transform->lpVtbl->SetInputType(encoder->transform, 0, encoder->inputType, 0);
     if (FAILED(hr)) {
-        encoder->inputType->lpVtbl->Release(encoder->inputType);
-        encoder->inputType = NULL;
+        SAFE_RELEASE(encoder->inputType);
         
         // Try getting available input type
         hr = encoder->transform->lpVtbl->GetInputAvailableType(encoder->transform, 0, 0, &encoder->inputType);
