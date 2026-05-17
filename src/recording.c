@@ -295,10 +295,12 @@ static DWORD WINAPI RecordingThread(LPVOID param) {
     
     int fps = state->fps;
     if (fps < 1) fps = 60;  // Guard against division by zero
-    LONGLONG frameDuration100ns = MF_UNITS_PER_SECOND / fps;
     double frameIntervalMs = 1000.0 / fps;
     
     UINT64 frameCount = 0;
+    /* Monotonicity guard for real-time PTS (NVENC/muxer require strictly
+     * increasing timestamps). */
+    LONGLONG lastSubmittedPts = -1;
     
     RecLog("RecordingThread: Started (fps=%d, interval=%.2fms)\n", fps, frameIntervalMs);
     
@@ -309,8 +311,12 @@ static DWORD WINAPI RecordingThread(LPVOID param) {
         double targetMs = (double)frameCount * frameIntervalMs;
         
         if (elapsedMs >= targetMs) {
-            // Synthetic timestamp for CFR
-            LONGLONG timestamp = (LONGLONG)frameCount * frameDuration100ns;
+            /* Real-time PTS: (QPC_now - t0) in 100-ns units. See replay_buffer.c
+             * for the rationale; same VFR-style timestamping keeps A/V aligned
+             * even when actual fps drops below target. */
+            LONGLONG timestamp = ((now.QuadPart - start.QuadPart) * MF_UNITS_PER_SECOND) / freq.QuadPart;
+            if (timestamp <= lastSubmittedPts) timestamp = lastSubmittedPts + 1;
+            lastSubmittedPts = timestamp;
             
             // Capture frame as GPU texture (stays on GPU)
             ID3D11Texture2D* bgraTexture = Capture_GetFrameTexture(state->capture, NULL);
