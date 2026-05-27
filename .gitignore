@@ -39,3 +39,5 @@ planning/
 
 # Drift research / handoffs (local only - per-feature research workflow)
 drift/
+research/
+.handoffs/
