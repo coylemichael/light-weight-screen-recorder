@@ -13,6 +13,7 @@
 - **Auto-clip settings tab** — New "Auto-Clip" tab in settings with enable toggle, show-regions debug overlay, cooldown slider, and delay slider.
 - **Region calibration support** — Kill feed scan region stored as screen percentages (0.0–1.0) in `[AutoClip]` INI section. Resolution-agnostic — works on any monitor size.
 - **Debug console for auto-clip** — Optional `AllocConsole`-based debug window showing live detection output. Toggled via "Show Regions" checkbox in Auto-Clip settings.
+- **Kill-feed sampler file-log diagnostics** — Heartbeat written to `bin\Debug\lwsr_log_*.txt` every 60s with `scans`, `readback_fails` (window + lifetime), `best_score`, `last_match_age_ms`, and reject counters for cooldown / foreground / below-threshold. Throttled per-event readback-failure line (≤ 1 / 30s). All gated on `DebugConsole_IsOpen()` so off by default. Worker wait switched from `INFINITE` to a 10s quantum so the heartbeat still ticks when work flow stops entirely.
 - **Auto-clip border flash** — Green border flash (distinct from yellow marker flash) on auto-clip save trigger. `Border_FlashColor(r, g, b)` API for custom flash colors.
 - **Auto-clip save delay** — Configurable delay (0–30s) between kill detection and replay save, allowing the post-kill moment to be included in the clip.
 - **Multi-track audio in replay buffer** — Per-source audio output buffers (`AudioCapture_ReadSource`) and `MP4Muxer_WriteFileWithMultiAudio` for writing multiple audio tracks to saved clips.
