@@ -1038,7 +1038,7 @@ static BOOL HandleSaveRequest(ReplayBufferState* state, ReplayVideoState* video,
     MuxerSample* videoSamples = NULL;
     int videoCount = 0;
     
-    if (!FrameBuffer_GetFramesForMuxing(&video->frameBuffer, &videoSamples, &videoCount)) {
+    if (!FrameBuffer_GetFramesForMuxing(&video->frameBuffer, &videoSamples, &videoCount, NULL)) {
         ReplayLog("  FrameBuffer_GetFramesForMuxing failed\n");
         FreeAudioSampleCopies(audioCopy, audioCount);
         for (int i = 0; i < audio->perSourceCount; i++) FreeAudioSampleCopies(perSourceCopies[i], perSourceCounts[i]);

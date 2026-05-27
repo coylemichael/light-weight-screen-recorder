@@ -36,3 +36,6 @@ Video_Codec_Interface_13.0.19/
 *~
 
 planning/
+
+# Drift research / handoffs (local only - per-feature research workflow)
+drift/

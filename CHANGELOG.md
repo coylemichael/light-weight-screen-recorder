@@ -6,8 +6,20 @@ Each entry: `**Title** — short description.`
 
 ## [Unreleased]
 
+## [1.4.1] - 2026-05-28
+
+### Added
+- **Kill-feed heartbeat mirrored to debug console** — `EmitHeartbeatIfDue` in `src/kill_feed_sampler.c` now also calls `DebugConsole_Print` so live diagnostics (scans/min, best score, readback fails, last-match age, reject buckets) surface in the debug console when it's open, in addition to the file log.
+
 ### Changed
 - **Inlined `displayScore` in kill-feed heartbeat log** — pure refactor in `src/kill_feed_sampler.c`, no behaviour change.
+- **Win32 version resource bumped 1.3.8.0 → 1.4.1.0** (`src/lwsr.rc`). Previous tagged releases did not propagate the version into the binary; the public 1.3.8 package therefore predates every change in this changelog from 1.3.9 onward.
+
+### Fixed
+- **Build break in `replay_buffer.c`** — `HandleSaveRequest` was calling `FrameBuffer_GetFramesForMuxing` with the pre-1.4.0 three-argument signature. Updated to pass `NULL` for the new `originTimestamp` out-parameter, restoring a clean release build. Audio rebase using that timestamp can be wired up later without changing the signature again.
+
+### Housekeeping
+- Merged feature branches retired: `feature/watchdog-refactor` and `refactor/modular-capture-modes` deleted (fully merged into `main`). `feature/high-fps-support` archived as tag `archive/high-fps-support` and deleted (all valuable work already independently landed on `main`; HealthMonitor subsystem deliberately removed after CUDA NVENC rewrite obsoleted it).
 
 ## [1.4.0] - 2026-05-27
 
