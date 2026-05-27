@@ -1,5 +1,10 @@
 # Changelog
 
+## [Unreleased]
+
+### Changed
+- Inline `displayScore` variable in kill-feed heartbeat log (`src/kill_feed_sampler.c`) — pure refactor, no behaviour change.
+
 ## [1.4.0] - 2026-05-27
 
 ### Added
