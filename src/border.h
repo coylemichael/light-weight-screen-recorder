@@ -23,6 +23,14 @@ void Border_Show(RECT captureRect);
 // Hide the border
 void Border_Hide(void);
 
+// Flash border yellow briefly (~150ms) for marker feedback
+// No-op if border is not currently visible
+void Border_Flash(void);
+
+// Flash border with a custom color briefly (~150ms)
+// Used for auto-clip (green) vs marker (yellow) distinction
+void Border_FlashColor(int r, int g, int b);
+
 // Draggable area selection for custom area mode
 BOOL AreaSelector_Init(HINSTANCE hInstance);
 void AreaSelector_Shutdown(void);

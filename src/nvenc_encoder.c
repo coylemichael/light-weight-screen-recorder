@@ -466,7 +466,7 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     
     // Configure encoder
     NV_ENC_CONFIG config = presetConfig.presetCfg;
-    config.gopLength = fps * GOP_LENGTH_SECONDS;
+    config.gopLength = GOP_LENGTH_FRAMES_AT(fps);
     config.frameIntervalP = 1;  // No B-frames
     
     // Disable expensive features
@@ -630,7 +630,7 @@ int NVENCEncoder_SubmitFrame(NVENCEncoder* enc, BYTE* data[2], int linesize[2], 
     picParams.inputDuration = enc->frameDuration;
     
     // Force IDR every GOP
-    if (enc->frameNumber % (enc->fps * GOP_LENGTH_SECONDS) == 0) {
+    if (enc->frameNumber % GOP_LENGTH_FRAMES_AT(enc->fps) == 0) {
         picParams.encodePicFlags = NV_ENC_PIC_FLAG_FORCEIDR;
     }
     

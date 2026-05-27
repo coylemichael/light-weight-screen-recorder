@@ -132,6 +132,8 @@ HWND g_controlWnd = NULL;
 
 /* Hotkey ID for replay save */
 #define HOTKEY_REPLAY_SAVE 1
+/* Hotkey ID for marker */
+#define HOTKEY_MARKER 2
 
 /*
  * Debug mode flag (enabled via --debug CLI argument).
@@ -266,6 +268,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     // Start replay buffer if enabled in config
     if (g_config.replayEnabled) {
         Logger_Log("Starting replay buffer (enabled in config)\n");
+        g_replayBuffer.autoClipWnd = g_controlWnd;
         ReplayBuffer_Start(&g_replayBuffer, &g_config);
         
         // Check for audio encoder errors
@@ -294,6 +297,16 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
         Logger_Log("Replay buffer disabled in config\n");
     }
     
+    // Register marker hotkey (always active, ignored if not recording/replaying)
+    {
+        BOOL markerOk = RegisterHotKey(g_controlWnd, HOTKEY_MARKER, 0, g_config.markerKey);
+        Logger_Log("RegisterHotKey(HOTKEY_MARKER, key=0x%02X): %s\n",
+                   g_config.markerKey, markerOk ? "SUCCESS" : "FAILED");
+        if (!markerOk) {
+            Logger_Log("  GetLastError: %lu\n", GetLastError());
+        }
+    }
+
     // Start watchdog for hang detection (optional - monitors for frozen app)
     CrashHandler_StartWatchdog();
     
@@ -331,6 +344,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     // Cleanup
     Logger_Log("Shutting down (msgs=%lu, hotkeys=%lu)\n", msgCount, hotkeyCount);
     UnregisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE);
+    UnregisterHotKey(g_controlWnd, HOTKEY_MARKER);
     Overlay_Destroy();  // Must be before ReplayBuffer_Shutdown (stops recording first)
     ReplayBuffer_Shutdown(&g_replayBuffer);
     Logger_Flush();

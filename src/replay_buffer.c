@@ -33,9 +33,11 @@
 #include "mp4_muxer.h"
 #include "gpu_converter.h"
 #include "constants.h"
+#include "kill_feed_sampler.h"
 #include "leak_tracker.h"
 #include "mem_utils.h"
 #include <mmsystem.h>  /* For timeBeginPeriod/timeEndPeriod */
+#include <stdio.h>     /* For snprintf */
 
 #pragma comment(lib, "winmm.lib")
 
@@ -65,8 +67,8 @@ typedef struct ReplayVideoState {
  */
 typedef struct ReplayAudioState {
     AudioCaptureContext* capture;       /* WASAPI capture context */
-    AACEncoder* encoder;                /* AAC MFT encoder */
-    MuxerAudioSample* samples;          /* Circular buffer of AAC samples */
+    AACEncoder* encoder;                /* AAC MFT encoder (mixed track) */
+    MuxerAudioSample* samples;          /* Circular buffer of AAC samples (mixed) */
     int sampleCount;                    /* Current sample count */
     int sampleCapacity;                 /* Allocated capacity */
     BYTE* configData;                   /* AAC AudioSpecificConfig */
@@ -76,6 +78,19 @@ typedef struct ReplayAudioState {
     BOOL lockInitialized;               /* Track CS initialization */
     int audioEvictLogCounter;           /* Log throttle (resets on buffer restart) */
     int reallocFailCount;               /* Realloc failure log cap (resets on buffer restart) */
+    
+    /* Per-source AAC encoders and sample buffers (for multi-track output) */
+    int perSourceCount;                              /* Number of active per-source encoders */
+    AACEncoder* perSourceEncoders[MAX_AUDIO_SOURCES]; /* Per-source AAC encoders */
+    MuxerAudioSample* perSourceSamples[MAX_AUDIO_SOURCES]; /* Per-source sample arrays */
+    int perSourceSampleCount[MAX_AUDIO_SOURCES];
+    int perSourceSampleCapacity[MAX_AUDIO_SOURCES];
+    BYTE* perSourceConfigData[MAX_AUDIO_SOURCES];
+    int perSourceConfigSize[MAX_AUDIO_SOURCES];
+    CRITICAL_SECTION perSourceLocks[MAX_AUDIO_SOURCES];
+    BOOL perSourceLocksInit[MAX_AUDIO_SOURCES];
+    int perSourceEvictLogCounter[MAX_AUDIO_SOURCES];
+    int perSourceReallocFail[MAX_AUDIO_SOURCES];
 } ReplayAudioState;
 
 /*
@@ -102,6 +117,14 @@ static DWORD WINAPI BufferThreadProc(LPVOID param);
 
 /* Alias for logging */
 #define ReplayLog Logger_Log
+
+/* Per-source callback context (carries source index for the callback) */
+typedef struct {
+    ReplayAudioState* audio;
+    int sourceIndex;
+} PerSourceCallbackCtx;
+
+static PerSourceCallbackCtx g_perSourceCbCtx[MAX_AUDIO_SOURCES] = {0};
 
 /* Callback for draining completed encoded frames into sample buffer */
 /* Called from NVENC output thread - must be thread-safe */
@@ -208,6 +231,88 @@ static void AudioEncoderCallback(const AACSample* sample, void* userData) {
     }
     
     LeaveCriticalSection(&audio->lock);
+}
+
+/* Per-source AAC encoder callback - same logic as AudioEncoderCallback but for individual tracks */
+static void PerSourceEncoderCallback(const AACSample* sample, void* userData) {
+    PerSourceCallbackCtx* cbCtx = (PerSourceCallbackCtx*)userData;
+    if (!cbCtx || !sample || !sample->data || sample->size <= 0) return;
+    
+    ReplayAudioState* audio = cbCtx->audio;
+    int idx = cbCtx->sourceIndex;
+    if (idx < 0 || idx >= MAX_AUDIO_SOURCES || !audio->perSourceLocksInit[idx]) return;
+    
+    EnterCriticalSection(&audio->perSourceLocks[idx]);
+    
+    /* Time-based eviction */
+    if (audio->perSourceSampleCount[idx] > 0 && audio->maxDuration > 0) {
+        int evicted = 0;
+        while (audio->perSourceSampleCount[idx] > 0) {
+            LONGLONG oldest = audio->perSourceSamples[idx][0].timestamp;
+            LONGLONG span = sample->timestamp - oldest;
+            if (span <= audio->maxDuration) break;
+            
+            if (audio->perSourceSamples[idx][0].data) free(audio->perSourceSamples[idx][0].data);
+            memmove(audio->perSourceSamples[idx], audio->perSourceSamples[idx] + 1,
+                    (audio->perSourceSampleCount[idx] - 1) * sizeof(MuxerAudioSample));
+            audio->perSourceSampleCount[idx]--;
+            evicted++;
+        }
+        
+        audio->perSourceEvictLogCounter[idx]++;
+        if (evicted > 0 && (audio->perSourceEvictLogCounter[idx] % AUDIO_EVICT_LOG_INTERVAL) == 0) {
+            double spanSec = 0;
+            if (audio->perSourceSampleCount[idx] > 0) {
+                spanSec = (sample->timestamp - audio->perSourceSamples[idx][0].timestamp) / (double)MF_UNITS_PER_SECOND;
+            }
+            ReplayLog("Audio track %d eviction: removed %d, count=%d, span=%.2fs\n",
+                      idx, evicted, audio->perSourceSampleCount[idx], spanSec);
+        }
+    }
+    
+    /* Grow array if needed */
+    if (audio->perSourceSampleCount[idx] >= audio->perSourceSampleCapacity[idx]) {
+        int newCap = audio->perSourceSampleCapacity[idx] == 0 ? INITIAL_AUDIO_CAPACITY
+                     : audio->perSourceSampleCapacity[idx] * AUDIO_CAPACITY_GROWTH_FACTOR;
+        if (newCap > MAX_AUDIO_SAMPLES) newCap = MAX_AUDIO_SAMPLES;
+        
+        if (audio->perSourceSampleCount[idx] >= newCap) {
+            /* Emergency eviction */
+            int toKeep = (int)(newCap * EMERGENCY_KEEP_FRACTION);
+            int toRemove = audio->perSourceSampleCount[idx] - toKeep;
+            for (int i = 0; i < toRemove; i++) {
+                if (audio->perSourceSamples[idx][i].data) free(audio->perSourceSamples[idx][i].data);
+            }
+            memmove(audio->perSourceSamples[idx], audio->perSourceSamples[idx] + toRemove,
+                    toKeep * sizeof(MuxerAudioSample));
+            audio->perSourceSampleCount[idx] = toKeep;
+        } else {
+            MuxerAudioSample* newArr = realloc(audio->perSourceSamples[idx],
+                                                newCap * sizeof(MuxerAudioSample));
+            if (newArr) {
+                if (audio->perSourceSampleCapacity[idx] < newCap) {
+                    memset(newArr + audio->perSourceSampleCapacity[idx], 0,
+                           (newCap - audio->perSourceSampleCapacity[idx]) * sizeof(MuxerAudioSample));
+                }
+                audio->perSourceSamples[idx] = newArr;
+                audio->perSourceSampleCapacity[idx] = newCap;
+            }
+        }
+    }
+    
+    if (audio->perSourceSampleCount[idx] < audio->perSourceSampleCapacity[idx]) {
+        MuxerAudioSample* dst = &audio->perSourceSamples[idx][audio->perSourceSampleCount[idx]];
+        dst->data = (BYTE*)malloc(sample->size);
+        if (dst->data) {
+            memcpy(dst->data, sample->data, sample->size);
+            dst->size = sample->size;
+            dst->timestamp = sample->timestamp;
+            dst->duration = sample->duration;
+            audio->perSourceSampleCount[idx]++;
+        }
+    }
+    
+    LeaveCriticalSection(&audio->perSourceLocks[idx]);
 }
 
 /* ============================================================================
@@ -327,6 +432,7 @@ BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
     InterlockedExchange(&state->audioError, AAC_OK);  // Reset audio error
     state->saveSuccess = FALSE;
     state->savePath[0] = '\0';
+    Markers_Init(&state->markers);
     
     /* Reset events */
     ResetEvent(state->hReadyEvent);
@@ -654,6 +760,26 @@ static BOOL InitAudioPipeline(ReplayBufferState* state, ReplayAudioState* audio,
         return FALSE;
     }
     
+    /* Create per-source AAC encoders for multi-track output */
+    audio->perSourceCount = AudioCapture_GetSourceCount(audio->capture);
+    ReplayLog("Creating %d per-source AAC encoders for multi-track...\n", audio->perSourceCount);
+    for (int i = 0; i < audio->perSourceCount; i++) {
+        InitializeCriticalSection(&audio->perSourceLocks[i]);
+        audio->perSourceLocksInit[i] = TRUE;
+        
+        AACEncoderError psErr = AAC_OK;
+        audio->perSourceEncoders[i] = AACEncoder_CreateEx(&psErr);
+        if (audio->perSourceEncoders[i]) {
+            g_perSourceCbCtx[i].audio = audio;
+            g_perSourceCbCtx[i].sourceIndex = i;
+            AACEncoder_SetCallback(audio->perSourceEncoders[i], PerSourceEncoderCallback, &g_perSourceCbCtx[i]);
+            AACEncoder_GetConfig(audio->perSourceEncoders[i], &audio->perSourceConfigData[i], &audio->perSourceConfigSize[i]);
+            ReplayLog("  Per-source encoder %d created\n", i);
+        } else {
+            ReplayLog("  Per-source encoder %d failed (error=%d) - track will be missing\n", i, (int)psErr);
+        }
+    }
+    
     ReplayLog("Audio capture started successfully\n");
     return TRUE;
 }
@@ -673,6 +799,29 @@ static void ShutdownAudioPipeline(ReplayAudioState* audio) {
         AACEncoder_Destroy(audio->encoder);
         audio->encoder = NULL;
     }
+    
+    /* Destroy per-source encoders and free their sample buffers */
+    for (int i = 0; i < audio->perSourceCount; i++) {
+        if (audio->perSourceEncoders[i]) {
+            AACEncoder_Destroy(audio->perSourceEncoders[i]);
+            audio->perSourceEncoders[i] = NULL;
+        }
+        if (audio->perSourceLocksInit[i]) {
+            EnterCriticalSection(&audio->perSourceLocks[i]);
+            for (int j = 0; j < audio->perSourceSampleCount[i]; j++) {
+                if (audio->perSourceSamples[i][j].data) free(audio->perSourceSamples[i][j].data);
+            }
+            free(audio->perSourceSamples[i]);
+            audio->perSourceSamples[i] = NULL;
+            audio->perSourceSampleCount[i] = 0;
+            audio->perSourceSampleCapacity[i] = 0;
+            LeaveCriticalSection(&audio->perSourceLocks[i]);
+            DeleteCriticalSection(&audio->perSourceLocks[i]);
+            audio->perSourceLocksInit[i] = FALSE;
+        }
+    }
+    audio->perSourceCount = 0;
+    
     ReplayLog("Audio capture stopped\n");
 }
 
@@ -773,6 +922,92 @@ static void FreeAudioSampleCopies(MuxerAudioSample* samples, int count) {
 }
 
 /**
+ * Trim audio samples to match video duration (rebase timestamps).
+ * Modifies the array in-place.
+ */
+static void TrimAudioToVideo(MuxerAudioSample* audio, int* audioCount, LONGLONG videoDuration, const char* label) {
+    if (!audio || *audioCount <= 0 || videoDuration <= 0) return;
+    
+    LONGLONG audioDuration = audio[*audioCount - 1].timestamp + audio[*audioCount - 1].duration;
+    if (audioDuration <= videoDuration) return;
+    
+    LONGLONG excess = audioDuration - videoDuration;
+    int trimCount = 0;
+    
+    while (trimCount < *audioCount &&
+           (audio[trimCount].timestamp + audio[trimCount].duration) <= excess) {
+        if (audio[trimCount].data) free(audio[trimCount].data);
+        audio[trimCount].data = NULL;
+        trimCount++;
+    }
+    
+    if (trimCount > 0) {
+        int newCount = *audioCount - trimCount;
+        LONGLONG newBase = audio[trimCount].timestamp;
+        for (int i = 0; i < newCount; i++) {
+            audio[i] = audio[trimCount + i];
+            audio[i].timestamp -= newBase;
+        }
+        ReplayLog("  %s trimmed: removed %d samples (%.2fs excess), %d remain\n",
+                  label, trimCount, (double)excess / 10000000.0, newCount);
+        *audioCount = newCount;
+    }
+}
+
+/**
+ * Copy per-source audio samples for muxing (same pattern as CopyAudioSamplesForMuxing).
+ */
+static BOOL CopyPerSourceSamplesForMuxing(ReplayAudioState* audio, int srcIdx,
+                                           MuxerAudioSample** outCopy, int* outCount) {
+    *outCopy = NULL;
+    *outCount = 0;
+    
+    if (srcIdx < 0 || srcIdx >= audio->perSourceCount) return TRUE;
+    if (!audio->perSourceLocksInit[srcIdx]) return TRUE;
+    
+    EnterCriticalSection(&audio->perSourceLocks[srcIdx]);
+    
+    int count = audio->perSourceSampleCount[srcIdx];
+    if (count <= 0 || !audio->perSourceSamples[srcIdx]) {
+        LeaveCriticalSection(&audio->perSourceLocks[srcIdx]);
+        return TRUE;
+    }
+    
+    MuxerAudioSample* copy = (MuxerAudioSample*)malloc((size_t)count * sizeof(MuxerAudioSample));
+    if (!copy) {
+        LeaveCriticalSection(&audio->perSourceLocks[srcIdx]);
+        return TRUE;
+    }
+    memset(copy, 0, (size_t)count * sizeof(MuxerAudioSample));
+    
+    LONGLONG firstTs = audio->perSourceSamples[srcIdx][0].timestamp;
+    int copied = 0;
+    
+    for (int i = 0; i < count; i++) {
+        MuxerAudioSample* src = &audio->perSourceSamples[srcIdx][i];
+        copy[i].data = (BYTE*)malloc(src->size);
+        if (copy[i].data) {
+            memcpy(copy[i].data, src->data, src->size);
+            copy[i].size = src->size;
+            copy[i].timestamp = src->timestamp - firstTs;
+            copy[i].duration = src->duration;
+            copied++;
+        } else {
+            for (int j = 0; j < i; j++) { if (copy[j].data) free(copy[j].data); }
+            free(copy);
+            LeaveCriticalSection(&audio->perSourceLocks[srcIdx]);
+            return TRUE;
+        }
+    }
+    
+    LeaveCriticalSection(&audio->perSourceLocks[srcIdx]);
+    
+    *outCopy = copy;
+    *outCount = copied;
+    return TRUE;
+}
+
+/**
  * Handle save request - muxes buffered video and audio to file.
  * Called when save event is signaled during capture loop.
  * 
@@ -787,10 +1022,17 @@ static BOOL HandleSaveRequest(ReplayBufferState* state, ReplayVideoState* video,
     MuxerAudioSample* audioCopy = NULL;
     int audioCount = 0;
     
-    /* Copy audio samples while holding lock */
+    /* Copy mixed audio samples while holding lock */
     EnterCriticalSection(&audio->lock);
     CopyAudioSamplesForMuxing(audio, &audioCopy, &audioCount);
     LeaveCriticalSection(&audio->lock);
+    
+    /* Copy per-source audio samples */
+    MuxerAudioSample* perSourceCopies[MAX_AUDIO_SOURCES] = {0};
+    int perSourceCounts[MAX_AUDIO_SOURCES] = {0};
+    for (int i = 0; i < audio->perSourceCount; i++) {
+        CopyPerSourceSamplesForMuxing(audio, i, &perSourceCopies[i], &perSourceCounts[i]);
+    }
     
     /* Get video samples */
     MuxerSample* videoSamples = NULL;
@@ -799,6 +1041,7 @@ static BOOL HandleSaveRequest(ReplayBufferState* state, ReplayVideoState* video,
     if (!FrameBuffer_GetFramesForMuxing(&video->frameBuffer, &videoSamples, &videoCount)) {
         ReplayLog("  FrameBuffer_GetFramesForMuxing failed\n");
         FreeAudioSampleCopies(audioCopy, audioCount);
+        for (int i = 0; i < audio->perSourceCount; i++) FreeAudioSampleCopies(perSourceCopies[i], perSourceCounts[i]);
         return FALSE;
     }
     
@@ -811,56 +1054,53 @@ static BOOL HandleSaveRequest(ReplayBufferState* state, ReplayVideoState* video,
     videoConfig.seqHeader = video->frameBuffer.seqHeaderSize > 0 ? video->frameBuffer.seqHeader : NULL;
     videoConfig.seqHeaderSize = video->frameBuffer.seqHeaderSize;
     
-    /* Trim audio to match video duration.
-     * Video starts from the first keyframe (skipping leading P-frames), but audio
-     * has the full buffer duration. Without trimming, audio is longer than video
-     * which causes A/V desync (audio plays content from before the video starts). */
-    if (audioCopy && audioCount > 0 && videoSamples && videoCount > 0) {
-        LONGLONG videoDuration = videoSamples[videoCount - 1].timestamp + videoSamples[videoCount - 1].duration;
-        LONGLONG audioDuration = audioCopy[audioCount - 1].timestamp + audioCopy[audioCount - 1].duration;
-        
-        if (audioDuration > videoDuration) {
-            LONGLONG excess = audioDuration - videoDuration;
-            int trimCount = 0;
-            
-            /* Skip audio samples from the front that fall within the excess */
-            while (trimCount < audioCount && 
-                   (audioCopy[trimCount].timestamp + audioCopy[trimCount].duration) <= excess) {
-                if (audioCopy[trimCount].data) free(audioCopy[trimCount].data);
-                audioCopy[trimCount].data = NULL;
-                trimCount++;
-            }
-            
-            if (trimCount > 0) {
-                /* Shift remaining samples and rebase timestamps */
-                int newCount = audioCount - trimCount;
-                LONGLONG newBase = audioCopy[trimCount].timestamp;
-                
-                for (int i = 0; i < newCount; i++) {
-                    audioCopy[i] = audioCopy[trimCount + i];
-                    audioCopy[i].timestamp -= newBase;
-                }
-                
-                ReplayLog("  Audio trimmed: removed %d samples (%.2fs excess), %d remain\n",
-                          trimCount, (double)excess / 10000000.0, newCount);
-                audioCount = newCount;
-            }
+    /* Trim all audio tracks to match video duration */
+    LONGLONG videoDuration = 0;
+    if (videoSamples && videoCount > 0) {
+        videoDuration = videoSamples[videoCount - 1].timestamp + videoSamples[videoCount - 1].duration;
+    }
+    
+    if (audioCopy && audioCount > 0 && videoDuration > 0) {
+        TrimAudioToVideo(audioCopy, &audioCount, videoDuration, "Mixed audio");
+    }
+    for (int i = 0; i < audio->perSourceCount; i++) {
+        if (perSourceCopies[i] && perSourceCounts[i] > 0 && videoDuration > 0) {
+            char label[32];
+            snprintf(label, sizeof(label), "Source %d audio", i);
+            TrimAudioToVideo(perSourceCopies[i], &perSourceCounts[i], videoDuration, label);
         }
+    }
+    
+    /* Build multi-track audio array: track 0 = mixed, tracks 1..N = per-source */
+    int totalTracks = 1 + audio->perSourceCount; /* mixed + per-source */
+    MuxerAudioTrack audioTracks[1 + MAX_AUDIO_SOURCES] = {0};
+    
+    /* Track 0: mixed */
+    audioTracks[0].samples = audioCopy;
+    audioTracks[0].sampleCount = audioCount;
+    audioTracks[0].config.sampleRate = AAC_SAMPLE_RATE;
+    audioTracks[0].config.channels = AAC_CHANNELS;
+    audioTracks[0].config.bitrate = AAC_BITRATE;
+    audioTracks[0].config.configData = audio->configData;
+    audioTracks[0].config.configSize = audio->configSize;
+    
+    /* Tracks 1..N: per-source */
+    for (int i = 0; i < audio->perSourceCount; i++) {
+        audioTracks[1 + i].samples = perSourceCopies[i];
+        audioTracks[1 + i].sampleCount = perSourceCounts[i];
+        audioTracks[1 + i].config.sampleRate = AAC_SAMPLE_RATE;
+        audioTracks[1 + i].config.channels = AAC_CHANNELS;
+        audioTracks[1 + i].config.bitrate = AAC_BITRATE;
+        audioTracks[1 + i].config.configData = audio->perSourceConfigData[i];
+        audioTracks[1 + i].config.configSize = audio->perSourceConfigSize[i];
     }
     
     /* Mux to file */
     if (audioCopy && audioCount > 0) {
-        ReplayLog("  Starting save (audio+video path, %d audio samples)...\n", audioCount);
-        MuxerAudioConfig audioConfig;
-        audioConfig.sampleRate = AAC_SAMPLE_RATE;
-        audioConfig.channels = AAC_CHANNELS;
-        audioConfig.bitrate = AAC_BITRATE;
-        audioConfig.configData = audio->configData;
-        audioConfig.configSize = audio->configSize;
-        
-        ok = MP4Muxer_WriteFileWithAudio(state->savePath, 
-                                         videoSamples, videoCount, &videoConfig,
-                                         audioCopy, audioCount, &audioConfig);
+        ReplayLog("  Starting save (%d audio tracks, %d mixed samples)...\n", totalTracks, audioCount);
+        ok = MP4Muxer_WriteFileWithMultiAudio(state->savePath,
+                                               videoSamples, videoCount, &videoConfig,
+                                               audioTracks, totalTracks);
     } else {
         ReplayLog("  Starting save (video-only path)...\n");
         ok = MP4Muxer_WriteFile(state->savePath, videoSamples, videoCount, &videoConfig);
@@ -872,8 +1112,11 @@ static BOOL HandleSaveRequest(ReplayBufferState* state, ReplayVideoState* video,
     }
     free(videoSamples);
     
-    /* Free audio copy */
+    /* Free audio copies */
     FreeAudioSampleCopies(audioCopy, audioCount);
+    for (int i = 0; i < audio->perSourceCount; i++) {
+        FreeAudioSampleCopies(perSourceCopies[i], perSourceCounts[i]);
+    }
     
     ReplayLog("SAVE %s\n", ok ? "OK" : "FAILED");
     return ok;
@@ -979,6 +1222,16 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     AACEncoderError audioErr = AAC_OK;
     BOOL audioActive = InitAudioPipeline(state, audio, &audioErr);
     
+    /* Initialize kill feed sampler (auto-clip) if enabled */
+    KillFeedSampler* kfSampler = NULL;
+    if (g_config.autoClipEnabled) {
+        kfSampler = KillFeedSampler_Init(&g_config, capture, state->autoClipWnd);
+        if (kfSampler) {
+            ReplayLog("Kill feed sampler initialized for auto-clip\n");
+        }
+    }
+    state->killFeedSampler = kfSampler;
+    
     /* Store audio error for caller to check */
     if (state->audioEnabled && !audioActive && audioErr != AAC_OK) {
         InterlockedExchange(&state->audioError, (LONG)audioErr);
@@ -1067,11 +1320,23 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
         
         /* === AUDIO CAPTURE === */
         if (audioActive && audio->capture && audio->encoder) {
+            /* Read and encode mixed audio (track 0) */
             BYTE audioPcmBuf[8192];
             LONGLONG audioTs = 0;
             int audioBytes = AudioCapture_Read(audio->capture, audioPcmBuf, sizeof(audioPcmBuf), &audioTs);
             if (audioBytes > 0) {
                 AACEncoder_Feed(audio->encoder, audioPcmBuf, audioBytes, audioTs);
+            }
+            
+            /* Read and encode per-source audio (tracks 1..N) */
+            for (int si = 0; si < audio->perSourceCount; si++) {
+                if (!audio->perSourceEncoders[si]) continue;
+                BYTE srcPcmBuf[8192];
+                LONGLONG srcTs = 0;
+                int srcBytes = AudioCapture_ReadSource(audio->capture, si, srcPcmBuf, sizeof(srcPcmBuf), &srcTs);
+                if (srcBytes > 0) {
+                    AACEncoder_Feed(audio->perSourceEncoders[si], srcPcmBuf, srcBytes, srcTs);
+                }
             }
         }
         
@@ -1108,6 +1373,11 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                 QueryPerformanceCounter(&t2);
                 
                 if (bgraTexture) {
+                    /* Feed kill feed sampler (handles scan interval internally) */
+                    if (kfSampler) {
+                        KillFeedSampler_FeedFrame(kfSampler, capture, bgraTexture);
+                    }
+                    
                     ID3D11Texture2D* nv12Texture = GPUConverter_Convert(&gpuConverter, bgraTexture);
                     QueryPerformanceCounter(&t3);
                     
@@ -1251,6 +1521,8 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     timeEndPeriod(1);
     
     /* Shutdown pipelines using helper functions */
+    KillFeedSampler_Shutdown(kfSampler);
+    state->killFeedSampler = NULL;
     if (audioActive) {
         ShutdownAudioPipeline(audio);
     }

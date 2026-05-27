@@ -69,6 +69,24 @@ BOOL MP4Muxer_WriteFileWithAudio(
     const MuxerAudioConfig* audioConfig
 );
 
+// Multi-track audio: each track has its own samples + config
+typedef struct {
+    const MuxerAudioSample* samples;
+    int sampleCount;
+    MuxerAudioConfig config;
+} MuxerAudioTrack;
+
+// Write video + multiple audio tracks to MP4 file
+// Track 0 = mixed, tracks 1..N = individual sources
+BOOL MP4Muxer_WriteFileWithMultiAudio(
+    const char* outputPath,
+    const MuxerSample* videoSamples,
+    int videoSampleCount,
+    const MuxerConfig* videoConfig,
+    const MuxerAudioTrack* audioTracks,
+    int audioTrackCount
+);
+
 /* ============================================================================
  * STREAMING MUXER API
  * ============================================================================

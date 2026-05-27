@@ -624,6 +624,7 @@ void Capture_Shutdown(CaptureState* state) {
     if (!state) return;
     
     SAFE_FREE(state->frameBuffer);
+    SAFE_RELEASE(state->ocrStagingTexture);
     SAFE_RELEASE(state->gpuTexture);
     SAFE_RELEASE(state->stagingTexture);
     SAFE_RELEASE(state->duplication);
@@ -660,5 +661,65 @@ BOOL Capture_ReinitDuplication(CaptureState* state) {
     // Clear the access lost flag
     state->accessLost = FALSE;
     
+    return TRUE;
+}
+
+BOOL Capture_ReadbackRegion(CaptureState* state, ID3D11Texture2D* srcTexture,
+                            int srcX, int srcY, int regionW, int regionH,
+                            BYTE* outBuffer, int* outStride)
+{
+    LWSR_ASSERT(state != NULL && srcTexture != NULL && outBuffer != NULL);
+    if (!state || !srcTexture || !outBuffer || regionW <= 0 || regionH <= 0)
+        return FALSE;
+    if (!state->device || !state->context)
+        return FALSE;
+
+    /* Create or recreate staging texture if size changed */
+    if (!state->ocrStagingTexture || state->ocrStagingW != regionW || state->ocrStagingH != regionH) {
+        SAFE_RELEASE(state->ocrStagingTexture);
+        D3D11_TEXTURE2D_DESC desc = {0};
+        desc.Width = regionW;
+        desc.Height = regionH;
+        desc.MipLevels = 1;
+        desc.ArraySize = 1;
+        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
+        desc.SampleDesc.Count = 1;
+        desc.Usage = D3D11_USAGE_STAGING;
+        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+        HRESULT hr = state->device->lpVtbl->CreateTexture2D(state->device, &desc, NULL, &state->ocrStagingTexture);
+        if (FAILED(hr)) return FALSE;
+        state->ocrStagingW = regionW;
+        state->ocrStagingH = regionH;
+    }
+
+    /* Copy sub-region from GPU texture to staging */
+    D3D11_BOX box = {0};
+    box.left = srcX;
+    box.top = srcY;
+    box.right = srcX + regionW;
+    box.bottom = srcY + regionH;
+    box.front = 0;
+    box.back = 1;
+    state->context->lpVtbl->CopySubresourceRegion(state->context,
+        (ID3D11Resource*)state->ocrStagingTexture, 0, 0, 0, 0,
+        (ID3D11Resource*)srcTexture, 0, &box);
+
+    /* Map staging texture for CPU read */
+    D3D11_MAPPED_SUBRESOURCE mapped = {0};
+    HRESULT hr = state->context->lpVtbl->Map(state->context,
+        (ID3D11Resource*)state->ocrStagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) return FALSE;
+
+    /* Copy rows to output buffer (handle stride mismatch) */
+    int dstStride = regionW * 4;
+    for (int y = 0; y < regionH; y++) {
+        memcpy(outBuffer + y * dstStride,
+               (BYTE*)mapped.pData + y * mapped.RowPitch,
+               dstStride);
+    }
+
+    state->context->lpVtbl->Unmap(state->context, (ID3D11Resource*)state->ocrStagingTexture, 0);
+
+    if (outStride) *outStride = dstStride;
     return TRUE;
 }

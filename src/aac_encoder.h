@@ -53,4 +53,12 @@ BOOL AACEncoder_Feed(AACEncoder* encoder, const BYTE* pcmData, int pcmSize, LONG
 // Get encoder info for muxer
 BOOL AACEncoder_GetConfig(AACEncoder* encoder, BYTE** configData, int* configSize);
 
+// Diagnostic accessors for A/V sync investigation.
+// Total bytes of PCM ingested via AACEncoder_Feed (monotonic).
+LONGLONG AACEncoder_GetPcmBytesIngested(AACEncoder* encoder);
+// PTS (100ns units) of the most recently emitted AAC frame; 0 if none yet.
+LONGLONG AACEncoder_GetLastEmittedTimestamp(AACEncoder* encoder);
+// Total AAC frames emitted to the callback (monotonic).
+LONGLONG AACEncoder_GetFramesEmitted(AACEncoder* encoder);
+
 #endif // AAC_ENCODER_H

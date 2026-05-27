@@ -66,7 +66,7 @@ REM Compile resource file (icon)
 rc.exe /nologo /fo "bin\lwsr.res" "src\lwsr.rc"
 
 REM Source files (single source of truth)
-set SOURCES=src\main.c src\config.c src\capture.c src\recording.c src\overlay.c src\settings_dialog.c src\action_toolbar.c src\border.c src\replay_buffer.c src\nvenc_encoder.c src\frame_buffer.c src\mp4_muxer.c src\util.c src\logger.c src\audio_device.c src\audio_capture.c src\aac_encoder.c src\gpu_converter.c src\crash_handler.c src\gdiplus_api.c src\leak_tracker.c src\ui_draw.c src\tray_icon.c src\layered_window.c
+set SOURCES=src\main.c src\config.c src\capture.c src\recording.c src\overlay.c src\settings_dialog.c src\action_toolbar.c src\border.c src\replay_buffer.c src\nvenc_encoder.c src\frame_buffer.c src\mp4_muxer.c src\util.c src\logger.c src\audio_device.c src\audio_capture.c src\aac_encoder.c src\gpu_converter.c src\crash_handler.c src\gdiplus_api.c src\leak_tracker.c src\ui_draw.c src\tray_icon.c src\layered_window.c src\markers.c src\kill_feed_sampler.c src\debug_console.c
 
 REM Resource file
 set RESOURCES=bin\lwsr.res
@@ -101,6 +101,7 @@ if "%BUILD_TYPE%"=="debug" (
         /D "DEBUG" /D "_DEBUG" /D "WIN32" /D "_WINDOWS" /D "_CRT_SECURE_NO_WARNINGS" /D "NVENCAPI=__stdcall" ^
         /Fe"bin\lwsr.exe" ^
         /Fd"bin\lwsr.pdb" ^
+        /Fo"bin\\" ^
         %SOURCES% ^
         /link /DEBUG /SUBSYSTEM:WINDOWS ^
         %LIBS% %RESOURCES%
@@ -112,6 +113,7 @@ if "%BUILD_TYPE%"=="debug" (
         /D "DEBUG" /D "_DEBUG" /D "WIN32" /D "_WINDOWS" /D "_CRT_SECURE_NO_WARNINGS" /D "NVENCAPI=__stdcall" ^
         /Fe"bin\lwsr.exe" ^
         /Fd"bin\lwsr.pdb" ^
+        /Fo"bin\\" ^
         %SOURCES% ^
         /link /DEBUG /SUBSYSTEM:WINDOWS ^
         %LIBS% %RESOURCES%
@@ -122,6 +124,7 @@ if "%BUILD_TYPE%"=="debug" (
         /W4 /WX /wd4201 ^
         /D "NDEBUG" /D "WIN32" /D "_WINDOWS" /D "_CRT_SECURE_NO_WARNINGS" /D "NVENCAPI=__stdcall" ^
         /Fe"bin\lwsr.exe" ^
+        /Fo"bin\\" ^
         %SOURCES% ^
         /link /SUBSYSTEM:WINDOWS /LTCG /OPT:REF /OPT:ICF ^
         %LIBS% %RESOURCES%
@@ -133,9 +136,9 @@ if %ERRORLEVEL% neq 0 (
 )
 
 REM Clean up intermediate files
-del *.obj >nul 2>&1
+del bin\*.obj >nul 2>&1
 del bin\lwsr.res >nul 2>&1
-del *.nativecodeanalysis.xml >nul 2>&1
+del bin\*.nativecodeanalysis.xml >nul 2>&1
 
 echo.
 echo Build successful! Output: bin\lwsr.exe [%BUILD_TYPE%]

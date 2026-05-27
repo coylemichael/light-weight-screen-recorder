@@ -49,6 +49,11 @@ typedef void* GpImage;
 #include "tray_icon.h"
 #include "layered_window.h"
 #include "settings_dialog.h"
+#include "markers.h"
+#include "border.h"
+#include "debug_console.h"
+#include "kill_feed_sampler.h"
+#include "constants.h"
 
 
 #pragma comment(lib, "comctl32.lib")
@@ -56,6 +61,8 @@ typedef void* GpImage;
 
 // Hotkey ID for replay save (must match main.c)
 #define HOTKEY_REPLAY_SAVE 1
+// Hotkey ID for marker (must match main.c)
+#define HOTKEY_MARKER 2
 
 // Custom window message for async replay save completion
 #define WM_REPLAY_SAVE_COMPLETE (WM_USER + 200)
@@ -84,6 +91,7 @@ extern HWND g_controlWnd;
 #define ID_TIMER_DISPLAY   2003
 #define ID_TIMER_HOVER     2004  // Timer to update hover state on icon buttons
 #define ID_TIMER_REPLAY_CHECK 2005  // Timer to check replay buffer health
+#define ID_TIMER_AUTOCLIP_DELAY 2006  // Delay before auto-clip save
 
 // Action toolbar button IDs
 #define ID_ACTION_RECORD   3001
@@ -493,7 +501,82 @@ static void ActionToolbar_OnSettings(void) {
 }
 
 // Timer text for display
-static char g_timerText[32] = "00:00";
+static char g_timerText[64] = "00:00";
+
+// Replay save context for sidecar writing
+static ULONGLONG g_replaySaveRequestMs = 0;
+static char g_replaySavePath[MAX_PATH] = {0};
+
+// Auto-clip save context
+static ULONGLONG g_autoClipSaveRequestMs = 0;
+static char g_autoClipSavePath[MAX_PATH] = {0};
+static char g_autoClipGameName[64] = {0};  // Foreground process at kill time
+
+// Debounce flag: gates both F5 (HOTKEY_REPLAY_SAVE) and auto-clip save paths
+// against concurrent ReplayBuffer_SaveAsync calls that deadlock the BUFFER thread.
+// Set before SaveAsync, cleared on WM_REPLAY_SAVE_COMPLETE / WM_AUTOCLIP_SAVE_COMPLETE.
+static volatile LONG g_replaySaveInFlight = 0;
+
+/*
+ * Get the foreground window's process name (without .exe extension).
+ * Writes to outBuf. Returns TRUE if a name was found.
+ */
+static BOOL GetForegroundGameName(char* outBuf, int outSize)
+{
+    outBuf[0] = '\0';
+    HWND fgWnd = GetForegroundWindow();
+    if (!fgWnd) return FALSE;
+    
+    DWORD pid = 0;
+    GetWindowThreadProcessId(fgWnd, &pid);
+    if (!pid) return FALSE;
+    
+    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, pid);
+    if (!hProc) return FALSE;
+    
+    char exePath[MAX_PATH];
+    DWORD pathSize = MAX_PATH;
+    BOOL ok = QueryFullProcessImageNameA(hProc, 0, exePath, &pathSize);
+    CloseHandle(hProc);
+    if (!ok) return FALSE;
+    
+    char* slash = strrchr(exePath, '\\');
+    char* base = slash ? slash + 1 : exePath;
+    char* dot = strrchr(base, '.');
+    int len = dot ? (int)(dot - base) : (int)strlen(base);
+    if (len <= 0 || len >= outSize) return FALSE;
+    
+    memcpy(outBuf, base, len);
+    outBuf[len] = '\0';
+    return TRUE;
+}
+
+/*
+ * Build a save path with game subfolder: savePath\GameName\prefix_GameName_timestamp.mp4
+ * Falls back to savePath\prefix_timestamp.mp4 if no game name.
+ */
+static void BuildGameSavePath(char* outPath, int outSize, const char* prefix,
+                              const char* gameName)
+{
+    SYSTEMTIME st;
+    GetLocalTime(&st);
+    
+    if (gameName && gameName[0] != '\0') {
+        char folder[MAX_PATH];
+        snprintf(folder, sizeof(folder), "%s\\%s", g_config.savePath, gameName);
+        CreateDirectoryA(folder, NULL);
+        snprintf(outPath, outSize, "%s\\%s_%04d%02d%02d_%02d%02d%02d.mp4",
+            folder, gameName,
+            (int)st.wYear, (int)st.wMonth, (int)st.wDay,
+            (int)st.wHour, (int)st.wMinute, (int)st.wSecond);
+    } else {
+        snprintf(outPath, outSize, "%s\\%s_%04d%02d%02d_%02d%02d%02d.mp4",
+            g_config.savePath, prefix,
+            (int)st.wYear, (int)st.wMonth, (int)st.wDay,
+            (int)st.wHour, (int)st.wMinute, (int)st.wSecond);
+    }
+}
+
 
 // Update timer display text
 static void UpdateTimerDisplay(void) {
@@ -506,10 +589,20 @@ static void UpdateTimerDisplay(void) {
     int mins = (int)((elapsed / 60000) % 60);
     int hours = (int)(elapsed / 3600000);
     
+    char timeBuf[32];
     if (hours > 0) {
-        snprintf(g_timerText, sizeof(g_timerText), "%d:%02d:%02d", hours, mins, secs);
+        snprintf(timeBuf, sizeof(timeBuf), "%d:%02d:%02d", hours, mins, secs);
     } else {
-        snprintf(g_timerText, sizeof(g_timerText), "%02d:%02d", mins, secs);  // MM:SS with leading zero
+        snprintf(timeBuf, sizeof(timeBuf), "%02d:%02d", mins, secs);
+    }
+    
+    /* Append marker count if any */
+    int markerCount = Markers_GetCount(&g_recording.markers);
+    if (markerCount > 0) {
+        snprintf(g_timerText, sizeof(g_timerText), "%s  M:%d", timeBuf, markerCount);
+    } else {
+        strncpy(g_timerText, timeBuf, sizeof(g_timerText) - 1);
+        g_timerText[sizeof(g_timerText) - 1] = '\0';
     }
     
     // Trigger repaint of recording panel
@@ -749,6 +842,9 @@ static void Overlay_StartRecording(void) {
     Util_GenerateRecordingFilename(outputPath, MAX_PATH, 
                              g_config.savePath, g_config.outputFormat);
     
+    // Clear markers for new recording session
+    Markers_Init(&g_recording.markers);
+    
     // Start recording via recording.c
     if (!Recording_Start(&g_recording, &g_capture, &g_config, outputPath)) {
         char errMsg[512];
@@ -800,6 +896,13 @@ static void Overlay_StopRecording(void) {
     
     // Stop recording via recording.c (blocks until finalized)
     Recording_Stop(&g_recording);
+    
+    // Write marker sidecar file if any markers were placed
+    if (Markers_GetCount(&g_recording.markers) > 0) {
+        ULONGLONG endMs = GetTickCount64();
+        Markers_WriteSidecar(&g_recording.markers, g_recording.outputPath,
+                             g_recording.startTime, endMs);
+    }
     
     // --- UI updates (overlay-specific) ---
     
@@ -1615,6 +1718,10 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 UpdateTimerDisplay();
             } else if (wParam == ID_TIMER_REPLAY_CHECK) {
                 // Reserved for future periodic UI updates if needed
+            } else if (wParam == ID_TIMER_AUTOCLIP_DELAY) {
+                KillTimer(hwnd, ID_TIMER_AUTOCLIP_DELAY);
+                Logger_Log("Auto-clip: delay timer fired, saving now\n");
+                PostMessage(hwnd, WM_AUTOCLIP_SAVE_DELAYED, 0, 0);
             } else if (wParam == ID_TIMER_HOVER) {
                 // Check which icon button is currently hovered (if any)
                 POINT pt;
@@ -1833,6 +1940,31 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
         
         case WM_HOTKEY: {
             Logger_Log("WM_HOTKEY received: wParam=%llu\n", (unsigned long long)wParam);
+            if (wParam == HOTKEY_MARKER) {
+                ULONGLONG now = GetTickCount64();
+                BOOL added = FALSE;
+                
+                if (Recording_IsActive(&g_recording)) {
+                    added = Markers_Add(&g_recording.markers, now);
+                    Logger_Log("Marker hotkey: added to recording, count=%d\n",
+                               Markers_GetCount(&g_recording.markers));
+                } else if (g_replayBuffer.isBuffering) {
+                    added = Markers_Add(&g_replayBuffer.markers, now);
+                    Logger_Log("Marker hotkey: added to replay buffer, count=%d\n",
+                               Markers_GetCount(&g_replayBuffer.markers));
+                } else {
+                    Logger_Log("Marker hotkey: nothing active, ignoring\n");
+                }
+                
+                if (added) {
+                    Border_Flash();
+                    /* Repaint recording panel to update marker count */
+                    if (g_windows.recordingPanel) {
+                        InvalidateRect(g_windows.recordingPanel, NULL, FALSE);
+                    }
+                }
+                return 0;
+            }
             if (wParam == HOTKEY_REPLAY_SAVE) {
                 Logger_Log("HOTKEY_REPLAY_SAVE matched, isBuffering=%d, bufferReady=%d\n", 
                            g_replayBuffer.isBuffering, g_replayBuffer.bufferReady);
@@ -1847,27 +1979,37 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                     MessageBeep(MB_ICONWARNING);
                     return 0;
                 }
+                // Debounce: ignore F5 while a save is already in flight (manual or auto-clip).
+                if (InterlockedCompareExchange(&g_replaySaveInFlight, 1, 0) != 0) {
+                    Logger_Log("F5 ignored: replay save already in flight (source=F5)\n");
+                    MessageBeep(MB_ICONWARNING);
+                    return 0;
+                }
                 
-                // Generate filename with timestamp
+                // Generate filename with game subfolder
+                char gameName[64];
+                GetForegroundGameName(gameName, sizeof(gameName));
                 char filename[MAX_PATH];
-                SYSTEMTIME st;
-                GetLocalTime(&st);
-                snprintf(filename, sizeof(filename), "%s\\Replay_%04d%02d%02d_%02d%02d%02d.mp4",
-                    g_config.savePath, (int)st.wYear, (int)st.wMonth, (int)st.wDay,
-                    (int)st.wHour, (int)st.wMinute, (int)st.wSecond);
+                BuildGameSavePath(filename, sizeof(filename), "Replay", gameName);
                 
                 Logger_Log("Generated filename: %s\n", filename);
                 Logger_Log("Calling ReplayBuffer_SaveAsync...\n");
+                
+                // Capture save context for sidecar writing
+                g_replaySaveRequestMs = GetTickCount64();
+                strncpy(g_replaySavePath, filename, MAX_PATH - 1);
+                g_replaySavePath[MAX_PATH - 1] = '\0';
                 
                 // Request async save - will post WM_REPLAY_SAVE_COMPLETE when done
                 BOOL started = ReplayBuffer_SaveAsync(&g_replayBuffer, filename,
                                                       hwnd, WM_REPLAY_SAVE_COMPLETE);
                 
                 if (started) {
-                    Logger_Log("Async save started\n");
+                    Logger_Log("Async save started (source=F5)\n");
                     // Could show a "saving..." indicator here
                 } else {
-                    Logger_Log("Failed to start async save\n");
+                    Logger_Log("Failed to start async save (source=F5)\n");
+                    InterlockedExchange(&g_replaySaveInFlight, 0);
                     MessageBeep(MB_ICONWARNING);
                 }
             }
@@ -1878,8 +2020,18 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             // Async save completed - wParam contains success status
             BOOL success = (BOOL)wParam;
             Logger_Log("WM_REPLAY_SAVE_COMPLETE received: success=%d\n", success);
+            InterlockedExchange(&g_replaySaveInFlight, 0);
             
             if (success) {
+                // Write marker sidecar file for replay if any markers exist
+                if (Markers_GetCount(&g_replayBuffer.markers) > 0 && g_replaySavePath[0]) {
+                    ULONGLONG bufferDurationMs = (ULONGLONG)g_config.replayDuration * 1000;
+                    ULONGLONG startMs = (g_replaySaveRequestMs > bufferDurationMs) 
+                                        ? (g_replaySaveRequestMs - bufferDurationMs) : 0;
+                    Markers_WriteSidecar(&g_replayBuffer.markers, g_replaySavePath,
+                                        startMs, g_replaySaveRequestMs);
+                }
+                
                 // Play Windows system notification sound via registry alias
                 BOOL played = PlaySound(TEXT("SystemNotification"), NULL, SND_ALIAS | SND_ASYNC);
                 if (!played) {
@@ -1890,6 +2042,105 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             } else {
                 PlaySound(TEXT("SystemHand"), NULL, SND_ALIAS | SND_ASYNC);
             }
+            return 0;
+        }
+        
+        case WM_AUTOCLIP_SAVE: {
+            Logger_Log("WM_AUTOCLIP_SAVE received\n");
+            DebugConsole_Print("KILL DETECTED -> save triggered\n");
+            
+            /* Store game name from kill detector (lParam = heap-alloc'd or NULL) */
+            char* gameName = (char*)lParam;
+            if (gameName) {
+                strncpy(g_autoClipGameName, gameName, sizeof(g_autoClipGameName) - 1);
+                g_autoClipGameName[sizeof(g_autoClipGameName) - 1] = '\0';
+                free(gameName);
+            } else {
+                g_autoClipGameName[0] = '\0';
+            }
+            
+            if (!g_replayBuffer.isBuffering || !g_replayBuffer.bufferReady) {
+                Logger_Log("Auto-clip: buffer not ready, ignoring\n");
+                return 0;
+            }
+            
+            int delaySec = g_config.autoClipDelaySec;
+            if (delaySec > 0) {
+                Logger_Log("Auto-clip: delaying save by %d seconds\n", delaySec);
+                DebugConsole_Print("  Delaying save by %d seconds...\n", delaySec);
+                SetTimer(hwnd, ID_TIMER_AUTOCLIP_DELAY, (UINT)(delaySec * 1000), NULL);
+            } else {
+                /* No delay - save immediately */
+                PostMessage(hwnd, WM_AUTOCLIP_SAVE_DELAYED, 0, 0);
+            }
+            return 0;
+        }
+        
+        case WM_AUTOCLIP_SAVE_DELAYED: {
+            /* Deferred auto-clip save (from timer or immediate) */
+            if (!g_replayBuffer.isBuffering || !g_replayBuffer.bufferReady) {
+                Logger_Log("Auto-clip: buffer not ready at save time, ignoring\n");
+                return 0;
+            }
+            // Debounce: skip auto-clip if a save (manual or auto-clip) is already in flight.
+            if (InterlockedCompareExchange(&g_replaySaveInFlight, 1, 0) != 0) {
+                Logger_Log("Auto-clip skipped: replay save already in flight (source=auto-clip)\n");
+                DebugConsole_Print("AUTO-CLIP SKIPPED: save already in flight\n");
+                return 0;
+            }
+            
+            char filename[MAX_PATH];
+            BuildGameSavePath(filename, sizeof(filename), "AutoClip", g_autoClipGameName);
+            
+            g_autoClipSaveRequestMs = GetTickCount64();
+            strncpy(g_autoClipSavePath, filename, MAX_PATH - 1);
+            g_autoClipSavePath[MAX_PATH - 1] = '\0';
+            
+            BOOL started = ReplayBuffer_SaveAsync(&g_replayBuffer, filename,
+                                                  hwnd, WM_AUTOCLIP_SAVE_COMPLETE);
+            if (started) {
+                Logger_Log("Auto-clip save started (source=auto-clip): %s\n", filename);
+                DebugConsole_Print("SAVING: %s\n", filename);
+                // Add marker for the kill event
+                Markers_Add(&g_replayBuffer.markers, GetTickCount64());
+                // Green border flash for auto-clip
+                Border_FlashColor(0, 255, 100);
+            } else {
+                Logger_Log("Auto-clip save failed to start (source=auto-clip)\n");
+                InterlockedExchange(&g_replaySaveInFlight, 0);
+            }
+            return 0;
+        }
+        
+        case WM_AUTOCLIP_SAVE_COMPLETE: {
+            BOOL success = (BOOL)wParam;
+            Logger_Log("WM_AUTOCLIP_SAVE_COMPLETE: success=%d\n", success);
+            InterlockedExchange(&g_replaySaveInFlight, 0);
+            DebugConsole_Print("SAVE %s\n", success ? "COMPLETE - clip saved!" : "FAILED");
+            if (success) {
+                /* Write companion .txt and .bmp next to the clip (debug mode only) */
+                if (DebugConsole_IsOpen()) {
+                    KillFeedSampler* kfs = (KillFeedSampler*)g_replayBuffer.killFeedSampler;
+                    if (kfs) {
+                        KillFeedSampler_WriteTriggerContext(kfs, g_autoClipSavePath, TRUE);
+                    }
+                }
+                PlaySound(TEXT("SystemNotification"), NULL, SND_ALIAS | SND_ASYNC);
+            } else {
+                PlaySound(TEXT("SystemHand"), NULL, SND_ALIAS | SND_ASYNC);
+            }
+            return 0;
+        }
+        
+        case WM_AUTOCLIP_ERROR: {
+            Logger_Log("WM_AUTOCLIP_ERROR: Kill feed region outside capture crop\n");
+            MessageBoxA(NULL,
+                "Auto-clip: Kill feed region is outside the capture area.\n\n"
+                "Your replay aspect ratio crops out the kill feed.\n"
+                "Change the replay aspect ratio (e.g. Native or 32:9)\n"
+                "so the capture includes the kill feed region.",
+                "LWSR - Auto-Clip Error",
+                MB_OK | MB_ICONWARNING | MB_TOPMOST);
             return 0;
         }
         

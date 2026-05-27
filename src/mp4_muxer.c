@@ -495,6 +495,211 @@ cleanup:
 }
 
 /* ============================================================================
+ * MULTI-TRACK AUDIO BATCH WRITE
+ * ============================================================================
+ * Write video + N audio tracks to MP4. Track 0 = mixed, 1..N = individual.
+ */
+
+BOOL MP4Muxer_WriteFileWithMultiAudio(
+    const char* outputPath,
+    const MuxerSample* videoSamples,
+    int videoSampleCount,
+    const MuxerConfig* videoConfig,
+    const MuxerAudioTrack* audioTracks,
+    int audioTrackCount)
+{
+    LWSR_ASSERT(outputPath != NULL);
+    LWSR_ASSERT(videoSamples != NULL);
+    LWSR_ASSERT(videoSampleCount > 0);
+    LWSR_ASSERT(videoConfig != NULL);
+
+    if (!outputPath || !videoSamples || videoSampleCount <= 0 || !videoConfig)
+        return FALSE;
+
+    /* Fall back if no audio tracks */
+    if (!audioTracks || audioTrackCount <= 0)
+        return MP4Muxer_WriteFile(outputPath, videoSamples, videoSampleCount, videoConfig);
+
+    /* Fall back to single-track path if only 1 track */
+    if (audioTrackCount == 1 && audioTracks[0].samples && audioTracks[0].sampleCount > 0)
+        return MP4Muxer_WriteFileWithAudio(outputPath, videoSamples, videoSampleCount, videoConfig,
+                                           audioTracks[0].samples, audioTracks[0].sampleCount,
+                                           &audioTracks[0].config);
+
+    BOOL result = FALSE;
+    IMFSinkWriter* writer = NULL;
+    IMFAttributes* attrs = NULL;
+    IMFMediaType* videoType = NULL;
+    IMFMediaType* audioTypes[8] = {0};   /* Max 8 audio tracks */
+    DWORD videoStreamIndex = 0;
+    DWORD audioStreamIndices[8] = {0};
+    int actualTrackCount = 0;
+    BOOL beginWritingCalled = FALSE;
+
+    if (audioTrackCount > 8) audioTrackCount = 8;
+
+    MuxLog("MP4Muxer: Writing %d video samples + %d audio tracks to %s\n",
+           videoSampleCount, audioTrackCount, outputPath);
+
+    WCHAR wPath[MAX_PATH];
+    MultiByteToWideChar(CP_ACP, 0, outputPath, -1, wPath, MAX_PATH);
+
+    HRESULT hr = MFCreateAttributes(&attrs, 2);
+    CHECK_HR_LOG(hr, cleanup, "MP4Muxer: MFCreateAttributes");
+
+    attrs->lpVtbl->SetUINT32(attrs, &MF_READWRITE_ENABLE_HARDWARE_TRANSFORMS, TRUE);
+    attrs->lpVtbl->SetUINT32(attrs, &MF_LOW_LATENCY, TRUE);
+
+    hr = MFCreateSinkWriterFromURL(wPath, NULL, attrs, &writer);
+    CHECK_HR_LOG(hr, cleanup, "MP4Muxer: MFCreateSinkWriterFromURL");
+
+    /* === VIDEO STREAM === */
+    videoType = CreateHEVCMediaType(videoConfig);
+    if (!videoType) goto cleanup;
+
+    hr = writer->lpVtbl->AddStream(writer, videoType, &videoStreamIndex);
+    if (FAILED(hr)) { MuxLog("MP4Muxer: AddStream (video) failed 0x%08X\n", hr); goto cleanup; }
+
+    hr = writer->lpVtbl->SetInputMediaType(writer, videoStreamIndex, videoType, NULL);
+    if (FAILED(hr)) { MuxLog("MP4Muxer: SetInputMediaType (video) failed 0x%08X\n", hr); goto cleanup; }
+
+    /* === AUDIO STREAMS === */
+    for (int t = 0; t < audioTrackCount; t++) {
+        if (!audioTracks[t].samples || audioTracks[t].sampleCount <= 0) continue;
+
+        audioTypes[actualTrackCount] = CreateAACMediaType(&audioTracks[t].config);
+        if (!audioTypes[actualTrackCount]) continue;
+
+        hr = writer->lpVtbl->AddStream(writer, audioTypes[actualTrackCount], &audioStreamIndices[actualTrackCount]);
+        if (FAILED(hr)) { SAFE_RELEASE(audioTypes[actualTrackCount]); continue; }
+
+        hr = writer->lpVtbl->SetInputMediaType(writer, audioStreamIndices[actualTrackCount],
+                                                audioTypes[actualTrackCount], NULL);
+        if (FAILED(hr)) continue;
+
+        MuxLog("MP4Muxer: Audio track %d: %d samples, stream index %u\n",
+               t, audioTracks[t].sampleCount, audioStreamIndices[actualTrackCount]);
+        actualTrackCount++;
+    }
+
+    if (actualTrackCount == 0) {
+        MuxLog("MP4Muxer: No valid audio tracks, falling back to video-only\n");
+        SAFE_RELEASE(videoType);
+        SAFE_RELEASE(attrs);
+        SAFE_RELEASE(writer);
+        return MP4Muxer_WriteFile(outputPath, videoSamples, videoSampleCount, videoConfig);
+    }
+
+    /* Begin writing */
+    hr = writer->lpVtbl->BeginWriting(writer);
+    if (FAILED(hr)) { MuxLog("MP4Muxer: BeginWriting failed 0x%08X\n", hr); goto cleanup; }
+    beginWritingCalled = TRUE;
+
+    /* === INTERLEAVED WRITING ===
+     * Write all streams interleaved by timestamp for proper MP4 structure.
+     * Use cursors for video + each audio track. */
+    {
+        int videoIdx = 0;
+        int audioIdx[8] = {0};
+        int videoWritten = 0;
+        int audioWritten[8] = {0};
+        int totalSamples = videoSampleCount;
+        for (int t = 0; t < audioTrackCount; t++) totalSamples += audioTracks[t].sampleCount;
+        int samplesProcessed = 0;
+        int lastProgressPercent = -1;
+        int trackForIdx[8];  /* maps actualTrack -> original track index */
+        {
+            int at = 0;
+            for (int t = 0; t < audioTrackCount; t++) {
+                if (audioTracks[t].samples && audioTracks[t].sampleCount > 0 && at < actualTrackCount) {
+                    trackForIdx[at] = t;
+                    at++;
+                }
+            }
+        }
+
+        for (;;) {
+            /* Find stream with earliest next timestamp */
+            LONGLONG earliest = LLONG_MAX;
+            int earliestStream = -1; /* -1=video, 0..N-1=audio track */
+
+            if (videoIdx < videoSampleCount) {
+                earliest = videoSamples[videoIdx].timestamp;
+                earliestStream = -1;
+            }
+
+            for (int at = 0; at < actualTrackCount; at++) {
+                int origTrack = trackForIdx[at];
+                if (audioIdx[at] < audioTracks[origTrack].sampleCount) {
+                    LONGLONG ts = audioTracks[origTrack].samples[audioIdx[at]].timestamp;
+                    if (ts < earliest) {
+                        earliest = ts;
+                        earliestStream = at;
+                    }
+                }
+            }
+
+            if (earliest == LLONG_MAX) break; /* All streams exhausted */
+
+            samplesProcessed++;
+            int progressPercent = (samplesProcessed * 100) / totalSamples;
+            if (progressPercent >= lastProgressPercent + 10) {
+                lastProgressPercent = progressPercent;
+                MuxLog("MP4Muxer: Progress %d%% (%d/%d samples)\n",
+                       progressPercent, samplesProcessed, totalSamples);
+            }
+
+            if (earliestStream == -1) {
+                /* Write video */
+                const MuxerSample* sample = &videoSamples[videoIdx++];
+                if (sample->data && sample->size > 0) {
+                    if (WriteVideoSampleToWriter(writer, videoStreamIndex, sample))
+                        videoWritten++;
+                }
+            } else {
+                /* Write audio for track */
+                int at = earliestStream;
+                int origTrack = trackForIdx[at];
+                const MuxerAudioSample* sample = &audioTracks[origTrack].samples[audioIdx[at]++];
+                if (sample->data && sample->size > 0) {
+                    if (WriteAudioSampleToWriter(writer, audioStreamIndices[at], sample))
+                        audioWritten[at]++;
+                }
+            }
+        }
+
+        MuxLog("MP4Muxer: Wrote %d/%d video", videoWritten, videoSampleCount);
+        for (int at = 0; at < actualTrackCount; at++) {
+            int origTrack = trackForIdx[at];
+            MuxLog(", track%d=%d/%d", origTrack, audioWritten[at], audioTracks[origTrack].sampleCount);
+        }
+        MuxLog("\n");
+    }
+
+    /* Finalize */
+    if (beginWritingCalled) {
+        DWORD finalizeStart = GetTickCount();
+        hr = writer->lpVtbl->Finalize(writer);
+        DWORD finalizeTime = GetTickCount() - finalizeStart;
+        if (FAILED(hr))
+            MuxLog("MP4Muxer: Finalize failed 0x%08X after %u ms\n", hr, finalizeTime);
+        else if (finalizeTime > 2000)
+            MuxLog("MP4Muxer: Finalize took %u ms (slow disk?)\n", finalizeTime);
+    }
+
+    result = SUCCEEDED(hr);
+    MuxLog("MP4Muxer: Finalize %s\n", result ? "OK" : "FAILED");
+
+cleanup:
+    for (int t = 0; t < 8; t++) SAFE_RELEASE(audioTypes[t]);
+    SAFE_RELEASE(videoType);
+    SAFE_RELEASE(attrs);
+    SAFE_RELEASE(writer);
+
+    return result;
+}
+
+/* ============================================================================
  * STREAMING MUXER IMPLEMENTATION
  * ============================================================================
  * Real-time muxing for direct recording (write frames as they arrive).

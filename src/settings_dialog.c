@@ -15,11 +15,14 @@
 
 #include "settings_dialog.h"
 #include "config.h"
+#include "capture.h"
 #include "audio_device.h"
 #include "aac_encoder.h"
 #include "replay_buffer.h"
 #include "logger.h"
 #include "constants.h"
+#include "overlay.h"
+#include "debug_console.h"
 
 #pragma comment(lib, "comctl32.lib")
 
@@ -29,6 +32,7 @@
 
 extern AppConfig g_config;
 extern ReplayBufferState g_replayBuffer;
+extern CaptureState g_capture;
 extern HWND g_controlWnd;
 
 /* Forward declarations from overlay.c (still needed for preview/area functions) */
@@ -40,8 +44,13 @@ extern void AreaSelector_GetRect(RECT* rect);
 extern void GetAspectRatioDimensions(int aspectIndex, int* ratioW, int* ratioH);
 extern void SaveAreaSelectorPosition(void);
 
+/* Forward declarations for region debug overlay */
+static void AutoClipRegionOverlay_Show(void);
+static void AutoClipRegionOverlay_Hide(void);
+
 /* Hotkey ID (must match main.c/overlay.c) */
 #define HOTKEY_REPLAY_SAVE 1
+#define HOTKEY_MARKER 2
 
 /* ============================================================================
  * MODULE-LEVEL STATE
@@ -57,6 +66,7 @@ static HWND* s_externalHandleRef = NULL;  /* For updating caller's reference */
 
 /* Hotkey capture state */
 static BOOL s_waitingForHotkey = FALSE;
+static BOOL s_waitingForMarkerHotkey = FALSE;
 
 /* Tab state */
 static SettingsTab s_currentTab = SETTINGS_TAB_GENERAL;
@@ -66,9 +76,11 @@ static SettingsTab s_currentTab = SETTINGS_TAB_GENERAL;
 static HWND s_generalControls[MAX_SECTION_CONTROLS];
 static HWND s_audioControls[MAX_SECTION_CONTROLS];
 static HWND s_videoControls[MAX_SECTION_CONTROLS];
+static HWND s_autoClipControls[MAX_SECTION_CONTROLS];
 static int s_generalControlCount = 0;
 static int s_audioControlCount = 0;
 static int s_videoControlCount = 0;
+static int s_autoClipControlCount = 0;
 
 /* ============================================================================
  * HELPER FUNCTIONS
@@ -359,6 +371,7 @@ static void SwitchToTab(SettingsTab tab) {
     ShowSection(s_generalControls, s_generalControlCount, FALSE);
     ShowSection(s_audioControls, s_audioControlCount, FALSE);
     ShowSection(s_videoControls, s_videoControlCount, FALSE);
+    ShowSection(s_autoClipControls, s_autoClipControlCount, FALSE);
     
     /* Show the selected section */
     switch (tab) {
@@ -370,6 +383,9 @@ static void SwitchToTab(SettingsTab tab) {
             break;
         case SETTINGS_TAB_VIDEO:
             ShowSection(s_videoControls, s_videoControlCount, TRUE);
+            break;
+        case SETTINGS_TAB_AUTOCLIP:
+            ShowSection(s_autoClipControls, s_autoClipControlCount, TRUE);
             break;
     }
     
@@ -515,6 +531,25 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
     layout->y += 14;
     
+    /* Marker hotkey label */
+    ctl = CreateWindowW(L"STATIC", L"Marker Hotkey",
+        WS_CHILD | SS_CENTERIMAGE,
+        layout->labelX, layout->y, layout->labelW, 26, hwnd, NULL, s_hInstance, NULL);
+    SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    AddToSection(ctl, s_generalControls, &s_generalControlCount);
+    
+    /* Marker hotkey button */
+    {
+        char keyName[64];
+        GetKeyNameFromVK(g_config.markerKey, keyName, sizeof(keyName));
+        ctl = CreateWindowExA(0, "BUTTON", keyName,
+            WS_CHILD | BS_PUSHBUTTON,
+            layout->controlX, layout->y, 100, 24, hwnd, (HMENU)ID_BTN_MARKER_HOTKEY, s_hInstance, NULL);
+        SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
+        AddToSection(ctl, s_generalControls, &s_generalControlCount);
+    }
+    layout->y += layout->rowH;
+    
     /* Debug logging checkbox */
     ctl = CreateWindowW(L"BUTTON", L"Enable debug logging (creates log files in Debug folder)",
         WS_CHILD | BS_AUTOCHECKBOX,
@@ -522,6 +557,97 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     CheckDlgButton(hwnd, ID_CHK_DEBUG_LOGGING, g_config.debugLogging ? BST_CHECKED : BST_UNCHECKED);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
+    layout->y += layout->rowH + 12;
+    
+    /* ── Auto-Clip Section ── */
+    ctl = CreateWindowW(L"STATIC", L"",
+        WS_CHILD | SS_ETCHEDHORZ,
+        layout->labelX, layout->y, layout->contentW, 2, hwnd, NULL, s_hInstance, NULL);
+    AddToSection(ctl, s_generalControls, &s_generalControlCount);
+    layout->y += 14;
+    
+    /* Enable auto-clip checkbox */
+    ctl = CreateWindowW(L"BUTTON", L"Kill feed instant clipping (requires Tesseract OCR)",
+        WS_CHILD | BS_AUTOCHECKBOX,
+        layout->labelX, layout->y, 420, 24, hwnd, (HMENU)ID_CHK_AUTOCLIP_ENABLED, s_hInstance, NULL);
+    SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    CheckDlgButton(hwnd, ID_CHK_AUTOCLIP_ENABLED, g_config.autoClipEnabled ? BST_CHECKED : BST_UNCHECKED);
+    AddToSection(ctl, s_generalControls, &s_generalControlCount);
+    layout->y += layout->rowH;
+    
+    /* Show regions checkbox (debug overlay) */
+    ctl = CreateWindowW(L"BUTTON", L"Show detection regions (calibration)",
+        WS_CHILD | BS_AUTOCHECKBOX,
+        layout->labelX + 16, layout->y, 300, 24, hwnd, (HMENU)ID_CHK_AUTOCLIP_SHOW_REGIONS, s_hInstance, NULL);
+    SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    CheckDlgButton(hwnd, ID_CHK_AUTOCLIP_SHOW_REGIONS, g_config.autoClipShowRegions ? BST_CHECKED : BST_UNCHECKED);
+    AddToSection(ctl, s_generalControls, &s_generalControlCount);
+    layout->y += layout->rowH;
+    
+    /* Debug console checkbox */
+    ctl = CreateWindowW(L"BUTTON", L"Debug console (live OCR feed)",
+        WS_CHILD | BS_AUTOCHECKBOX,
+        layout->labelX + 16, layout->y, 300, 24, hwnd, (HMENU)ID_CHK_AUTOCLIP_DEBUG_CONSOLE, s_hInstance, NULL);
+    SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    CheckDlgButton(hwnd, ID_CHK_AUTOCLIP_DEBUG_CONSOLE, DebugConsole_IsOpen() ? BST_CHECKED : BST_UNCHECKED);
+    AddToSection(ctl, s_generalControls, &s_generalControlCount);
+    layout->y += layout->rowH;
+    
+    /* Cooldown label */
+    ctl = CreateWindowW(L"STATIC", L"Cooldown (sec)",
+        WS_CHILD | SS_CENTERIMAGE,
+        layout->labelX, layout->y, layout->labelW, 22, hwnd, NULL, s_hInstance, NULL);
+    SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    AddToSection(ctl, s_generalControls, &s_generalControlCount);
+    
+    /* Cooldown value label */
+    {
+        char cdBuf[16];
+        snprintf(cdBuf, sizeof(cdBuf), "%d", g_config.autoClipCooldownSec);
+        ctl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | ES_NUMBER | ES_CENTER,
+            layout->controlX + 155, layout->y + 2, 40, 20, hwnd, (HMENU)ID_LBL_AUTOCLIP_COOLDOWN, s_hInstance, NULL);
+        SendMessage(ctl, WM_SETFONT, (WPARAM)layout->smallFont, TRUE);
+        SetWindowTextA(ctl, cdBuf);
+        AddToSection(ctl, s_generalControls, &s_generalControlCount);
+    }
+    
+    /* Cooldown slider */
+    ctl = CreateWindowW(TRACKBAR_CLASSW, L"",
+        WS_CHILD | TBS_HORZ | TBS_NOTICKS | TBS_TRANSPARENTBKGND,
+        layout->controlX, layout->y, 150, 26, hwnd, (HMENU)ID_SLD_AUTOCLIP_COOLDOWN, s_hInstance, NULL);
+    SendMessage(ctl, TBM_SETRANGE, TRUE, MAKELPARAM(AUTOCLIP_COOLDOWN_MIN_SEC, AUTOCLIP_COOLDOWN_MAX_SEC));
+    SendMessage(ctl, TBM_SETPOS, TRUE, g_config.autoClipCooldownSec);
+    AddToSection(ctl, s_generalControls, &s_generalControlCount);
+    layout->y += layout->rowH;
+    
+    /* Save delay label */
+    ctl = CreateWindowW(L"STATIC", L"Save delay (sec)",
+        WS_CHILD | SS_CENTERIMAGE,
+        layout->labelX, layout->y, layout->labelW, 22, hwnd, NULL, s_hInstance, NULL);
+    SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
+    AddToSection(ctl, s_generalControls, &s_generalControlCount);
+    
+    /* Save delay value label */
+    {
+        char dlBuf[16];
+        snprintf(dlBuf, sizeof(dlBuf), "%d", g_config.autoClipDelaySec);
+        ctl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
+            WS_CHILD | ES_NUMBER | ES_CENTER,
+            layout->controlX + 155, layout->y + 2, 40, 20, hwnd, (HMENU)ID_LBL_AUTOCLIP_DELAY, s_hInstance, NULL);
+        SendMessage(ctl, WM_SETFONT, (WPARAM)layout->smallFont, TRUE);
+        SetWindowTextA(ctl, dlBuf);
+        AddToSection(ctl, s_generalControls, &s_generalControlCount);
+    }
+    
+    /* Save delay slider */
+    ctl = CreateWindowW(TRACKBAR_CLASSW, L"",
+        WS_CHILD | TBS_HORZ | TBS_NOTICKS | TBS_TRANSPARENTBKGND,
+        layout->controlX, layout->y, 150, 26, hwnd, (HMENU)ID_SLD_AUTOCLIP_DELAY, s_hInstance, NULL);
+    SendMessage(ctl, TBM_SETRANGE, TRUE, MAKELPARAM(AUTOCLIP_DELAY_MIN_SEC, AUTOCLIP_DELAY_MAX_SEC));
+    SendMessage(ctl, TBM_SETPOS, TRUE, g_config.autoClipDelaySec);
+    AddToSection(ctl, s_generalControls, &s_generalControlCount);
+    layout->y += layout->rowH;
 }
 
 /**
@@ -635,7 +761,24 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     int monCount = GetSystemMetrics(SM_CMONITORS);
     for (int i = 0; i < monCount; i++) {
         WCHAR buf[64];
-        wsprintfW(buf, L"Monitor %d", i + 1);
+        RECT monBounds;
+        BOOL isPrimary = FALSE;
+        if (Capture_GetMonitorBoundsByIndex(i, &monBounds)) {
+            POINT pt = { monBounds.left, monBounds.top };
+            HMONITOR hMon = MonitorFromPoint(pt, MONITOR_DEFAULTTONULL);
+            if (hMon) {
+                MONITORINFO mi;
+                mi.cbSize = sizeof(mi);
+                if (GetMonitorInfoW(hMon, &mi) && (mi.dwFlags & MONITORINFOF_PRIMARY)) {
+                    isPrimary = TRUE;
+                }
+            }
+        }
+        if (isPrimary) {
+            wsprintfW(buf, L"Monitor %d (primary)", i + 1);
+        } else {
+            wsprintfW(buf, L"Monitor %d", i + 1);
+        }
         SendMessageW(cmbSource, CB_ADDSTRING, 0, (LPARAM)buf);
     }
     SendMessageW(cmbSource, CB_ADDSTRING, 0, (LPARAM)L"Window (click to select)");
@@ -915,9 +1058,32 @@ static void CreateAudioSection(HWND hwnd, SettingsLayout* layout) {
  * SETTINGS WINDOW PROCEDURE
  * ============================================================================ */
 
+/* Replay-duration apply-on-close: in-place Stop/Start during editing races the
+ * buffer thread and leaks the NVENC encoder when Stop times out (see crash
+ * 2026-05-27). We now collect the new duration into g_config during editing
+ * and perform a single Stop/Start only when the settings dialog closes. The
+ * actual Stop/Start runs on a worker thread so the UI does not stall (Stop can
+ * block up to 5s waiting for the buffer thread to drain). */
+static int s_replayDurationAtOpen = -1;
+static LONG s_replayReloadInFlight = 0;
+
+static DWORD WINAPI ReplayReloadWorker(LPVOID param) {
+    (void)param;
+    Logger_Log("Replay reload worker: starting Stop/Start for duration=%ds\n",
+               g_config.replayDuration);
+    Logger_ResetHeartbeat(THREAD_BUFFER);
+    Logger_ResetHeartbeat(THREAD_NVENC_OUTPUT);
+    ReplayBuffer_Stop(&g_replayBuffer);
+    ReplayBuffer_Start(&g_replayBuffer, &g_config);
+    Logger_Log("Replay reload worker: done\n");
+    InterlockedExchange(&s_replayReloadInFlight, 0);
+    return 0;
+}
+
 static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
+            s_replayDurationAtOpen = g_config.replayDuration;
             /* Create fonts */
             s_settingsFont = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
@@ -1090,23 +1256,9 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         int s = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_REPLAY_SECS), CB_GETCURSEL, 0, 0);
                         int total = h * 3600 + m * 60 + s;
                         if (total < 1) total = 1;
-                        
-                        if (total != g_config.replayDuration) {
-                            int oldDuration = g_config.replayDuration;
-                            g_config.replayDuration = total;
-                            Logger_Log("Replay duration changed: %ds -> %ds\n", oldDuration, total);
-                            
-                            if (g_config.replayEnabled && g_replayBuffer.isBuffering) {
-                                Logger_Log("Hot-reloading replay buffer with new duration...\n");
-                                Logger_ResetHeartbeat(THREAD_BUFFER);
-                                Logger_ResetHeartbeat(THREAD_NVENC_OUTPUT);
-                                ReplayBuffer_Stop(&g_replayBuffer);
-                                ReplayBuffer_Start(&g_replayBuffer, &g_config);
-                                Logger_Log("Replay buffer restarted with %ds duration\n", total);
-                            }
-                        }
-                        
+                        g_config.replayDuration = total;
                         UpdateReplayRAMEstimate(hwnd);
+                        /* Applied on WM_CLOSE to avoid Stop/Start races. */
                     }
                     break;
                     
@@ -1158,6 +1310,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     SetWindowTextA(GetDlgItem(hwnd, ID_BTN_REPLAY_HOTKEY), "Press a key...");
                     SetFocus(hwnd);
                     break;
+                
+                case ID_BTN_MARKER_HOTKEY:
+                    s_waitingForMarkerHotkey = TRUE;
+                    SetWindowTextA(GetDlgItem(hwnd, ID_BTN_MARKER_HOTKEY), "Press a key...");
+                    SetFocus(hwnd);
+                    break;
                     
                 case ID_CHK_AUDIO_ENABLED:
                     if (IsDlgButtonChecked(hwnd, ID_CHK_AUDIO_ENABLED) == BST_CHECKED) {
@@ -1205,6 +1363,26 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     }
                     break;
                     
+                case ID_CHK_AUTOCLIP_ENABLED:
+                    g_config.autoClipEnabled = (IsDlgButtonChecked(hwnd, ID_CHK_AUTOCLIP_ENABLED) == BST_CHECKED);
+                    break;
+                
+                case ID_CHK_AUTOCLIP_SHOW_REGIONS:
+                    g_config.autoClipShowRegions = (IsDlgButtonChecked(hwnd, ID_CHK_AUTOCLIP_SHOW_REGIONS) == BST_CHECKED);
+                    /* Toggle calibration region overlay */
+                    if (g_config.autoClipShowRegions)
+                        AutoClipRegionOverlay_Show();
+                    else
+                        AutoClipRegionOverlay_Hide();
+                    break;
+                
+                case ID_CHK_AUTOCLIP_DEBUG_CONSOLE:
+                    if (IsDlgButtonChecked(hwnd, ID_CHK_AUTOCLIP_DEBUG_CONSOLE) == BST_CHECKED)
+                        DebugConsole_Open();
+                    else
+                        DebugConsole_Close();
+                    break;
+                
                 case ID_CMB_AUDIO_SOURCE1:
                     if (HIWORD(wParam) == CBN_SELCHANGE) {
                         int idx = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_AUDIO_SOURCE1), CB_GETCURSEL, 0, 0);
@@ -1303,6 +1481,14 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 g_config.audioVolume3 = pos;
                 snprintf(buf, sizeof(buf), "%d", pos);
                 SetWindowTextA(GetDlgItem(hwnd, ID_LBL_AUDIO_VOL3), buf);
+            } else if (ctrlId == ID_SLD_AUTOCLIP_COOLDOWN) {
+                g_config.autoClipCooldownSec = pos;
+                snprintf(buf, sizeof(buf), "%d", pos);
+                SetWindowTextA(GetDlgItem(hwnd, ID_LBL_AUTOCLIP_COOLDOWN), buf);
+            } else if (ctrlId == ID_SLD_AUTOCLIP_DELAY) {
+                g_config.autoClipDelaySec = pos;
+                snprintf(buf, sizeof(buf), "%d", pos);
+                SetWindowTextA(GetDlgItem(hwnd, ID_LBL_AUTOCLIP_DELAY), buf);
             }
             return 0;
         }
@@ -1340,9 +1526,56 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                 s_waitingForHotkey = FALSE;
                 return 0;
             }
+            if (s_waitingForMarkerHotkey) {
+                int vk = (int)wParam;
+                
+                /* Ignore modifier keys alone */
+                if (vk == VK_SHIFT || vk == VK_CONTROL || vk == VK_MENU || 
+                    vk == VK_LSHIFT || vk == VK_RSHIFT || 
+                    vk == VK_LCONTROL || vk == VK_RCONTROL ||
+                    vk == VK_LMENU || vk == VK_RMENU) {
+                    return 0;
+                }
+                
+                /* Unregister old, update config, re-register */
+                UnregisterHotKey(g_controlWnd, HOTKEY_MARKER);
+                g_config.markerKey = vk;
+                Logger_Log("Marker hotkey changed to VK=0x%02X\n", vk);
+                
+                BOOL ok = RegisterHotKey(g_controlWnd, HOTKEY_MARKER, 0, g_config.markerKey);
+                Logger_Log("RegisterHotKey(HOTKEY_MARKER): %s (key=0x%02X)\n", ok ? "OK" : "FAILED", g_config.markerKey);
+                
+                char keyName[64];
+                GetKeyNameFromVK(vk, keyName, sizeof(keyName));
+                SetWindowTextA(GetDlgItem(hwnd, ID_BTN_MARKER_HOTKEY), keyName);
+                
+                s_waitingForMarkerHotkey = FALSE;
+                return 0;
+            }
             break;
             
+        case WM_TIMER:
+            break;
+
         case WM_CLOSE: {
+            /* Apply replay duration change once, on close, to avoid the race
+             * where rapid in-place Stop/Start hangs and leaks the encoder.
+             * Run on a worker thread so the UI close stays responsive. */
+            if (s_replayDurationAtOpen >= 0 &&
+                g_config.replayDuration != s_replayDurationAtOpen &&
+                g_config.replayEnabled && g_replayBuffer.isBuffering &&
+                InterlockedCompareExchange(&s_replayReloadInFlight, 1, 0) == 0) {
+                Logger_Log("Scheduling replay duration change on close: %ds -> %ds (async)\n",
+                           s_replayDurationAtOpen, g_config.replayDuration);
+                HANDLE hThr = CreateThread(NULL, 0, ReplayReloadWorker, NULL, 0, NULL);
+                if (hThr) {
+                    CloseHandle(hThr);
+                } else {
+                    Logger_Log("Replay reload: CreateThread failed, falling back to inline\n");
+                    ReplayReloadWorker(NULL);
+                }
+            }
+            s_replayDurationAtOpen = -1;
             SaveAreaSelectorPosition();
             AreaSelector_Hide();
             
@@ -1478,12 +1711,161 @@ SettingsTab SettingsDialog_GetCurrentTab(void) {
 }
 
 void SettingsDialog_SwitchTab(SettingsTab tab) {
-    if (s_settingsWnd && tab >= SETTINGS_TAB_GENERAL && tab <= SETTINGS_TAB_VIDEO) {
+    if (s_settingsWnd && tab >= SETTINGS_TAB_GENERAL && tab <= SETTINGS_TAB_AUTOCLIP) {
         SwitchToTab(tab);
         
         /* Update RAM estimate when switching to Video tab (which contains Replay settings) */
         if (tab == SETTINGS_TAB_VIDEO) {
             UpdateReplayRAMEstimate(s_settingsWnd);
         }
+    }
+}
+
+/* ============================================================================
+ * AUTO-CLIP REGION DEBUG OVERLAY
+ * ============================================================================
+ * Draws outline rectangles over the kill feed and badge regions using
+ * per-pixel alpha (UpdateLayeredWindow), same as border.c.
+ * Click-through, no collision, just visual debug.
+ * ============================================================================ */
+
+#include "layered_window.h"
+
+static HWND s_regionOverlayWnd = NULL;
+static const char* REGION_OVERLAY_CLASS = "LWSRRegionOverlay";
+
+/* Draw a 2px outline rectangle into a LayeredBitmap at the given coords */
+static void DrawOutlineRect(LayeredBitmap* lb, int rx, int ry, int rw, int rh,
+                            BYTE r, BYTE g, BYTE b, BYTE a)
+{
+    int bw = lb->width;
+    int bh = lb->height;
+    int thick = 2;
+    
+    /* Pre-multiplied alpha */
+    BYTE pb = (BYTE)(b * a / 255);
+    BYTE pg = (BYTE)(g * a / 255);
+    BYTE pr = (BYTE)(r * a / 255);
+    
+    for (int y = ry; y < ry + rh && y < bh; y++) {
+        if (y < 0) continue;
+        for (int x = rx; x < rx + rw && x < bw; x++) {
+            if (x < 0) continue;
+            BOOL isBorder = (x < rx + thick || x >= rx + rw - thick ||
+                             y < ry + thick || y >= ry + rh - thick);
+            if (isBorder) {
+                int idx = (y * bw + x) * 4;
+                lb->pixels[idx + 0] = pb;
+                lb->pixels[idx + 1] = pg;
+                lb->pixels[idx + 2] = pr;
+                lb->pixels[idx + 3] = a;
+            }
+        }
+    }
+}
+
+/* Draw centered text label into a LayeredBitmap rect */
+static void DrawLabelOnBitmap(LayeredBitmap* lb, int rx, int ry, int rw, int rh,
+                              const char* text, BYTE r, BYTE g, BYTE b)
+{
+    HFONT font = CreateFontA(14, 0, 0, 0, FW_BOLD, FALSE, FALSE, FALSE,
+                             DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                             CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, "Segoe UI");
+    HFONT oldFont = SelectObject(lb->memDC, font);
+    
+    SetBkMode(lb->memDC, TRANSPARENT);
+    SetTextColor(lb->memDC, RGB(r, g, b));
+    
+    RECT textRect = { rx + 4, ry + 4, rx + rw - 4, ry + rh - 4 };
+    DrawTextA(lb->memDC, text, -1, &textRect, DT_LEFT | DT_TOP | DT_SINGLELINE);
+    
+    /* Fix pre-multiplied alpha for text pixels — any pixel with color but 0 alpha
+       was drawn by GDI which doesn't set alpha. Force alpha to 255. */
+    for (int y = ry; y < ry + rh && y < lb->height; y++) {
+        if (y < 0) continue;
+        for (int x = rx; x < rx + rw && x < lb->width; x++) {
+            if (x < 0) continue;
+            int idx = (y * lb->width + x) * 4;
+            if (lb->pixels[idx + 3] == 0 &&
+                (lb->pixels[idx + 0] || lb->pixels[idx + 1] || lb->pixels[idx + 2])) {
+                lb->pixels[idx + 3] = 255;
+            }
+        }
+    }
+    
+    SelectObject(lb->memDC, oldFont);
+    DeleteObject(font);
+}
+
+static void UpdateRegionOverlayBitmap(void)
+{
+    if (!s_regionOverlayWnd) return;
+    
+    int monW = GetSystemMetrics(SM_CXSCREEN);
+    int monH = GetSystemMetrics(SM_CYSCREEN);
+    
+    LayeredBitmap lb = {0};
+    if (!LayeredBitmap_Create(&lb, monW, monH)) return;
+    
+    /* Kill feed region - green outline */
+    if (g_config.killfeedWPct > 0.0f) {
+        int kx = (int)(g_config.killfeedXPct * monW);
+        int ky = (int)(g_config.killfeedYPct * monH);
+        int kw = (int)(g_config.killfeedWPct * monW);
+        int kh = (int)(g_config.killfeedHPct * monH);
+        DrawOutlineRect(&lb, kx, ky, kw, kh, 0, 255, 0, 200);
+        DrawLabelOnBitmap(&lb, kx, ky, kw, kh, "KILL FEED", 0, 255, 0);
+    }
+    
+    LayeredBitmap_Apply(&lb, s_regionOverlayWnd, 0, 0);
+    LayeredBitmap_Destroy(&lb);
+}
+
+static LRESULT CALLBACK RegionOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam)
+{
+    switch (msg) {
+        case WM_NCHITTEST:
+            return HTTRANSPARENT;
+    }
+    return DefWindowProc(hwnd, msg, wParam, lParam);
+}
+
+static void AutoClipRegionOverlay_Show(void)
+{
+    if (s_regionOverlayWnd) {
+        UpdateRegionOverlayBitmap();
+        ShowWindow(s_regionOverlayWnd, SW_SHOWNA);
+        return;
+    }
+    
+    WNDCLASSEXA wc = {0};
+    wc.cbSize = sizeof(wc);
+    wc.lpfnWndProc = RegionOverlayWndProc;
+    wc.hInstance = s_hInstance;
+    wc.hCursor = LoadCursor(NULL, IDC_ARROW);
+    wc.lpszClassName = REGION_OVERLAY_CLASS;
+    RegisterClassExA(&wc);
+    
+    int monW = GetSystemMetrics(SM_CXSCREEN);
+    int monH = GetSystemMetrics(SM_CYSCREEN);
+    
+    s_regionOverlayWnd = CreateWindowExA(
+        WS_EX_LAYERED | WS_EX_TRANSPARENT | WS_EX_TOPMOST | WS_EX_TOOLWINDOW | WS_EX_NOACTIVATE,
+        REGION_OVERLAY_CLASS, NULL,
+        WS_POPUP,
+        0, 0, monW, monH,
+        NULL, NULL, s_hInstance, NULL);
+    
+    if (!s_regionOverlayWnd) return;
+    
+    UpdateRegionOverlayBitmap();
+    ShowWindow(s_regionOverlayWnd, SW_SHOWNA);
+}
+
+static void AutoClipRegionOverlay_Hide(void)
+{
+    if (s_regionOverlayWnd) {
+        DestroyWindow(s_regionOverlayWnd);
+        s_regionOverlayWnd = NULL;
     }
 }

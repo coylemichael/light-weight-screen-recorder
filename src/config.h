@@ -66,8 +66,21 @@ typedef struct {
     // Save location
     char savePath[MAX_PATH];
     
+    // Marker settings
+    int markerKey;                   // Hotkey to drop a marker (default: VK_F6)
+
     // Debug/logging settings
     BOOL debugLogging;               // Enable debug logging to file (includes leak tracking)
+    
+    // Auto-clip settings (kill feed detection)
+    BOOL autoClipEnabled;            // Enable kill feed instant clipping
+    BOOL autoClipShowRegions;        // Draw detection region overlay (debug/calibration)
+    int autoClipCooldownSec;         // Minimum seconds between auto-clip saves (5-30)
+    int autoClipDelaySec;            // Seconds to wait after kill before saving (0-30)
+    float killfeedXPct;              // Kill feed region (screen percentages 0.0-1.0)
+    float killfeedYPct;
+    float killfeedWPct;
+    float killfeedHPct;
     
     // Last capture area (for quick re-record)
     RECT lastCaptureRect;

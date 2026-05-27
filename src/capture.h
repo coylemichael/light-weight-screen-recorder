@@ -39,6 +39,11 @@ typedef struct {
     BOOL initialized;
     BOOL accessLost;  // Set when DXGI_ERROR_ACCESS_LOST occurs
     
+    // OCR readback staging (reused across calls)
+    ID3D11Texture2D* ocrStagingTexture;
+    int ocrStagingW;
+    int ocrStagingH;
+    
 } CaptureState;
 
 // Initialize the capture system
@@ -79,5 +84,13 @@ BOOL Capture_GetMonitorBoundsByIndex(int monitorIndex, RECT* bounds);
 // Reinitialize desktop duplication (after access lost)
 // Returns TRUE if successful, FALSE if needs retry
 BOOL Capture_ReinitDuplication(CaptureState* state);
+
+// Read back a sub-region from a GPU BGRA texture to CPU memory
+// Creates/reuses a staging texture sized to the region
+// outBuffer must be pre-allocated: regionW * regionH * 4 bytes
+// Returns TRUE on success, outStride receives the row pitch
+BOOL Capture_ReadbackRegion(CaptureState* state, ID3D11Texture2D* srcTexture,
+                            int srcX, int srcY, int regionW, int regionH,
+                            BYTE* outBuffer, int* outStride);
 
 #endif // CAPTURE_H

@@ -11,6 +11,7 @@
 
 #include "border.h"
 #include "constants.h"
+#include "logger.h"
 #include "layered_window.h"
 #include <windowsx.h>  // GET_X_LPARAM, GET_Y_LPARAM
 
@@ -86,16 +87,14 @@ void Border_Shutdown(void) {
     g_recording.isVisible = FALSE;
 }
 
-// Create and set a 32-bit ARGB bitmap for the border with transparency
-static void UpdateBorderBitmap(int width, int height) {
+// Create and set a 32-bit ARGB bitmap for the border with a custom color
+static void UpdateBorderBitmapColored(int width, int height, BYTE r, BYTE g, BYTE b) {
     if (!g_recording.wnd || width < 1 || height < 1) return;
     
     LayeredBitmap lb = {0};
     if (!LayeredBitmap_Create(&lb, width, height)) return;
     
-    // Draw red border with full alpha
-    // BGRA format: Blue, Green, Red, Alpha
-    BYTE r = BORDER_COLOR_R, g = BORDER_COLOR_G, b = BORDER_COLOR_B, a = 255;
+    BYTE a = 255;
     
     for (int y = 0; y < height; y++) {
         for (int x = 0; x < width; x++) {
@@ -113,9 +112,13 @@ static void UpdateBorderBitmap(int width, int height) {
         }
     }
     
-    // Apply to layered window and cleanup
     LayeredBitmap_Apply(&lb, g_recording.wnd, g_recording.currentRect.left, g_recording.currentRect.top);
     LayeredBitmap_Destroy(&lb);
+}
+
+// Create and set a 32-bit ARGB bitmap for the border with transparency
+static void UpdateBorderBitmap(int width, int height) {
+    UpdateBorderBitmapColored(width, height, BORDER_COLOR_R, BORDER_COLOR_G, BORDER_COLOR_B);
 }
 
 void Border_Show(RECT captureRect) {
@@ -145,6 +148,36 @@ void Border_Hide(void) {
     g_recording.isVisible = FALSE;
 }
 
+/* Timer ID for restoring border color after marker flash */
+#define BORDER_FLASH_TIMER_ID 1
+#define BORDER_FLASH_DURATION_MS 150
+
+void Border_Flash(void) {
+    if (!g_recording.isVisible || !g_recording.wnd) return;
+    
+    int width = g_recording.currentRect.right - g_recording.currentRect.left;
+    int height = g_recording.currentRect.bottom - g_recording.currentRect.top;
+    
+    /* Flash yellow */
+    UpdateBorderBitmapColored(width, height, 255, 255, 0);
+    
+    /* Set timer to restore red after BORDER_FLASH_DURATION_MS */
+    SetTimer(g_recording.wnd, BORDER_FLASH_TIMER_ID, BORDER_FLASH_DURATION_MS, NULL);
+    Logger_Log("Border_Flash: yellow flash started\n");
+}
+
+void Border_FlashColor(int r, int g, int b) {
+    if (!g_recording.isVisible || !g_recording.wnd) return;
+    
+    int width = g_recording.currentRect.right - g_recording.currentRect.left;
+    int height = g_recording.currentRect.bottom - g_recording.currentRect.top;
+    
+    UpdateBorderBitmapColored(width, height, (BYTE)r, (BYTE)g, (BYTE)b);
+    
+    SetTimer(g_recording.wnd, BORDER_FLASH_TIMER_ID, BORDER_FLASH_DURATION_MS, NULL);
+    Logger_Log("Border_FlashColor: (%d,%d,%d) flash started\n", r, g, b);
+}
+
 static LRESULT CALLBACK BorderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_NCHITTEST:
@@ -153,6 +186,17 @@ static LRESULT CALLBACK BorderWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM
             
         case WM_ERASEBKGND:
             return 1; /* Prevent background erase */
+        
+        case WM_TIMER:
+            if (wParam == BORDER_FLASH_TIMER_ID) {
+                KillTimer(hwnd, BORDER_FLASH_TIMER_ID);
+                /* Restore original red border */
+                int width = g_recording.currentRect.right - g_recording.currentRect.left;
+                int height = g_recording.currentRect.bottom - g_recording.currentRect.top;
+                UpdateBorderBitmap(width, height);
+                return 0;
+            }
+            break;
     }
     
     return DefWindowProc(hwnd, msg, wParam, lParam);

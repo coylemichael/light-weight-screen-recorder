@@ -129,11 +129,16 @@ void Logger_Log(const char* fmt, ...);
  *   so 16ms is slightly less than one frame period. If no frame arrives in
  *   this time, we reuse the previous frame (desktop is static).
  * 
- * GOP_LENGTH_SECONDS: "Group of Pictures" interval - how often to insert a
- *   keyframe (I-frame) in the video stream. Keyframes are complete images
- *   that don't depend on previous frames, enabling seeking. 2 seconds is a
- *   good balance between file size (more keyframes = larger) and seek
- *   responsiveness (fewer keyframes = longer seek times).
+ * GOP_LENGTH_FRAMES_AT(fps): "Group of Pictures" interval in frames - how
+ *   often to insert a keyframe (IDR) in the video stream. Keyframes are
+ *   complete images that don't depend on previous frames, enabling seeking
+ *   AND bounding how much leading video must be discarded by the replay
+ *   buffer save path (which trims to the first IDR in the ring).
+ *
+ *   We use fps/2 (0.5 second cadence) to match what game-clip tools like
+ *   Medal use: short enough that a saved replay clip starts within ~0.5s
+ *   of the requested duration, with negligible bitrate/quality cost on
+ *   NVENC at our typical bitrates.
  * 
  * DWMWA_EXTENDED_FRAME_BOUNDS_CONST: DWM (Desktop Window Manager) attribute
  *   for getting a window's actual visible bounds excluding shadows.
@@ -146,7 +151,7 @@ void Logger_Log(const char* fmt, ...);
 #define MAX_FPS                     240
 #define LWSR_MAX_MONITORS           8
 #define FRAME_ACQUIRE_TIMEOUT_MS    16
-#define GOP_LENGTH_SECONDS          2
+#define GOP_LENGTH_FRAMES_AT(fps)   ((fps) / 2)
 #define DWMWA_EXTENDED_FRAME_BOUNDS_CONST 9
 
 /* ============================================================================
@@ -411,6 +416,22 @@ void Logger_Log(const char* fmt, ...);
  *   if we add more custom messages later.
  */
 #define WM_LWSR_STOP                (WM_USER + 1)
+#define WM_AUTOCLIP_SAVE            (WM_USER + 2)  /* lParam = heap-alloc'd game name or NULL (receiver frees) */
+#define WM_AUTOCLIP_SAVE_COMPLETE   (WM_USER + 3)
+#define WM_AUTOCLIP_ERROR           (WM_USER + 4)  /* wParam = error string pointer */
+#define WM_AUTOCLIP_SAVE_DELAYED    (WM_USER + 7)  /* Internal: timer-triggered deferred save */
+
+/* ============================================================================
+ * AUTO-CLIP (Kill Feed Detection) Constants
+ * ============================================================================
+ *
+ * Cooldown and delay settings for template-matching-based auto-clip detection.
+ */
+#define AUTOCLIP_COOLDOWN_DEFAULT_MS    10000
+#define AUTOCLIP_COOLDOWN_MIN_SEC       5
+#define AUTOCLIP_COOLDOWN_MAX_SEC       30
+#define AUTOCLIP_DELAY_MIN_SEC          0
+#define AUTOCLIP_DELAY_MAX_SEC          30
 
 /* ============================================================================
  * FALLBACK FILE PATHS

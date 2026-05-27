@@ -17,6 +17,7 @@
 #include "nvenc_encoder.h"
 #include "gpu_converter.h"
 #include "mp4_muxer.h"
+#include "markers.h"
 #include "constants.h"
 
 // Recording lifecycle states (matches ReplayStateEnum pattern)
@@ -58,6 +59,9 @@ typedef struct {
     // Stats
     volatile LONG framesCaptured;
     volatile LONG framesEncoded;
+    
+    // Markers
+    MarkerList markers;
     
     // Callbacks for UI notification (optional)
     HWND notifyWindow;

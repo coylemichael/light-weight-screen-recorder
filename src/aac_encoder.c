@@ -47,6 +47,10 @@ struct AACEncoder {
     // Timing
     LONGLONG nextTimestamp;
     LONGLONG frameDuration;  // Duration of one AAC frame in 100ns
+
+    // Diagnostic counters (monotonic, never reset)
+    LONGLONG pcmBytesIngested;     // Total PCM bytes fed via AACEncoder_Feed
+    LONGLONG aacFramesEmitted;     // Total AAC output frames produced
     
     // Encoder config (AudioSpecificConfig)
     BYTE* configData;
@@ -151,10 +155,11 @@ static void ProcessOutput(AACEncoder* encoder) {
                         sample.size = dataLen;
                         sample.timestamp = encoder->nextTimestamp;
                         sample.duration = encoder->frameDuration;
-                        
+
                         encoder->callback(&sample, encoder->userData);
-                        
+
                         encoder->nextTimestamp += encoder->frameDuration;
+                        encoder->aacFramesEmitted++;
                     }
                     buffer->lpVtbl->Unlock(buffer);
                 }
@@ -426,6 +431,7 @@ BOOL AACEncoder_Feed(AACEncoder* encoder, const BYTE* pcmData, int pcmSize, LONG
         
         memcpy(encoder->inputBuffer + encoder->inputBufferUsed, pcmData + offset, toCopy);
         encoder->inputBufferUsed += toCopy;
+        encoder->pcmBytesIngested += toCopy;
         offset += toCopy;
         
         // Process complete frames
@@ -501,4 +507,23 @@ BOOL AACEncoder_GetConfig(AACEncoder* encoder, BYTE** configData, int* configSiz
     }
     
     return FALSE;
+}
+
+LONGLONG AACEncoder_GetPcmBytesIngested(AACEncoder* encoder) {
+    if (!encoder) return 0;
+    return encoder->pcmBytesIngested;
+}
+
+LONGLONG AACEncoder_GetLastEmittedTimestamp(AACEncoder* encoder) {
+    if (!encoder) return 0;
+    /* nextTimestamp points at the PTS the NEXT emitted frame will receive,
+     * so the most recent emitted frame's PTS is (nextTimestamp - frameDuration).
+     * Returns 0 if no frames have been emitted yet. */
+    if (encoder->aacFramesEmitted <= 0) return 0;
+    return encoder->nextTimestamp - encoder->frameDuration;
+}
+
+LONGLONG AACEncoder_GetFramesEmitted(AACEncoder* encoder) {
+    if (!encoder) return 0;
+    return encoder->aacFramesEmitted;
 }

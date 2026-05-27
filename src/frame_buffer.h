@@ -71,8 +71,14 @@ int FrameBuffer_GetCount(FrameBuffer* buf);
 size_t FrameBuffer_GetMemoryUsage(FrameBuffer* buf);
 
 // Get copies of frames for external muxing (caller must free)
-// Used for audio+video muxing
-BOOL FrameBuffer_GetFramesForMuxing(FrameBuffer* buf, MuxerSample** frames, int* count);
+// Used for audio+video muxing.
+// On success, *originTimestamp (if non-NULL) receives the absolute (t0-relative,
+// pre-rebase) timestamp of the first kept frame (the IDR the clip starts at).
+// Callers MUST use this value to rebase audio streams to the same origin,
+// otherwise A/V will drift by up to one GOP because the buffer skips leading
+// non-keyframes while audio retains all its samples.
+BOOL FrameBuffer_GetFramesForMuxing(FrameBuffer* buf, MuxerSample** frames, int* count,
+                                    LONGLONG* originTimestamp);
 
 // Set HEVC sequence header (VPS/SPS/PPS) for muxing
 void FrameBuffer_SetSequenceHeader(FrameBuffer* buf, const BYTE* header, DWORD size);

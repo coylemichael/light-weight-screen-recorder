@@ -622,6 +622,15 @@ AudioCaptureContext* AudioCapture_Create(
     ctx->mixBuffer = (BYTE*)malloc(ctx->mixBufferSize);
     if (!ctx->mixBuffer) goto cleanup;
     
+    // Allocate per-source output buffers (for multi-track recording)
+    for (int i = 0; i < MAX_AUDIO_SOURCES; i++) {
+        ctx->sourceOutSize[i] = MIX_BUFFER_SIZE;
+        ctx->sourceOutBuffers[i] = (BYTE*)malloc(ctx->sourceOutSize[i]);
+        if (!ctx->sourceOutBuffers[i]) goto cleanup;
+        InitializeCriticalSection(&ctx->sourceOutLocks[i]);
+        ctx->sourceOutLocksInit[i] = TRUE;
+    }
+    
     // Create sources and assign volumes to match source index
     // This ensures volumes[i] corresponds to sources[i]
     const char* deviceIds[] = {deviceId1, deviceId2, deviceId3};
@@ -644,6 +653,10 @@ AudioCaptureContext* AudioCapture_Create(
     return ctx;
     
 cleanup:
+    for (int i = 0; i < MAX_AUDIO_SOURCES; i++) {
+        SAFE_FREE(ctx->sourceOutBuffers[i]);
+        if (ctx->sourceOutLocksInit[i]) DeleteCriticalSection(&ctx->sourceOutLocks[i]);
+    }
     SAFE_FREE(ctx->mixBuffer);
     if (csInitialized) DeleteCriticalSection(&ctx->mixLock);
     free(ctx);
@@ -660,6 +673,11 @@ void AudioCapture_Destroy(AudioCaptureContext* ctx) {
     }
     
     SAFE_FREE(ctx->mixBuffer);
+    
+    for (int i = 0; i < MAX_AUDIO_SOURCES; i++) {
+        SAFE_FREE(ctx->sourceOutBuffers[i]);
+        if (ctx->sourceOutLocksInit[i]) DeleteCriticalSection(&ctx->sourceOutLocks[i]);
+    }
     
     DeleteCriticalSection(&ctx->mixLock);
     free(ctx);
@@ -809,9 +827,15 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
     const int chunkSize = AUDIO_MIX_CHUNK_SIZE;  // Process in chunks
     const double dormantThresholdMs = DORMANT_THRESHOLD_MS;  // Consider source dormant after no packets
     
-    // Rate limiting: track how much audio we should output based on elapsed time
-    LARGE_INTEGER rateStartTime;
-    QueryPerformanceCounter(&rateStartTime);
+    /* Wall-clock paced output (OBS-style):
+     * Once the first real PCM arrives, the mixer emits AUDIO_BYTES_PER_SEC
+     * bytes/sec to the output buffer for the lifetime of the session — real
+     * source PCM where available, silence-padded where sources are dormant
+     * or briefly empty. This is what keeps audio PTS aligned with video PTS
+     * over long uptimes; without it, dormant/slow sources cause the mix
+     * output to fall behind wall-clock and the deficit is unrecoverable. */
+    LARGE_INTEGER rateStartTime = {0};
+    BOOL rateStarted = FALSE;
     LONGLONG totalBytesOutput = 0;  // Total bytes we've written to mix buffer
     
     // Recovery timing
@@ -890,28 +914,33 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
             }
         }
         
-        // Need at least one non-dormant source with data to proceed
-        if (nonDormantSources == 0 || maxBytes == 0) {
-            Sleep(2);  // Wait for data
-            continue;
+        // Need at least one non-dormant source with data to *start* the rate clock.
+        // After that, we pace silence-padded output to wall-clock unconditionally.
+        if (!rateStarted) {
+            if (nonDormantSources == 0 || maxBytes == 0) {
+                Sleep(2);  // Wait for first PCM
+                continue;
+            }
+            rateStartTime = now;
+            rateStarted = TRUE;
         }
-        
-        // Rate limiting: calculate how many bytes we SHOULD have output by now
-        // This prevents sources from "running ahead" of wall-clock time
+
+        // Rate limiting: calculate how many bytes we SHOULD have output by now.
+        // Wall-clock anchored from the first real-PCM arrival.
         double elapsedSec = (double)(now.QuadPart - rateStartTime.QuadPart) / ctx->perfFreq.QuadPart;
         LONGLONG expectedBytes = (LONGLONG)(elapsedSec * AUDIO_BYTES_PER_SEC);
         LONGLONG bytesAllowed = expectedBytes - totalBytesOutput;
-        
-        // If we're ahead of schedule, wait
+
+        // If we're ahead of schedule (or not yet owed half a chunk), wait
         if (bytesAllowed < chunkSize / 2) {
             Sleep(2);
             continue;
         }
-        
-        // Process up to chunkSize bytes from non-dormant sources
-        int processBytes = maxBytes;
-        if (processBytes > chunkSize) processBytes = chunkSize;
-        // Also limit by rate
+
+        // Wall-clock paced emit size for this iteration.
+        // We will always emit exactly this many bytes — real PCM where sources
+        // have it, silence padding for sources that didn't deliver enough.
+        int processBytes = chunkSize;
         if (processBytes > bytesAllowed) processBytes = (int)bytesAllowed;
         // Align to sample boundaries (4 bytes per sample for stereo 16-bit)
         processBytes = (processBytes / AUDIO_BLOCK_ALIGN) * AUDIO_BLOCK_ALIGN;
@@ -919,28 +948,70 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
             Sleep(1);
             continue;
         }
-        
-        // Read from each source - dormant sources contribute silence
+
+        // Read from each source — silence-pad any deficit so every source
+        // contributes exactly processBytes this iteration. This keeps the
+        // mix output AND every per-source ring paced to wall-clock.
+        int srcReadBytes[MAX_AUDIO_SOURCES] = {0};  // real PCM bytes read (for logging only)
         for (int i = 0; i < ctx->sourceCount; i++) {
             AudioCaptureSource* src = ctx->sources[i];
-            // Thread-safe check
-            if (!src || !InterlockedCompareExchange(&src->active, 0, 0) || srcDormant[i]) {
-                // Dormant sources contribute silence (srcBytes[i] = 0 means silence in the mixer)
-                srcBytes[i] = 0;
-                continue;
+            int readBytes = 0;
+            if (src && InterlockedCompareExchange(&src->active, 0, 0) && !srcDormant[i]) {
+                EnterCriticalSection(&src->lock);
+                readBytes = ReadFromSourceBuffer(src, srcBuffers[i], processBytes);
+                LeaveCriticalSection(&src->lock);
             }
-            
-            EnterCriticalSection(&src->lock);
-            srcBytes[i] = ReadFromSourceBuffer(src, srcBuffers[i], processBytes);
-            LeaveCriticalSection(&src->lock);
+            srcReadBytes[i] = readBytes;
+            if (readBytes < processBytes) {
+                memset(srcBuffers[i] + readBytes, 0, processBytes - readBytes);
+            }
+            srcBytes[i] = processBytes;
+
+            // Write per-source data to individual output buffer (for multi-track).
+            // Always processBytes long — silence-padded portions are zeroed PCM,
+            // so per-source tracks stay equal length with the mixed track.
+            BYTE* volBuf = (BYTE*)malloc(processBytes);
+            if (volBuf) {
+                int vol = ctx->volumes[i];
+                int nSamp = processBytes / AUDIO_BLOCK_ALIGN;
+                for (int s = 0; s < nSamp; s++) {
+                    short* in = (short*)(srcBuffers[i] + s * AUDIO_BLOCK_ALIGN);
+                    short* out = (short*)(volBuf + s * AUDIO_BLOCK_ALIGN);
+                    int l = (in[0] * vol) / 100;
+                    int r = (in[1] * vol) / 100;
+                    if (l > 32767) l = 32767; if (l < -32768) l = -32768;
+                    if (r > 32767) r = 32767; if (r < -32768) r = -32768;
+                    out[0] = (short)l;
+                    out[1] = (short)r;
+                }
+
+                EnterCriticalSection(&ctx->sourceOutLocks[i]);
+                int space = ctx->sourceOutSize[i] - ctx->sourceOutAvailable[i];
+                if (processBytes > space) {
+                    int drop = processBytes - space;
+                    ctx->sourceOutAvailable[i] -= drop;
+                    ctx->sourceOutReadPos[i] = (ctx->sourceOutReadPos[i] + drop) % ctx->sourceOutSize[i];
+                }
+                int wp = ctx->sourceOutWritePos[i];
+                int toEnd = ctx->sourceOutSize[i] - wp;
+                if (processBytes <= toEnd) {
+                    memcpy(ctx->sourceOutBuffers[i] + wp, volBuf, processBytes);
+                } else {
+                    memcpy(ctx->sourceOutBuffers[i] + wp, volBuf, toEnd);
+                    memcpy(ctx->sourceOutBuffers[i], volBuf + toEnd, processBytes - toEnd);
+                }
+                ctx->sourceOutWritePos[i] = (wp + processBytes) % ctx->sourceOutSize[i];
+                ctx->sourceOutAvailable[i] += processBytes;
+                LeaveCriticalSection(&ctx->sourceOutLocks[i]);
+
+                free(volBuf);
+            }
         }
         
-        // Find how many bytes to actually process (max of what any source provided)
-        int bytesToMix = 0;
-        for (int i = 0; i < ctx->sourceCount; i++) {
-            if (srcBytes[i] > bytesToMix) bytesToMix = srcBytes[i];
-        }
-        
+        // All sources now contribute exactly processBytes (real PCM + silence pad),
+        // so mix output is exactly processBytes too.
+        int bytesToMix = processBytes;
+
         // Mix sources using helper function
         if (bytesToMix > 0) {
             BYTE* mixChunk = (BYTE*)malloc(bytesToMix);
@@ -964,9 +1035,12 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
                 float peakPctR = (float)peakRight / 32767.0f * 100.0f;
                 double rateElapsed = (double)(now.QuadPart - rateStartTime.QuadPart) / ctx->perfFreq.QuadPart;
                 double actualRate = (rateElapsed > 0) ? (totalBytesOutput / rateElapsed) : 0;
+                // bytes[] reports REAL PCM read from each source this chunk (pre-silence-pad)
+                // so under-delivery still shows up as low numbers; rate is mix output rate
+                // which is now locked to AUDIO_BYTES_PER_SEC by silence padding.
                 Logger_Log("Audio: L=%.1f%% R=%.1f%% bytes=[%d,%d,%d] dormant=[%d,%d,%d] rate=%.0f/s (target=%d)\n", 
                            peakPctL, peakPctR,
-                           srcBytes[0], srcBytes[1], srcBytes[2],
+                           srcReadBytes[0], srcReadBytes[1], srcReadBytes[2],
                            srcDormant[0], srcDormant[1], srcDormant[2],
                            actualRate, AUDIO_BYTES_PER_SEC);
                 peakLeft = 0;
@@ -991,6 +1065,14 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
 }
 
 BOOL AudioCapture_Start(AudioCaptureContext* ctx) {
+    // No caller-supplied anchor: use QPC at entry. Video-aligned callers should
+    // prefer AudioCapture_StartAt() so audio and video share the same t0.
+    LARGE_INTEGER t0;
+    QueryPerformanceCounter(&t0);
+    return AudioCapture_StartAt(ctx, t0);
+}
+
+BOOL AudioCapture_StartAt(AudioCaptureContext* ctx, LARGE_INTEGER t0) {
     // Precondition
     LWSR_ASSERT(ctx != NULL);
     
@@ -1031,8 +1113,8 @@ BOOL AudioCapture_Start(AudioCaptureContext* ctx) {
         }
     }
     
-    // Record start time
-    QueryPerformanceCounter(&ctx->startTime);
+    // Record start time (caller-supplied so video and audio share t0)
+    ctx->startTime = t0;
     
     // Start mix thread - use atomic write
     InterlockedExchange(&ctx->running, TRUE);
@@ -1152,5 +1234,42 @@ static LONGLONG AudioCapture_GetTimestamp(AudioCaptureContext* ctx) {
     // Return time since start in 100ns units
     LONGLONG elapsed = now.QuadPart - ctx->startTime.QuadPart;
     return (elapsed * 10000000) / ctx->perfFreq.QuadPart;
+}
+
+int AudioCapture_ReadSource(AudioCaptureContext* ctx, int sourceIndex, BYTE* buffer, int maxBytes, LONGLONG* timestamp) {
+    if (!ctx || !buffer || sourceIndex < 0 || sourceIndex >= ctx->sourceCount) return 0;
+    
+    EnterCriticalSection(&ctx->sourceOutLocks[sourceIndex]);
+    
+    int available = ctx->sourceOutAvailable[sourceIndex];
+    if (available > maxBytes) available = maxBytes;
+    
+    if (available > 0) {
+        int readPos = ctx->sourceOutReadPos[sourceIndex];
+        int toEnd = ctx->sourceOutSize[sourceIndex] - readPos;
+        
+        if (available <= toEnd) {
+            memcpy(buffer, ctx->sourceOutBuffers[sourceIndex] + readPos, available);
+        } else {
+            memcpy(buffer, ctx->sourceOutBuffers[sourceIndex] + readPos, toEnd);
+            memcpy(buffer + toEnd, ctx->sourceOutBuffers[sourceIndex], available - toEnd);
+        }
+        
+        ctx->sourceOutReadPos[sourceIndex] = (readPos + available) % ctx->sourceOutSize[sourceIndex];
+        ctx->sourceOutAvailable[sourceIndex] -= available;
+    }
+    
+    LeaveCriticalSection(&ctx->sourceOutLocks[sourceIndex]);
+    
+    if (timestamp) {
+        *timestamp = AudioCapture_GetTimestamp(ctx);
+    }
+    
+    return available;
+}
+
+int AudioCapture_GetSourceCount(AudioCaptureContext* ctx) {
+    if (!ctx) return 0;
+    return ctx->sourceCount;
 }
 

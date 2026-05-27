@@ -9,13 +9,14 @@
 
 /* Settings window dimensions */
 #define SETTINGS_WIDTH  620
-#define SETTINGS_HEIGHT 320
+#define SETTINGS_HEIGHT 600
 
 /* Tab indices for settings sections */
 typedef enum {
-    SETTINGS_TAB_GENERAL = 0,   /* Capture options, time limit, save path, debug */
-    SETTINGS_TAB_AUDIO   = 1,   /* Enable, 3 sources with volume sliders */
-    SETTINGS_TAB_VIDEO   = 2    /* Format, Quality, FPS, Replay buffer settings */
+    SETTINGS_TAB_GENERAL  = 0,   /* Capture options, time limit, save path, debug */
+    SETTINGS_TAB_AUDIO    = 1,   /* Enable, 3 sources with volume sliders */
+    SETTINGS_TAB_VIDEO    = 2,   /* Format, Quality, FPS, Replay buffer settings */
+    SETTINGS_TAB_AUTOCLIP = 3    /* Kill feed instant clipping */
 } SettingsTab;
 
 /* Settings window control IDs - Format/Quality */
@@ -63,6 +64,18 @@ typedef enum {
 
 /* Debug settings control IDs */
 #define ID_CHK_DEBUG_LOGGING    6001
+
+/* Marker settings control IDs */
+#define ID_BTN_MARKER_HOTKEY    7001
+
+/* Auto-clip settings control IDs */
+#define ID_CHK_AUTOCLIP_ENABLED 8001
+#define ID_CHK_AUTOCLIP_SHOW_REGIONS 8002
+#define ID_SLD_AUTOCLIP_COOLDOWN 8005
+#define ID_LBL_AUTOCLIP_COOLDOWN 8006
+#define ID_SLD_AUTOCLIP_DELAY    8007
+#define ID_LBL_AUTOCLIP_DELAY    8008
+#define ID_CHK_AUTOCLIP_DEBUG_CONSOLE 8009
 
 /**
  * Register the settings window class.

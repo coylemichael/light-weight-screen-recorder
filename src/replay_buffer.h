@@ -12,6 +12,7 @@
 
 #include <windows.h>
 #include "config.h"
+#include "markers.h"
 #include "aac_encoder.h"  // For AACEncoderError
 
 // Maximum encoded audio samples to store
@@ -69,9 +70,18 @@ typedef struct {
     int audioVolume3;
     volatile LONG audioError;  // AACEncoderError if audio init failed
     
+    // Markers
+    MarkerList markers;
+    
     // Async save completion notification
     HWND notifyWindow;          // Window to receive WM_REPLAY_SAVE_COMPLETE
     UINT notifyMessage;         // Custom message ID (WM_USER + N)
+    
+    // Auto-clip: window to receive kill detector messages (WM_AUTOCLIP_*)
+    HWND autoClipWnd;
+    
+    // Kill feed sampler instance (created by buffer thread)
+    void* killFeedSampler;  /* KillFeedSampler* — opaque to avoid header dependency */
 } ReplayBufferState;
 
 BOOL ReplayBuffer_Init(ReplayBufferState* state);

@@ -36,6 +36,15 @@ typedef struct {
     int mixBufferAvailable;
     CRITICAL_SECTION mixLock;
     
+    // Per-source output buffers (for multi-track recording)
+    BYTE* sourceOutBuffers[MAX_AUDIO_SOURCES];
+    int sourceOutSize[MAX_AUDIO_SOURCES];
+    int sourceOutWritePos[MAX_AUDIO_SOURCES];
+    int sourceOutReadPos[MAX_AUDIO_SOURCES];
+    int sourceOutAvailable[MAX_AUDIO_SOURCES];
+    CRITICAL_SECTION sourceOutLocks[MAX_AUDIO_SOURCES];
+    BOOL sourceOutLocksInit[MAX_AUDIO_SOURCES];
+    
     // Capture thread
     HANDLE captureThread;
     volatile LONG running;  // Thread-safe: use InterlockedExchange
@@ -63,8 +72,13 @@ AudioCaptureContext* AudioCapture_Create(
 // Destroy capture context
 void AudioCapture_Destroy(AudioCaptureContext* ctx);
 
-// Start capturing audio
+// Start capturing audio (captures QPC now as the t0 reference)
 BOOL AudioCapture_Start(AudioCaptureContext* ctx);
+
+// Start capturing audio with a caller-supplied QPC reference for t0.
+// Use this when video and audio must share the same wall-clock origin so that
+// audio PTS = (QPC_now - t0) aligns with video PTS computed from the same t0.
+BOOL AudioCapture_StartAt(AudioCaptureContext* ctx, LARGE_INTEGER t0);
 
 // Stop capturing audio
 void AudioCapture_Stop(AudioCaptureContext* ctx);
@@ -72,5 +86,13 @@ void AudioCapture_Stop(AudioCaptureContext* ctx);
 // Read mixed audio data (returns bytes read)
 // Timestamp is in 100ns units (same as video)
 int AudioCapture_Read(AudioCaptureContext* ctx, BYTE* buffer, int maxBytes, LONGLONG* timestamp);
+
+// Read per-source audio data (for multi-track recording)
+// sourceIndex: 0-based index into active sources
+// Returns bytes read (stereo 16-bit PCM at AUDIO_SAMPLE_RATE)
+int AudioCapture_ReadSource(AudioCaptureContext* ctx, int sourceIndex, BYTE* buffer, int maxBytes, LONGLONG* timestamp);
+
+// Get the number of active sources
+int AudioCapture_GetSourceCount(AudioCaptureContext* ctx);
 
 #endif // AUDIO_CAPTURE_H

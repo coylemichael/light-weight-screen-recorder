@@ -284,7 +284,8 @@ size_t FrameBuffer_GetMemoryUsage(FrameBuffer* buf) {
 // Get copies of frames for external muxing (caller must free)
 // Deep copies all data under lock to prevent use-after-free from eviction
 // CRITICAL: Always starts from the first keyframe to ensure valid HEVC decoding
-BOOL FrameBuffer_GetFramesForMuxing(FrameBuffer* buf, MuxerSample** outFrames, int* outCount) {
+BOOL FrameBuffer_GetFramesForMuxing(FrameBuffer* buf, MuxerSample** outFrames, int* outCount,
+                                    LONGLONG* outOriginTimestamp) {
     // Preconditions
     LWSR_ASSERT(buf != NULL);
     LWSR_ASSERT(outFrames != NULL);
@@ -294,6 +295,7 @@ BOOL FrameBuffer_GetFramesForMuxing(FrameBuffer* buf, MuxerSample** outFrames, i
     
     *outFrames = NULL;
     *outCount = 0;
+    if (outOriginTimestamp) *outOriginTimestamp = 0;
     
     EnterCriticalSection(&buf->lock);
     
@@ -344,6 +346,7 @@ BOOL FrameBuffer_GetFramesForMuxing(FrameBuffer* buf, MuxerSample** outFrames, i
     if (firstFrame->data && firstFrame->size > 0) {
         firstTimestamp = firstFrame->timestamp;
     }
+    if (outOriginTimestamp) *outOriginTimestamp = firstTimestamp;
     
     // Zero-initialize to ensure safe cleanup on partial allocation failure
     memset(frames, 0, allocSize);

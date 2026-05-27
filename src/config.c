@@ -96,8 +96,21 @@ void Config_Load(AppConfig* config) {
     config->audioVolume2 = AUDIO_VOLUME_DEFAULT;
     config->audioVolume3 = AUDIO_VOLUME_DEFAULT;
     
+    // Marker settings
+    config->markerKey = VK_F6;  // F6 to drop a marker
+
     // Debug logging (disabled by default)
     config->debugLogging = FALSE;
+    
+    // Auto-clip defaults (disabled, no player name, no regions)
+    config->autoClipEnabled = FALSE;
+    config->autoClipShowRegions = FALSE;
+    config->autoClipCooldownSec = 10;
+    config->autoClipDelaySec = 10;
+    config->killfeedXPct = 0.0f;
+    config->killfeedYPct = 0.0f;
+    config->killfeedWPct = 0.0f;
+    config->killfeedHPct = 0.0f;
     
     // Default save path to Videos folder
     if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_MYVIDEO, NULL, 0, config->savePath))) {
@@ -163,8 +176,31 @@ void Config_Load(AppConfig* config) {
         config->audioVolume2 = GetPrivateProfileIntA("Audio", "Volume2", 100, configPath);
         config->audioVolume3 = GetPrivateProfileIntA("Audio", "Volume3", 100, configPath);
         
+        // Marker hotkey
+        config->markerKey = GetPrivateProfileIntA(
+            "Markers", "Key", VK_F6, configPath);
+
         // Debug logging
         config->debugLogging = GetPrivateProfileIntA("Debug", "Logging", 0, configPath);
+        
+        // Auto-clip settings
+        config->autoClipEnabled = GetPrivateProfileIntA(
+            "AutoClip", "Enabled", FALSE, configPath);
+        config->autoClipCooldownSec = GetPrivateProfileIntA(
+            "AutoClip", "CooldownSec", 10, configPath);
+        config->autoClipDelaySec = GetPrivateProfileIntA(
+            "AutoClip", "DelaySec", 10, configPath);
+        {
+            char floatBuf[32];
+            GetPrivateProfileStringA("AutoClip", "killfeedXPct", "0", floatBuf, sizeof(floatBuf), configPath);
+            config->killfeedXPct = (float)atof(floatBuf);
+            GetPrivateProfileStringA("AutoClip", "killfeedYPct", "0", floatBuf, sizeof(floatBuf), configPath);
+            config->killfeedYPct = (float)atof(floatBuf);
+            GetPrivateProfileStringA("AutoClip", "killfeedWPct", "0", floatBuf, sizeof(floatBuf), configPath);
+            config->killfeedWPct = (float)atof(floatBuf);
+            GetPrivateProfileStringA("AutoClip", "killfeedHPct", "0", floatBuf, sizeof(floatBuf), configPath);
+            config->killfeedHPct = (float)atof(floatBuf);
+        }
         
         GetPrivateProfileStringA("Recording", "SavePath", config->savePath,
             config->savePath, MAX_PATH, configPath);
@@ -198,6 +234,14 @@ void Config_Load(AppConfig* config) {
         if (config->audioVolume2 > AUDIO_VOLUME_MAX) config->audioVolume2 = AUDIO_VOLUME_MAX;
         if (config->audioVolume3 < 0) config->audioVolume3 = 0;
         if (config->audioVolume3 > AUDIO_VOLUME_MAX) config->audioVolume3 = AUDIO_VOLUME_MAX;
+        if (config->autoClipCooldownSec < AUTOCLIP_COOLDOWN_MIN_SEC)
+            config->autoClipCooldownSec = AUTOCLIP_COOLDOWN_MIN_SEC;
+        if (config->autoClipCooldownSec > AUTOCLIP_COOLDOWN_MAX_SEC)
+            config->autoClipCooldownSec = AUTOCLIP_COOLDOWN_MAX_SEC;
+        if (config->autoClipDelaySec < AUTOCLIP_DELAY_MIN_SEC)
+            config->autoClipDelaySec = AUTOCLIP_DELAY_MIN_SEC;
+        if (config->autoClipDelaySec > AUTOCLIP_DELAY_MAX_SEC)
+            config->autoClipDelaySec = AUTOCLIP_DELAY_MAX_SEC;
     }
     
     // Ensure save directory exists (ignore ERROR_ALREADY_EXISTS)
@@ -284,9 +328,32 @@ void Config_Save(const AppConfig* config) {
     snprintf(buffer, sizeof(buffer), "%d", config->audioVolume3);
     WritePrivateProfileStringA("Audio", "Volume3", buffer, configPath);
     
+    // Marker settings
+    snprintf(buffer, sizeof(buffer), "%d", config->markerKey);
+    WritePrivateProfileStringA("Markers", "Key", buffer, configPath);
+
     // Debug logging
     snprintf(buffer, sizeof(buffer), "%d", config->debugLogging);
     WritePrivateProfileStringA("Debug", "Logging", buffer, configPath);
+    
+    // Auto-clip settings
+    snprintf(buffer, sizeof(buffer), "%d", config->autoClipEnabled);
+    WritePrivateProfileStringA("AutoClip", "Enabled", buffer, configPath);
+    snprintf(buffer, sizeof(buffer), "%d", config->autoClipCooldownSec);
+    WritePrivateProfileStringA("AutoClip", "CooldownSec", buffer, configPath);
+    snprintf(buffer, sizeof(buffer), "%d", config->autoClipDelaySec);
+    WritePrivateProfileStringA("AutoClip", "DelaySec", buffer, configPath);
+    {
+        char floatBuf[32];
+        snprintf(floatBuf, sizeof(floatBuf), "%.4f", config->killfeedXPct);
+        WritePrivateProfileStringA("AutoClip", "killfeedXPct", floatBuf, configPath);
+        snprintf(floatBuf, sizeof(floatBuf), "%.4f", config->killfeedYPct);
+        WritePrivateProfileStringA("AutoClip", "killfeedYPct", floatBuf, configPath);
+        snprintf(floatBuf, sizeof(floatBuf), "%.4f", config->killfeedWPct);
+        WritePrivateProfileStringA("AutoClip", "killfeedWPct", floatBuf, configPath);
+        snprintf(floatBuf, sizeof(floatBuf), "%.4f", config->killfeedHPct);
+        WritePrivateProfileStringA("AutoClip", "killfeedHPct", floatBuf, configPath);
+    }
     
     WritePrivateProfileStringA("Recording", "SavePath", config->savePath, configPath);
     
