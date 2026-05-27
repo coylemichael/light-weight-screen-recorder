@@ -1,26 +1,34 @@
 # Changelog
 
+Format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/). Entry order
+within a version: **Added → Changed → Deprecated → Removed → Fixed → Security**.
+Each entry: `**Title** — short description.`
+
 ## [Unreleased]
 
 ### Changed
-- Inline `displayScore` variable in kill-feed heartbeat log (`src/kill_feed_sampler.c`) — pure refactor, no behaviour change.
+- **Inlined `displayScore` in kill-feed heartbeat log** — pure refactor in `src/kill_feed_sampler.c`, no behaviour change.
 
 ## [1.4.0] - 2026-05-27
 
 ### Added
 - **Recording markers** — Press F6 (configurable) to drop a timestamped bookmark during recording or replay buffering. Marker count shown in timer display. Writes a `.markers.txt` sidecar file alongside saved clips with `HH:MM:SS.mmm` timestamps. Border flashes yellow on marker drop.
+- **Marker hotkey button in settings** — General tab shows current marker key with click-to-rebind.
 - **Auto-clip kill feed detection** — Template-matching-based kill detection for Marathon. Scans a calibrated screen region every 2 seconds for "RUNNER DOWN" banners using Normalized Cross-Correlation (NCC). Automatically saves the replay buffer when the player gets a kill. Configurable cooldown (5–30s) and save delay (0–30s).
 - **Auto-clip settings tab** — New "Auto-Clip" tab in settings with enable toggle, show-regions debug overlay, cooldown slider, and delay slider.
+- **Auto-clip save delay** — Configurable delay (0–30s) between kill detection and replay save, allowing the post-kill moment to be included in the clip.
+- **Auto-clip border flash** — Green border flash (distinct from yellow marker flash) on auto-clip save trigger. `Border_FlashColor(r, g, b)` API for custom flash colors.
 - **Region calibration support** — Kill feed scan region stored as screen percentages (0.0–1.0) in `[AutoClip]` INI section. Resolution-agnostic — works on any monitor size.
 - **Debug console for auto-clip** — Optional `AllocConsole`-based debug window showing live detection output. Toggled via "Show Regions" checkbox in Auto-Clip settings.
 - **Kill-feed sampler file-log diagnostics** — Heartbeat written to `bin\Debug\lwsr_log_*.txt` every 60s with `scans`, `readback_fails` (window + lifetime), `best_score`, `last_match_age_ms`, and reject counters for cooldown / foreground / below-threshold. Throttled per-event readback-failure line (≤ 1 / 30s). All gated on `DebugConsole_IsOpen()` so off by default. Worker wait switched from `INFINITE` to a 10s quantum so the heartbeat still ticks when work flow stops entirely.
-- **Auto-clip border flash** — Green border flash (distinct from yellow marker flash) on auto-clip save trigger. `Border_FlashColor(r, g, b)` API for custom flash colors.
-- **Auto-clip save delay** — Configurable delay (0–30s) between kill detection and replay save, allowing the post-kill moment to be included in the clip.
 - **Multi-track audio in replay buffer** — Per-source audio output buffers (`AudioCapture_ReadSource`) and `MP4Muxer_WriteFileWithMultiAudio` for writing multiple audio tracks to saved clips.
+- **AAC encoder diagnostic counters** — `AACEncoder_GetPcmBytesIngested`, `AACEncoder_GetLastEmittedTimestamp`, `AACEncoder_GetFramesEmitted` exposed for AVSYNC instrumentation. Lets save-time and tick-time logging compare ingested-PCM duration against real elapsed wall-clock time.
 - **GPU readback region API** — `Capture_ReadbackRegion()` copies a sub-rect from the GPU BGRA texture to CPU memory via a reusable staging texture. Used by kill feed sampler.
 - **Settings → Video source dropdown labels the primary monitor** — `Monitor N (primary)` resolved via `MonitorFromPoint` + `MONITORINFOF_PRIMARY` so users can tell which display is which without guessing.
-- **Marker hotkey button in settings** — General tab shows current marker key with click-to-rebind.
-- **AAC encoder diagnostic counters** — `AACEncoder_GetPcmBytesIngested`, `AACEncoder_GetLastEmittedTimestamp`, `AACEncoder_GetFramesEmitted` exposed for AVSYNC instrumentation. Lets save-time and tick-time logging compare ingested-PCM duration against real elapsed wall-clock time.
+
+### Changed
+- **GOP interval reduced to 0.5 seconds** — `GOP_LENGTH_SECONDS` (2s) replaced with `GOP_LENGTH_FRAMES_AT(fps)` macro (`fps/2`). Saved replay clips now start within ~0.5s of requested duration instead of up to 2s short. Negligible bitrate impact on NVENC.
+- **Object files moved to `bin\`** — `/Fo"bin\\"` keeps the source tree clean.
 
 ### Fixed
 - **A/V desync when capture FPS drops below target** — Recording now uses real QPC-based PTS (`QPC_now - t0`) instead of synthetic `frameCount * frameInterval`. Prevents audio appearing delayed when actual fps < target fps (e.g. 112 captured at 120 label).
@@ -28,10 +36,6 @@
 - **Missing audio track on long-uptime saves (OBS-style silence-fill)** — `MixCaptureThread` (`src/audio_capture.c`) was only emitting when WASAPI sources delivered, so any dormant or briefly-empty source caused the mix output rate to drop below 192 000 B/s. Over hours of uptime this produced an audio-shorter-than-video deficit large enough that the saved MP4 had no audio track at all (observed: `msedge_20260526_195645.mp4`, 27 654 s short after 20.7 h uptime). Mixer now starts a wall-clock rate clock on the first real PCM arrival, then unconditionally emits `processBytes` per iteration to both the mixed output buffer and every per-source ring — real PCM where sources deliver, zeroed silence for any deficit. Same approach OBS uses in `audio-io.c`. Per-source AAC tracks stay length-aligned with the mixed track. The periodic `Audio: bytes=[…]` log line reports real-PCM-bytes-read (pre-pad) so under-delivery is still visible as a diagnostic.
 - **Crash (`ACCESS_VIOLATION`) when changing Replay Buffer duration while buffering** — Each dropdown click in Hours/Minutes/Seconds was triggering an in-place `ReplayBuffer_Stop` + `Start`. If `Stop` exceeded its 5 s timeout, the NVENC encoder was marked leaked and a follow-up reload crashed writing into a destroyed `CRITICAL_SECTION` (addr `0x24`). Duration changes are now collected in `g_config` during editing and applied as a single Stop/Start when the settings dialog closes.
 - **UI stall (~2 s freeze) when closing settings after a replay duration change** — The close-time Stop/Start ran on the UI thread and blocked while `bufferThread` drained (heartbeat showed `MAIN last=2016ms ago`). Reload now runs on a one-shot worker thread guarded by `InterlockedCompareExchange`, so the dialog closes immediately and the recording resumes in the background.
-
-### Changed
-- **GOP interval reduced to 0.5 seconds** — `GOP_LENGTH_SECONDS` (2s) replaced with `GOP_LENGTH_FRAMES_AT(fps)` macro (`fps/2`). Saved replay clips now start within ~0.5s of requested duration instead of up to 2s short. Negligible bitrate impact on NVENC.
-- Object files now output to `bin\` directory (`/Fo"bin\\"`) to keep source tree clean.
 
 ## [1.3.12] - 2026-04-26
 
