@@ -41,3 +41,9 @@ planning/
 drift/
 research/
 .handoffs/
+
+# Local-only docs (reference / rules / tracking / drift skill prompts)
+docs/drift/
+docs/reference/
+docs/rules/
+docs/tracking/
