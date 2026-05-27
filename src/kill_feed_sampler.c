@@ -459,11 +459,16 @@ static void EmitHeartbeatIfDue(KillFeedSampler* s, ULONGLONG now)
     if (!DebugConsole_IsOpen()) return;
 
     long long ageMs = (lastTrig == 0) ? -1 : (long long)(now - lastTrig);
+    float displayScore = (bestScore < 0.0f) ? 0.0f : bestScore;
     Logger_Log("KillFeedSampler: heartbeat scans=%u readback_fails=%u (total=%u) best_score=%.3f "
                "last_match_age_ms=%lld rejects[cd=%u fg=%u lo=%u]\n",
-               scans, rbFail, rbTotal,
-               (bestScore < 0.0f) ? 0.0f : bestScore,
+               scans, rbFail, rbTotal, displayScore,
                ageMs, cdRej, fgRej, loCnt);
+    DebugConsole_Print("HEARTBEAT: scans=%u/min best=%.3f rb_fails=%u (total=%u) "
+                       "last_match=%llds ago rejects[cd=%u fg=%u lo=%u]\n",
+                       scans, displayScore, rbFail, rbTotal,
+                       (ageMs < 0) ? -1LL : (ageMs / 1000),
+                       cdRej, fgRej, loCnt);
 }
 
 static DWORD WINAPI ScanWorkerProc(LPVOID param)
