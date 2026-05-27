@@ -1,6 +1,6 @@
 # Changelog
 
-## [Unreleased]
+## [1.4.0] - 2026-05-27
 
 ### Added
 - **Recording markers** — Press F6 (configurable) to drop a timestamped bookmark during recording or replay buffering. Marker count shown in timer display. Writes a `.markers.txt` sidecar file alongside saved clips with `HH:MM:SS.mmm` timestamps. Border flashes yellow on marker drop.
