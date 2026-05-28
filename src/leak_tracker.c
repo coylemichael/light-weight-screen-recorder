@@ -1,6 +1,6 @@
 /*
- * leak_tracker.c - Runtime-Controlled Allocation Counter Implementation
- * 
+ * leak_tracker.c - Debug allocation tracking
+ *
  * See leak_tracker.h for documentation.
  */
 
@@ -25,10 +25,6 @@ void LeakTracker_LogStatusForced(void) {
     LONG aacFree = g_leakCounters.aacSampleFrees;
     LONG fbAlloc = g_leakCounters.frameBufferAllocs;
     LONG fbFree = g_leakCounters.frameBufferFrees;
-    LONG mfSampleCreate = g_leakCounters.mfSampleCreates;
-    LONG mfSampleRelease = g_leakCounters.mfSampleReleases;
-    LONG mfBufCreate = g_leakCounters.mfBufferCreates;
-    LONG mfBufRelease = g_leakCounters.mfBufferReleases;
     
     Logger_Log("=== LEAK TRACKER STATUS ===\n");
     Logger_Log("  NVENC frames:    alloc=%ld, free=%ld, delta=%ld\n",
@@ -37,10 +33,6 @@ void LeakTracker_LogStatusForced(void) {
                aacAlloc, aacFree, aacAlloc - aacFree);
     Logger_Log("  FrameBuffer:     alloc=%ld, free=%ld, delta=%ld\n",
                fbAlloc, fbFree, fbAlloc - fbFree);
-    Logger_Log("  MF Samples:      create=%ld, release=%ld, delta=%ld\n",
-               mfSampleCreate, mfSampleRelease, mfSampleCreate - mfSampleRelease);
-    Logger_Log("  MF Buffers:      create=%ld, release=%ld, delta=%ld\n",
-               mfBufCreate, mfBufRelease, mfBufCreate - mfBufRelease);
     Logger_Log("===========================\n");
     
     g_leakCounters.lastReportTime = GetTickCount();

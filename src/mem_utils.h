@@ -1,16 +1,23 @@
 /*
  * mem_utils.h - Memory Safety Utilities
  * ============================================================================
- * 
- * This header provides macros and utilities for safer memory management:
- * 
- *   1. SAFE_FREE / SAFE_RELEASE - Null-checked free that sets pointer to NULL
- *   2. Goto-cleanup pattern documentation and helpers
- *   3. CHECK_* macros for error handling
- *   4. MF_LOCK_BUFFER / MF_UNLOCK_BUFFER for Media Foundation
- * 
- * USAGE: Include this header in source files that allocate memory.
- * 
+ *
+ * Macros for safer resource management. Surface (the only macros this header
+ * exposes):
+ *
+ *   SAFE_FREE             - free() + NULL the pointer
+ *   SAFE_RELEASE          - COM Release via lpVtbl + NULL the pointer
+ *   SAFE_COTASKMEM_FREE   - CoTaskMemFree + NULL the pointer
+ *   SAFE_CLOSE_HANDLE     - CloseHandle + NULL the handle
+ *   SAFE_DELETE_OBJECT    - DeleteObject (GDI) + NULL the handle
+ *   CHECK_HR_LOG          - FAILED(hr) -> log + goto cleanup
+ *   MF_LOCK_BUFFER        - IMFMediaBuffer::Lock with validation + lock flag
+ *   MF_UNLOCK_BUFFER      - paired Unlock guarded by the lock flag
+ *
+ * USAGE: include in files that allocate memory or hold COM/MF/GDI/handle
+ * resources. CHECK_HR_LOG expands to Logger_Log(...), so logger.h is included
+ * here to keep the header self-contained.
+ *
  * WHY THIS MATTERS:
  *   - Double-free bugs crash the program
  *   - Use-after-free bugs cause undefined behavior
@@ -22,7 +29,8 @@
 
 #include <stdlib.h>
 #include <windows.h>
-#include "constants.h"  /* For LWSR_ASSERT in MF_LOCK_BUFFER macros */
+#include "constants.h"  /* For LWSR_ASSERT in MF_LOCK_BUFFER */
+#include "logger.h"     /* For Logger_Log in CHECK_HR_LOG */
 
 /* ============================================================================
  * SAFE FREE MACROS
@@ -44,18 +52,6 @@
         if ((ptr) != NULL) { \
             free(ptr); \
             (ptr) = NULL; \
-        } \
-    } while (0)
-
-/* For arrays allocated with calloc/malloc */
-#define SAFE_FREE_ARRAY(arr, count, freeFunc) \
-    do { \
-        if ((arr) != NULL) { \
-            for (int _i = 0; _i < (count); _i++) { \
-                freeFunc(&(arr)[_i]); \
-            } \
-            free(arr); \
-            (arr) = NULL; \
         } \
     } while (0)
 
@@ -96,82 +92,22 @@
     } while (0)
 
 /* ============================================================================
- * ALLOCATION RESULT CHECKING
- * ============================================================================
- * 
- * CHECK_ALLOC: Verify allocation succeeded, goto cleanup label if not.
- * This enables the goto-cleanup pattern for multi-resource functions.
- * 
- * USAGE:
- *   buffer = malloc(size);
- *   CHECK_ALLOC(buffer, cleanup);  // Jumps to 'cleanup' label if NULL
- */
-
-#define CHECK_ALLOC(ptr, cleanupLabel) \
-    do { \
-        if ((ptr) == NULL) { \
-            goto cleanupLabel; \
-        } \
-    } while (0)
-
-#define CHECK_ALLOC_LOG(ptr, cleanupLabel, msg) \
-    do { \
-        if ((ptr) == NULL) { \
-            Logger_Log("ALLOC FAILED: %s\n", msg); \
-            goto cleanupLabel; \
-        } \
-    } while (0)
-
-/* ============================================================================
  * COM/HRESULT ERROR CHECKING
  * ============================================================================
- * 
- * CHECK_HR: Verify HRESULT succeeded, goto cleanup label if not.
- * This enables consistent error handling for COM/Media Foundation calls.
- * 
- * PATTERN FOR MFCreate* CALLS:
- *   1. Always check HRESULT before using the created object
- *   2. Initialize all COM pointers to NULL at function start
- *   3. Release in reverse order of creation in cleanup
- *   4. Use SAFE_RELEASE which checks for NULL
- * 
+ *
+ * CHECK_HR_LOG: log the context string and goto the cleanup label when the
+ * HRESULT indicates failure. Used by the goto-cleanup pattern for COM /
+ * Media Foundation call sites.
+ *
  * USAGE:
- *   HRESULT hr = MFCreateMediaType(&type);
- *   CHECK_HR(hr, cleanup);  // Jumps to 'cleanup' label if FAILED
- *   
  *   hr = MFCreateSample(&sample);
- *   CHECK_HR_LOG(hr, cleanup, "MFCreateSample");  // Also logs on failure
+ *   CHECK_HR_LOG(hr, cleanup, "MFCreateSample");
  */
-
-#define CHECK_HR(hr, cleanupLabel) \
-    do { \
-        if (FAILED(hr)) { \
-            goto cleanupLabel; \
-        } \
-    } while (0)
 
 #define CHECK_HR_LOG(hr, cleanupLabel, context) \
     do { \
         if (FAILED(hr)) { \
             Logger_Log("%s failed (0x%08X)\n", context, hr); \
-            goto cleanupLabel; \
-        } \
-    } while (0)
-
-/* Combined: Create and check in one statement */
-#define CHECK_MF_CREATE(createExpr, cleanupLabel) \
-    do { \
-        HRESULT _hr = (createExpr); \
-        if (FAILED(_hr)) { \
-            goto cleanupLabel; \
-        } \
-    } while (0)
-
-#define CHECK_MF_CREATE_LOG(createExpr, cleanupLabel, context) \
-    do { \
-        HRESULT _hr = (createExpr); \
-        if (FAILED(_hr)) { \
-            Logger_Log("%s failed (0x%08X)\n", context, _hr); \
             goto cleanupLabel; \
         } \
     } while (0)
@@ -227,23 +163,6 @@
         } \
     } while (0)
 
-/* Lock buffer with logging on failure */
-#define MF_LOCK_BUFFER_LOG(buf, pData, pMaxLen, pCurLen, hrVar, cleanupLabel, lockFlag, context) \
-    do { \
-        (hrVar) = (buf)->lpVtbl->Lock((buf), (pData), (pMaxLen), (pCurLen)); \
-        if (FAILED(hrVar)) { \
-            Logger_Log("%s: Lock failed (0x%08X)\n", context, hrVar); \
-            goto cleanupLabel; \
-        } \
-        (lockFlag) = TRUE; \
-        LWSR_ASSERT(*(pData) != NULL); \
-        if (*(pData) == NULL) { \
-            Logger_Log("%s: Lock succeeded but data pointer is NULL\n", context); \
-            (hrVar) = E_POINTER; \
-            goto cleanupLabel; \
-        } \
-    } while (0)
-
 /* Safe unlock - only unlocks if lockFlag is TRUE, then clears the flag */
 #define MF_UNLOCK_BUFFER(buf, lockFlag) \
     do { \
@@ -279,10 +198,10 @@
  *       
  *       // For buffer+sample pairs, check each before proceeding
  *       hr = MFCreateMemoryBuffer(size, &buffer);
- *       CHECK_HR(hr, cleanup);
+ *       CHECK_HR_LOG(hr, cleanup, "MFCreateMemoryBuffer");
  *       
  *       hr = MFCreateSample(&sample);
- *       CHECK_HR(hr, cleanup);
+ *       CHECK_HR_LOG(hr, cleanup, "MFCreateSample");
  *       
  *       // ... use the objects ...
  *       
@@ -305,10 +224,10 @@
  *       ResourceB* b = NULL;
  *       
  *       a = CreateResourceA();
- *       CHECK_ALLOC(a, cleanup);
+ *       if (!a) goto cleanup;
  *       
  *       b = CreateResourceB();
- *       CHECK_ALLOC(b, cleanup);
+ *       if (!b) goto cleanup;
  *       
  *       result = TRUE;
  *       

@@ -1,8 +1,9 @@
 /*
- * markers.c - Recording Markers (Bookmarks)
+ * markers.c - Recording markers - timestamped bookmarks + sidecar file writer
  *
- * Stores timestamped markers and writes sidecar files.
- * Thread-safe add via InterlockedIncrement on count.
+ * InterlockedIncrement protects count read/write, but Markers_Add has a race
+ * between slot claim and data write; safe only if readers occur after recording
+ * stops (current usage: writers on F8 keypress, readers after stop).
  *
  * ERROR HANDLING PATTERN:
  * - Early return for NULL/invalid parameters
@@ -64,12 +65,29 @@ BOOL Markers_WriteSidecar(const MarkerList* list, const char* videoPath,
     char sidecarPath[MAX_PATH];
     strncpy(sidecarPath, videoPath, MAX_PATH - 1);
     sidecarPath[MAX_PATH - 1] = '\0';
-    
-    char* dot = strrchr(sidecarPath, '.');
+
+    /* Locate filename start (past last '\' or '/') so we only match a dot in
+     * the filename, not one inside a directory name like "C:\foo.bar\clip". */
+    char* filename = sidecarPath;
+    for (char* p = sidecarPath; *p; p++) {
+        if (*p == '\\' || *p == '/') filename = p + 1;
+    }
+    char* dot = strrchr(filename, '.');
     if (dot) {
         *dot = '\0';
     }
-    strncat(sidecarPath, ".markers.txt", MAX_PATH - strlen(sidecarPath) - 1);
+
+    /* Verify the suffix fits; strncat would otherwise silently drop chars and
+     * leave sidecarPath equal to videoPath, causing fopen to overwrite it. */
+    const char* suffix = ".markers.txt";
+    size_t used = strlen(sidecarPath);
+    size_t need = strlen(suffix);
+    if (used + need + 1 > MAX_PATH) {
+        Logger_Log("Markers_WriteSidecar: path too long (%zu + %zu >= %d)\n",
+                   used, need, MAX_PATH);
+        return FALSE;
+    }
+    strncat(sidecarPath, suffix, MAX_PATH - used - 1);
     
     /* Count markers in range */
     int inRange = 0;

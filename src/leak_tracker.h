@@ -17,8 +17,6 @@
  *   - nvencFrame: Encoded video frames from NVENC output thread
  *   - aacSample: Encoded AAC audio samples
  *   - frameBuffer: Video frames stored in replay buffer
- *   - mfSample: Media Foundation IMFSample objects
- *   - mfBuffer: Media Foundation IMFMediaBuffer objects
  * 
  * THREAD SAFETY:
  *   All counters use InterlockedIncrement for thread-safe updates.
@@ -49,12 +47,6 @@ typedef struct LeakCounters {
     /* Frame Buffer (Replay) */
     volatile LONG frameBufferAllocs;    /* Frame data allocations */
     volatile LONG frameBufferFrees;     /* Frame data frees (eviction/shutdown) */
-    
-    /* Media Foundation (encoder.c) */
-    volatile LONG mfSampleCreates;      /* MFCreateSample calls */
-    volatile LONG mfSampleReleases;     /* IMFSample::Release calls */
-    volatile LONG mfBufferCreates;      /* MFCreateMemoryBuffer calls */
-    volatile LONG mfBufferReleases;     /* IMFMediaBuffer::Release calls */
     
     /* Timing for periodic reports */
     DWORD lastReportTime;               /* GetTickCount of last report */
@@ -90,18 +82,6 @@ extern LeakCounters g_leakCounters;
 
 #define LEAK_TRACK_FRAME_BUFFER_FREE() \
     do { if (g_config.debugLogging) InterlockedIncrement(&g_leakCounters.frameBufferFrees); } while(0)
-
-#define LEAK_TRACK_MF_SAMPLE_CREATE() \
-    do { if (g_config.debugLogging) InterlockedIncrement(&g_leakCounters.mfSampleCreates); } while(0)
-
-#define LEAK_TRACK_MF_SAMPLE_RELEASE() \
-    do { if (g_config.debugLogging) InterlockedIncrement(&g_leakCounters.mfSampleReleases); } while(0)
-
-#define LEAK_TRACK_MF_BUFFER_CREATE() \
-    do { if (g_config.debugLogging) InterlockedIncrement(&g_leakCounters.mfBufferCreates); } while(0)
-
-#define LEAK_TRACK_MF_BUFFER_RELEASE() \
-    do { if (g_config.debugLogging) InterlockedIncrement(&g_leakCounters.mfBufferReleases); } while(0)
 
 /* ============================================================================
  * API FUNCTIONS

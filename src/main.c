@@ -227,7 +227,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     LeakTracker_Init();
 
     // Initialize shared GDI+ (used by overlay and action_toolbar)
-    if (!GdiplusAPI_Init(&g_gdip)) {
+    if (!GdiplusAPI_Init()) {
         MessageBoxA(NULL, "Failed to initialize GDI+", "Error", MB_OK | MB_ICONERROR);
         exitCode = 1;
         goto cleanup;
@@ -381,7 +381,7 @@ cleanup:
     }
 
     if (gdiInited) {
-        GdiplusAPI_Shutdown(&g_gdip);
+        GdiplusAPI_Shutdown();
     }
     if (captureInited) {
         Capture_Shutdown(&g_capture);

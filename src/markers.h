@@ -3,7 +3,10 @@
  *
  * Stores timestamped markers during recording or replay buffer capture.
  * On save, writes a .markers.txt sidecar file alongside the video.
- * Thread-safe via InterlockedIncrement for the count.
+ *
+ * Thread safety: InterlockedIncrement protects count read/write, but
+ * Markers_Add has a race between slot claim and data write; safe only if
+ * readers occur after recording stops.
  */
 
 #ifndef MARKERS_H
@@ -20,7 +23,7 @@ typedef struct {
 
 typedef struct {
     Marker markers[MAX_MARKERS];
-    volatile LONG count;    /* Thread-safe via InterlockedIncrement */
+    volatile LONG count;    /* InterlockedIncrement-published; see header note on slot-write race */
 } MarkerList;
 
 /* Reset marker list (call at recording/replay start) */

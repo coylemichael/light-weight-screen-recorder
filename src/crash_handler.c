@@ -35,6 +35,7 @@
 #include <time.h>
 #include "crash_handler.h"
 #include "logger.h"
+#include "mem_utils.h"
 #pragma comment(lib, "dbghelp.lib")
 
 // ============================================================================
@@ -43,7 +44,6 @@
 
 #define WATCHDOG_TIMEOUT_MS     30000   // 30 seconds without heartbeat = hang
 #define WATCHDOG_CHECK_INTERVAL 5000    // Check every 5 seconds
-#define STACK_OVERFLOW_RESERVE  65536   // 64KB reserved for stack overflow handling
 
 // Heap corruption status code (not always defined)
 #ifndef STATUS_HEAP_CORRUPTION
@@ -74,12 +74,6 @@ static LPTOP_LEVEL_EXCEPTION_FILTER g_previousFilter = NULL;
  * Thread Access: [Main thread sets during init]
  */
 static PVOID g_vectoredHandler = NULL;
-
-/*
- * Lock to prevent concurrent crash handling.
- * Thread Access: [Any crashing thread]
- */
-static CRITICAL_SECTION g_crashLock;
 
 /*
  * Flag indicating crash handling is in progress.
@@ -113,12 +107,6 @@ static volatile LONG g_watchdogRunning = FALSE;
 static volatile LONG g_crashHandlerInitialized = FALSE;
 
 /*
- * Reserved memory for stack overflow handling.
- * Thread Access: [Crashing thread only]
- */
-static LPVOID g_stackOverflowGuard = NULL;
-
-/*
  * Exception info stored for dump thread.
  * Thread Access: [Crashing thread writes, Dump thread reads]
  */
@@ -132,7 +120,15 @@ static const char* g_crashReason = NULL;
  * ============================================================================ */
 
 static void GetExeDirectory(char* buffer, size_t size) {
-    GetModuleFileNameA(NULL, buffer, (DWORD)size);
+    if (!buffer || size == 0) return;
+    buffer[0] = '\0';
+    DWORD len = GetModuleFileNameA(NULL, buffer, (DWORD)size);
+    if (len == 0 || len >= size) {
+        // Fall back to current directory on failure
+        strncpy(buffer, ".", size - 1);
+        buffer[size - 1] = '\0';
+        return;
+    }
     char* lastSlash = strrchr(buffer, '\\');
     if (lastSlash) *lastSlash = '\0';
 }
@@ -144,7 +140,12 @@ static void GetCrashFilePaths(char* dumpPath, char* logPath, size_t size) {
     time_t now = time(NULL);
     struct tm* t = localtime(&now);
     char timestamp[32];
-    strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", t);
+    if (t) {
+        strftime(timestamp, sizeof(timestamp), "%Y%m%d_%H%M%S", t);
+    } else {
+        strncpy(timestamp, "unknown_time", sizeof(timestamp) - 1);
+        timestamp[sizeof(timestamp) - 1] = '\0';
+    }
     
     snprintf(dumpPath, size, "%s\\lwsr_crash_%s.dmp", exeDir, timestamp);
     snprintf(logPath, size, "%s\\lwsr_crash_%s.txt", exeDir, timestamp);
@@ -218,16 +219,17 @@ static DWORD WINAPI DumpWriterThread(LPVOID param) {
             NULL,
             NULL
         );
-        CloseHandle(dumpFile);
+        SAFE_CLOSE_HANDLE(dumpFile);
     }
     
     // Write crash log
     FILE* logFile = fopen(logPath, "w");
     if (logFile) {
         time_t now = time(NULL);
+        char* timeStr = ctime(&now);
         
         fprintf(logFile, "=== LWSR Crash Report ===\n");
-        fprintf(logFile, "Time: %s", ctime(&now));
+        fprintf(logFile, "Time: %s", timeStr ? timeStr : "unknown_time\n");
         fprintf(logFile, "Crash Reason: %s\n", g_crashReason ? g_crashReason : "Unknown");
         fprintf(logFile, "Crashing Thread ID: %lu\n", g_crashingThreadId);
         fprintf(logFile, "\n");
@@ -329,13 +331,14 @@ static void HandleCrash(EXCEPTION_POINTERS* exInfo, const char* reason) {
         // Wait for dump to complete (with timeout to prevent infinite wait)
         if (g_dumpCompleteEvent) {
             WaitForSingleObject(g_dumpCompleteEvent, 30000);
+        } else {
+            // Fallback: event creation failed, wait on the thread itself
+            WaitForSingleObject(dumpThread, 30000);
         }
-        CloseHandle(dumpThread);
+        SAFE_CLOSE_HANDLE(dumpThread);
     }
     
-    if (g_dumpCompleteEvent) {
-        CloseHandle(g_dumpCompleteEvent);
-    }
+    SAFE_CLOSE_HANDLE(g_dumpCompleteEvent);
     
     // Terminate cleanly
     TerminateProcess(GetCurrentProcess(), 1);
@@ -548,10 +551,8 @@ static DWORD WINAPI WatchdogThread(LPVOID param) {
 // ============================================================================
 
 void CrashHandler_Init(void) {
-    /* Thread-safe check using atomic compare-exchange */
-    if (InterlockedCompareExchange(&g_crashHandlerInitialized, FALSE, FALSE)) return;
-    
-    InitializeCriticalSection(&g_crashLock);
+    /* Atomically claim initialization; bail if another caller already did it. */
+    if (InterlockedCompareExchange(&g_crashHandlerInitialized, TRUE, FALSE) != FALSE) return;
     
     // 1. Install Vectored Exception Handler (runs first, catches everything)
     g_vectoredHandler = AddVectoredExceptionHandler(1, VectoredExceptionHandler);
@@ -571,12 +572,6 @@ void CrashHandler_Init(void) {
     
     // 5. Configure abort behavior - suppress default dialog, we handle it
     _set_abort_behavior(0, _WRITE_ABORT_MSG | _CALL_REPORTFAULT);
-    
-    // 6. Reserve memory for stack overflow handling
-    g_stackOverflowGuard = VirtualAlloc(NULL, STACK_OVERFLOW_RESERVE, 
-                                         MEM_COMMIT | MEM_RESERVE, PAGE_READWRITE);
-    
-    InterlockedExchange(&g_crashHandlerInitialized, TRUE);
 }
 
 void CrashHandler_StartWatchdog(void) {
@@ -598,8 +593,7 @@ void CrashHandler_StopWatchdog(void) {
     
     InterlockedExchange(&g_watchdogRunning, FALSE);
     WaitForSingleObject(g_watchdogThread, 5000);
-    CloseHandle(g_watchdogThread);
-    g_watchdogThread = NULL;
+    SAFE_CLOSE_HANDLE(g_watchdogThread);
 }
 
 void CrashHandler_Heartbeat(void) {
@@ -619,18 +613,10 @@ void CrashHandler_Shutdown(void) {
         g_vectoredHandler = NULL;
     }
     
-    if (g_previousFilter) {
-        SetUnhandledExceptionFilter(g_previousFilter);
-        g_previousFilter = NULL;
-    }
+    /* Unconditionally restore previous filter (NULL correctly uninstalls ours). */
+    SetUnhandledExceptionFilter(g_previousFilter);
+    g_previousFilter = NULL;
     
-    // Free reserved memory
-    if (g_stackOverflowGuard) {
-        VirtualFree(g_stackOverflowGuard, 0, MEM_RELEASE);
-        g_stackOverflowGuard = NULL;
-    }
-    
-    DeleteCriticalSection(&g_crashLock);
     InterlockedExchange(&g_crashHandlerInitialized, FALSE);
 }
 

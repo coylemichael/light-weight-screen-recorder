@@ -1,5 +1,5 @@
 /*
- * Kill Feed Sampler - Template-only kill detection
+ * kill_feed_sampler.c - Template-only kill detection (NCC match on calibrated kill-feed region) + auto-clip trigger
  *
  * Scans a calibrated screen region for "RUNNER DOWN" / "RUNNER DOWN [ASSIST]"
  * banner templates using multi-scale NCC (Normalized Cross-Correlation).
@@ -100,6 +100,7 @@ struct KillFeedSampler {
 
     /* Timing (capture thread only) */
     ULONGLONG lastScanMs;
+    DWORD captureThreadId;  /* Enforces FeedFrame single-thread precondition */
 
     /* Worker thread */
     HANDLE workerThread;
@@ -336,14 +337,24 @@ static BOOL LoadTemplatePNG(Template* t, const char* pngPath, const char* name)
     if (!pCreate || !pGetW || !pGetH || !pLock || !pUnlock || !pDispose) return FALSE;
 
     wchar_t wPath[MAX_PATH];
-    MultiByteToWideChar(CP_ACP, 0, pngPath, -1, wPath, MAX_PATH);
+    int wConv = MultiByteToWideChar(CP_ACP, 0, pngPath, -1, wPath, MAX_PATH);
+    if (wConv <= 0) {
+        Logger_Log("KillFeedSampler: MultiByteToWideChar failed for '%s' (err=%lu)\n",
+                   pngPath, GetLastError());
+        return FALSE;
+    }
 
     GpBitmap* bitmap = NULL;
     if (pCreate(wPath, &bitmap) != GdipOk || !bitmap) return FALSE;
 
     UINT w = 0, h = 0;
-    pGetW(bitmap, &w);
-    pGetH(bitmap, &h);
+    GpStatus sw = pGetW(bitmap, &w);
+    GpStatus sh = pGetH(bitmap, &h);
+    if (sw != GdipOk || sh != GdipOk) {
+        Logger_Log("KillFeedSampler: GdipGetImageWidth/Height failed (sw=%d sh=%d)\n", sw, sh);
+        pDispose(bitmap);
+        return FALSE;
+    }
 
     if (w == 0 || h == 0 || w > 1024 || h > 1024) {
         pDispose(bitmap);
@@ -566,7 +577,9 @@ static DWORD WINAPI ScanWorkerProc(LPVOID param)
         }
 
         /* ─── Trigger! ─── */
+        EnterCriticalSection(&s->workLock);
         s->lastTriggerMs = now;
+        LeaveCriticalSection(&s->workLock);
 
         Logger_Log("KillFeedSampler: Kill detected! (%s, score=%.3f) Triggering replay save.\n",
                    matchedName, bestScore);
@@ -668,7 +681,13 @@ KillFeedSampler* KillFeedSampler_Init(const AppConfig* config, const CaptureStat
     /* Load templates */
     {
         char exePath[MAX_PATH];
-        GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        DWORD gmfn = GetModuleFileNameA(NULL, exePath, MAX_PATH);
+        if (gmfn == 0 || gmfn >= MAX_PATH) {
+            Logger_Log("KillFeedSampler: GetModuleFileNameA failed/truncated (ret=%lu err=%lu)\n",
+                       gmfn, GetLastError());
+            free(s);
+            return NULL;
+        }
         char* slash = strrchr(exePath, '\\');
         if (slash) *(slash + 1) = '\0';
 
@@ -698,46 +717,62 @@ KillFeedSampler* KillFeedSampler_Init(const AppConfig* config, const CaptureStat
     s->overlayWnd = overlayWnd;
     s->lastScanMs = 0;
     s->lastTriggerMs = 0;
+    s->captureThreadId = 0;  /* Captured on first FeedFrame call */
 
-    /* Initialize worker thread synchronization */
+    /*
+     * MULTI-RESOURCE FUNCTION: KillFeedSampler_Init (sync setup)
+     * Resources: 5 - 2 CRITICAL_SECTIONs, 2 events, 1 worker thread
+     * Pattern: goto-cleanup with SAFE_*
+     */
+    BOOL workLockInit = FALSE;
+    BOOL triggerLockInit = FALSE;
+
     InitializeCriticalSection(&s->workLock);
+    workLockInit = TRUE;
     InitializeCriticalSection(&s->triggerLock);
+    triggerLockInit = TRUE;
+
     s->hWorkReady = CreateEvent(NULL, FALSE, FALSE, NULL);   /* Auto-reset */
     s->hStopEvent = CreateEvent(NULL, TRUE, FALSE, NULL);    /* Manual-reset */
-
     if (!s->hWorkReady || !s->hStopEvent) {
         Logger_Log("KillFeedSampler: Failed to create events\n");
-        if (s->hWorkReady) CloseHandle(s->hWorkReady);
-        if (s->hStopEvent) CloseHandle(s->hStopEvent);
-        DeleteCriticalSection(&s->workLock);
-        DeleteCriticalSection(&s->triggerLock);
-        for (int i = 0; i < MAX_TEMPLATES; i++) free(s->templates[i].gray);
-        free(s);
-        return NULL;
+        goto init_fail;
     }
 
     s->workerThread = CreateThread(NULL, 0, ScanWorkerProc, s, 0, NULL);
     if (!s->workerThread) {
         Logger_Log("KillFeedSampler: Failed to create worker thread\n");
-        CloseHandle(s->hWorkReady);
-        CloseHandle(s->hStopEvent);
-        DeleteCriticalSection(&s->workLock);
-        DeleteCriticalSection(&s->triggerLock);
-        for (int i = 0; i < MAX_TEMPLATES; i++) free(s->templates[i].gray);
-        free(s);
-        return NULL;
+        goto init_fail;
     }
 
     Logger_Log("KillFeedSampler: Initialized, region (%d,%d) %dx%d, %d templates loaded\n",
                s->kfX, s->kfY, s->kfW, s->kfH, s->templateCount);
 
     return s;
+
+init_fail:
+    SAFE_CLOSE_HANDLE(s->hWorkReady);
+    SAFE_CLOSE_HANDLE(s->hStopEvent);
+    if (workLockInit) DeleteCriticalSection(&s->workLock);
+    if (triggerLockInit) DeleteCriticalSection(&s->triggerLock);
+    for (int i = 0; i < MAX_TEMPLATES; i++) SAFE_FREE(s->templates[i].gray);
+    free(s);
+    return NULL;
 }
 
 void KillFeedSampler_FeedFrame(KillFeedSampler* s, CaptureState* capture,
                                ID3D11Texture2D* bgraTexture)
 {
     if (!s || !capture || !bgraTexture) return;
+
+    /* Defend the "capture thread only" precondition: latch first caller, reject others. */
+    DWORD tid = GetCurrentThreadId();
+    if (s->captureThreadId == 0) {
+        s->captureThreadId = tid;
+    } else if (s->captureThreadId != tid) {
+        LWSR_ASSERT_MSG(FALSE, "KillFeedSampler_FeedFrame called from non-capture thread");
+        return;
+    }
 
     /* Throttle: only scan every SCAN_INTERVAL_MS */
     ULONGLONG now = GetTickCount64();
@@ -787,8 +822,8 @@ void KillFeedSampler_FeedFrame(KillFeedSampler* s, CaptureState* capture,
     /* Queue work for the worker thread (replaces any stale pending work) */
     EnterCriticalSection(&s->workLock);
     /* Free any unconsumed previous work */
-    free(s->pendingWork.gray);
-    free(s->pendingWork.bgra);
+    SAFE_FREE(s->pendingWork.gray);
+    SAFE_FREE(s->pendingWork.bgra);
     s->pendingWork.gray = grayBuf;
     s->pendingWork.bgra = bgraCopy;
     s->pendingWork.w = s->kfW;
@@ -809,21 +844,21 @@ void KillFeedSampler_Shutdown(KillFeedSampler* s)
     if (s->hStopEvent) SetEvent(s->hStopEvent);
     if (s->workerThread) {
         WaitForSingleObject(s->workerThread, 5000);
-        CloseHandle(s->workerThread);
+        SAFE_CLOSE_HANDLE(s->workerThread);
     }
-    if (s->hWorkReady) CloseHandle(s->hWorkReady);
-    if (s->hStopEvent) CloseHandle(s->hStopEvent);
+    SAFE_CLOSE_HANDLE(s->hWorkReady);
+    SAFE_CLOSE_HANDLE(s->hStopEvent);
 
     /* Free any unconsumed work */
-    free(s->pendingWork.gray);
-    free(s->pendingWork.bgra);
+    SAFE_FREE(s->pendingWork.gray);
+    SAFE_FREE(s->pendingWork.bgra);
 
     DeleteCriticalSection(&s->workLock);
     DeleteCriticalSection(&s->triggerLock);
 
     for (int i = 0; i < MAX_TEMPLATES; i++)
-        free(s->templates[i].gray);
-    free(s->triggerBmp);
+        SAFE_FREE(s->templates[i].gray);
+    SAFE_FREE(s->triggerBmp);
     free(s);
 }
 
@@ -842,8 +877,12 @@ void KillFeedSampler_WriteTriggerContext(KillFeedSampler* s, const char* clipPat
     strncpy(txtPath, clipPath, MAX_PATH - 1);
     txtPath[MAX_PATH - 1] = '\0';
     char* ext = strrchr(txtPath, '.');
-    if (ext) strcpy(ext, ".txt");
-    else strncat(txtPath, ".txt", MAX_PATH - strlen(txtPath) - 1);
+    if (ext) {
+        size_t remain = (size_t)(MAX_PATH - (ext - txtPath));
+        strncpy_s(ext, remain, ".txt", _TRUNCATE);
+    } else {
+        strncat(txtPath, ".txt", MAX_PATH - strlen(txtPath) - 1);
+    }
 
     FILE* f = NULL;
     fopen_s(&f, txtPath, "w");
@@ -864,14 +903,17 @@ void KillFeedSampler_WriteTriggerContext(KillFeedSampler* s, const char* clipPat
         strncpy(bmpPath, clipPath, MAX_PATH - 1);
         bmpPath[MAX_PATH - 1] = '\0';
         ext = strrchr(bmpPath, '.');
-        if (ext) strcpy(ext, "_region.bmp");
-        else strncat(bmpPath, "_region.bmp", MAX_PATH - strlen(bmpPath) - 1);
+        if (ext) {
+            size_t remain = (size_t)(MAX_PATH - (ext - bmpPath));
+            strncpy_s(ext, remain, "_region.bmp", _TRUNCATE);
+        } else {
+            strncat(bmpPath, "_region.bmp", MAX_PATH - strlen(bmpPath) - 1);
+        }
 
         SaveBMP(bmpPath, s->triggerBmp, s->triggerBmpW, s->triggerBmpH, s->triggerBmpStride);
     }
 
     s->triggerPending = FALSE;
-    free(s->triggerBmp);
-    s->triggerBmp = NULL;
+    SAFE_FREE(s->triggerBmp);
     LeaveCriticalSection(&s->triggerLock);
 }

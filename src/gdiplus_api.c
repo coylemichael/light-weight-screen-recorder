@@ -7,6 +7,7 @@
 
 #include "gdiplus_api.h"
 #include "logger.h"
+#include <string.h>
 
 /* Global shared GDI+ instance */
 GdiplusFunctions g_gdip = {0};
@@ -19,8 +20,8 @@ GdiplusFunctions g_gdip = {0};
         failed = TRUE; \
     }
 
-BOOL GdiplusAPI_Init(GdiplusFunctions* gdi) {
-    if (!gdi) return FALSE;
+BOOL GdiplusAPI_Init(void) {
+    GdiplusFunctions* gdi = &g_gdip;
     if (gdi->initialized) return TRUE;
     
     /* Load gdiplus.dll */
@@ -38,7 +39,7 @@ BOOL GdiplusAPI_Init(GdiplusFunctions* gdi) {
     if (!gdi->Startup || !gdi->Shutdown) {
         Logger_Log("GDI+: Failed to load startup/shutdown functions\n");
         FreeLibrary(gdi->module);
-        gdi->module = NULL;
+        memset(gdi, 0, sizeof(*gdi));
         return FALSE;
     }
     
@@ -79,7 +80,7 @@ BOOL GdiplusAPI_Init(GdiplusFunctions* gdi) {
     if (failed) {
         Logger_Log("GDI+: Some functions failed to load\n");
         FreeLibrary(gdi->module);
-        gdi->module = NULL;
+        memset(gdi, 0, sizeof(*gdi));
         return FALSE;
     }
     
@@ -91,7 +92,7 @@ BOOL GdiplusAPI_Init(GdiplusFunctions* gdi) {
     if (status != GdipOk) {
         Logger_Log("GDI+: GdiplusStartup failed with status %d\n", status);
         FreeLibrary(gdi->module);
-        gdi->module = NULL;
+        memset(gdi, 0, sizeof(*gdi));
         return FALSE;
     }
     
@@ -100,8 +101,9 @@ BOOL GdiplusAPI_Init(GdiplusFunctions* gdi) {
     return TRUE;
 }
 
-void GdiplusAPI_Shutdown(GdiplusFunctions* gdi) {
-    if (!gdi || !gdi->initialized) return;
+void GdiplusAPI_Shutdown(void) {
+    GdiplusFunctions* gdi = &g_gdip;
+    if (!gdi->initialized) return;
     
     if (gdi->Shutdown && gdi->token) {
         gdi->Shutdown(gdi->token);

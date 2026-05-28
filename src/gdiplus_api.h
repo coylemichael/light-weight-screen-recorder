@@ -32,12 +32,8 @@ typedef float REAL;
 /* GDI+ constants */
 #define GdipOk                      0
 #define SmoothingModeAntiAlias      4
-#define TextRenderingHintAntiAlias  4
 #define UnitPixel                   2
 #define FillModeAlternate           0
-#define FontStyleRegular            0
-#define FontStyleBold               1
-#define StringAlignmentCenter       1
 
 /* ============================================================================
  * GDI+ FUNCTION POINTER TYPES
@@ -154,15 +150,16 @@ typedef struct GdiplusFunctions {
 /*
  * GdiplusAPI_Init - Load gdiplus.dll and initialize function pointers
  * Must be called from main thread before any drawing operations.
+ * Operates on the shared g_gdip global.
  * Returns: TRUE on success, FALSE on failure
  */
-BOOL GdiplusAPI_Init(GdiplusFunctions* gdi);
+BOOL GdiplusAPI_Init(void);
 
 /*
  * GdiplusAPI_Shutdown - Release GDI+ resources
  * Must be called from main thread at application exit.
  */
-void GdiplusAPI_Shutdown(GdiplusFunctions* gdi);
+void GdiplusAPI_Shutdown(void);
 
 /*
  * Global shared GDI+ instance
