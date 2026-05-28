@@ -9,6 +9,7 @@
 #include <shellapi.h>
 #include "tray_icon.h"
 #include "action_toolbar.h"
+#include "logger.h"
 
 /* Tray icon state */
 static NOTIFYICONDATAA g_iconData = {0};
@@ -25,9 +26,7 @@ static HICON LoadIconFromICO(const char* filename) {
     return hIcon;
 }
 
-void TrayIcon_Add(HWND controlWnd, HINSTANCE hInstance) {
-    (void)hInstance;  /* Reserved for future use */
-    
+void TrayIcon_Add(HWND controlWnd) {
     g_iconData.cbSize = sizeof(NOTIFYICONDATAA);
     g_iconData.hWnd = controlWnd;
     g_iconData.uID = 1;
@@ -49,14 +48,24 @@ void TrayIcon_Add(HWND controlWnd, HINSTANCE hInstance) {
         }
     }
     
-    g_iconData.hIcon = g_trayHIcon ? g_trayHIcon : LoadIcon(NULL, IDI_APPLICATION);
+    if (!g_trayHIcon) {
+        /* IDI_APPLICATION is an acceptable fallback; log so a missing asset is diagnosable */
+        Logger_Log("TrayIcon_Add: custom icon load failed, using IDI_APPLICATION fallback");
+        g_iconData.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    } else {
+        g_iconData.hIcon = g_trayHIcon;
+    }
     strncpy(g_iconData.szTip, "LWSR - Screen Recorder", sizeof(g_iconData.szTip) - 1);
     g_iconData.szTip[sizeof(g_iconData.szTip) - 1] = '\0';
-    Shell_NotifyIconA(NIM_ADD, &g_iconData);
+    if (!Shell_NotifyIconA(NIM_ADD, &g_iconData)) {
+        Logger_Log("TrayIcon_Add: Shell_NotifyIconA(NIM_ADD) failed, GetLastError=%lu", GetLastError());
+    }
 }
 
 void TrayIcon_Remove(void) {
-    Shell_NotifyIconA(NIM_DELETE, &g_iconData);
+    if (!Shell_NotifyIconA(NIM_DELETE, &g_iconData)) {
+        Logger_Log("TrayIcon_Remove: Shell_NotifyIconA(NIM_DELETE) failed, GetLastError=%lu", GetLastError());
+    }
     if (g_trayHIcon) {
         DestroyIcon(g_trayHIcon);
         g_trayHIcon = NULL;
@@ -75,10 +84,12 @@ void TrayIcon_Minimize(HWND controlWnd, HWND overlayWnd, HWND settingsWnd) {
     g_minimizedToTray = TRUE;
 }
 
+/* NOTE: Asymmetric with TrayIcon_Minimize: only re-shows the control window.
+ * Overlay/action toolbar/settings remain hidden until overlay.c re-shows
+ * them via its own logic (e.g. when the user starts recording/replay). */
 void TrayIcon_Restore(HWND controlWnd) {
     if (!g_minimizedToTray) return;
     
-    /* Show control panel */
     ShowWindow(controlWnd, SW_SHOW);
     SetForegroundWindow(controlWnd);
     

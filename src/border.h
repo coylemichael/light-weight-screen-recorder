@@ -32,7 +32,7 @@ void Border_Flash(void);
 void Border_FlashColor(int r, int g, int b);
 
 // Draggable area selection for custom area mode
-BOOL AreaSelector_Init(HINSTANCE hInstance);
+BOOL AreaSelector_Init(void);
 void AreaSelector_Shutdown(void);
 void AreaSelector_Show(RECT initialRect, BOOL allowMove);  // allowMove=FALSE for locked full-screen views
 void AreaSelector_Hide(void);

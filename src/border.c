@@ -1,6 +1,6 @@
 /*
  * Screen region selection border
- * Provides red recording border, preview border, and draggable area selector
+ * Provides red recording border and draggable area selector
  *
  * ERROR HANDLING PATTERN:
  * - Early return for simple validation checks
@@ -13,6 +13,7 @@
 #include "constants.h"
 #include "logger.h"
 #include "layered_window.h"
+#include "mem_utils.h"
 #include <windowsx.h>  // GET_X_LPARAM, GET_Y_LPARAM
 
 /* ============================================================================
@@ -27,7 +28,6 @@
  * Used during active recording to highlight the capture area.
  */
 typedef struct RecordingBorderState {
-    HINSTANCE hInstance;
     HWND wnd;
     BOOL isVisible;
     RECT currentRect;
@@ -41,8 +41,6 @@ static void UpdateBorderBitmap(int width, int height);
 
 BOOL Border_Init(HINSTANCE hInstance) {
     if (!hInstance) return FALSE;
-    
-    g_recording.hInstance = hInstance;
     
     // Register window class
     WNDCLASSEXA wc = {0};
@@ -92,7 +90,10 @@ static void UpdateBorderBitmapColored(int width, int height, BYTE r, BYTE g, BYT
     if (!g_recording.wnd || width < 1 || height < 1) return;
     
     LayeredBitmap lb = {0};
-    if (!LayeredBitmap_Create(&lb, width, height)) return;
+    if (!LayeredBitmap_Create(&lb, width, height)) {
+        Logger_Log("UpdateBorderBitmapColored: LayeredBitmap_Create failed (%dx%d)\n", width, height);
+        return;
+    }
     
     BYTE a = 255;
     
@@ -168,6 +169,11 @@ void Border_Flash(void) {
 
 void Border_FlashColor(int r, int g, int b) {
     if (!g_recording.isVisible || !g_recording.wnd) return;
+    
+    /* Clamp to valid byte range so out-of-range ints don't wrap silently */
+    if (r < 0) r = 0; else if (r > 255) r = 255;
+    if (g < 0) g = 0; else if (g > 255) g = 255;
+    if (b < 0) b = 0; else if (b > 255) b = 255;
     
     int width = g_recording.currentRect.right - g_recording.currentRect.left;
     int height = g_recording.currentRect.bottom - g_recording.currentRect.top;
@@ -389,8 +395,8 @@ static LRESULT CALLBACK AreaSelectorWndProc(HWND hwnd, UINT msg, WPARAM wParam, 
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
 
-BOOL AreaSelector_Init(HINSTANCE hInstance) {
-    if (!hInstance) return FALSE;
+BOOL AreaSelector_Init(void) {
+    HINSTANCE hInstance = GetModuleHandle(NULL);
     
     WNDCLASSEXA wc = {0};
     wc.cbSize = sizeof(wc);
@@ -417,11 +423,11 @@ void AreaSelector_Shutdown(void) {
     g_area.visible = FALSE;
     
     // Release cached GDI resources
-    if (g_areaFillBrush)   { DeleteObject(g_areaFillBrush);   g_areaFillBrush = NULL; }
-    if (g_areaBorderPen)   { DeleteObject(g_areaBorderPen);   g_areaBorderPen = NULL; }
-    if (g_areaHandleBrush) { DeleteObject(g_areaHandleBrush); g_areaHandleBrush = NULL; }
-    if (g_areaHandlePen)   { DeleteObject(g_areaHandlePen);   g_areaHandlePen = NULL; }
-    if (g_areaFont)        { DeleteObject(g_areaFont);        g_areaFont = NULL; }
+    SAFE_DELETE_OBJECT(g_areaFillBrush);
+    SAFE_DELETE_OBJECT(g_areaBorderPen);
+    SAFE_DELETE_OBJECT(g_areaHandleBrush);
+    SAFE_DELETE_OBJECT(g_areaHandlePen);
+    SAFE_DELETE_OBJECT(g_areaFont);
 }
 
 void AreaSelector_Show(RECT initialRect, BOOL allowMove) {

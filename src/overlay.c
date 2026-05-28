@@ -13,28 +13,18 @@
 #include <windows.h>
 #include <windowsx.h>
 #include <commctrl.h>
-#include <shlobj.h>
 #include <dwmapi.h>
-#include <mmsystem.h>  // For timeBeginPeriod/timeEndPeriod
+#include <mmsystem.h>  /* For PlaySound */
 #include <stdio.h>
 
 #include "action_toolbar.h"
-#include "audio_device.h"
 #include "border.h"
 #include "capture.h"
 #include "gdiplus_api.h"
 
-// Additional GDI+ type for image loading (not in shared API)
-typedef void* GpImage;
-
 /* DWM window corner preference (Windows 11+) */
 #ifndef DWMWA_WINDOW_CORNER_PREFERENCE
 #define DWMWA_WINDOW_CORNER_PREFERENCE 33
-#endif
-
-// OCR_NORMAL not defined in some Windows headers
-#ifndef OCR_NORMAL
-#define OCR_NORMAL 32512
 #endif
 
 #include "overlay.h"
@@ -42,7 +32,6 @@ typedef void* GpImage;
 #include "recording.h"
 #include "config.h"
 #include "replay_buffer.h"
-#include "aac_encoder.h"
 #include "logger.h"
 #include "constants.h"
 #include "ui_draw.h"
@@ -50,10 +39,8 @@ typedef void* GpImage;
 #include "layered_window.h"
 #include "settings_dialog.h"
 #include "markers.h"
-#include "border.h"
 #include "debug_console.h"
 #include "kill_feed_sampler.h"
-#include "constants.h"
 
 
 #pragma comment(lib, "comctl32.lib")
@@ -79,7 +66,6 @@ extern HWND g_controlWnd;
 // Control IDs - overlay specific
 /* ID_MODE_AREA, ID_MODE_WINDOW, ID_MODE_MONITOR, ID_BTN_SETTINGS in overlay.h */
 #define ID_BTN_CLOSE       1005
-#define ID_BTN_STOP        1006
 #define ID_BTN_MINIMIZE    1020
 
 #define ID_BTN_RECORD      1015
@@ -90,12 +76,6 @@ extern HWND g_controlWnd;
 #define ID_TIMER_HOVER     2004  // Timer to update hover state on icon buttons
 #define ID_TIMER_REPLAY_CHECK 2005  // Timer to check replay buffer health
 #define ID_TIMER_AUTOCLIP_DELAY 2006  // Delay before auto-clip save
-
-// Action toolbar button IDs
-#define ID_ACTION_RECORD   3001
-#define ID_ACTION_COPY     3002
-#define ID_ACTION_SAVE     3003
-#define ID_ACTION_MARKUP   3004
 
 // System tray menu IDs (WM_TRAYICON is defined in tray_icon.h)
 #define ID_TRAY_SHOW       6001
@@ -161,8 +141,6 @@ typedef struct OverlayWindowState {
  * InteractionState - UI interaction tracking
  */
 typedef struct InteractionState {
-    BOOL recordingPanelHovered;
-    BOOL waitingForHotkey;
     HWND lastHoveredIconBtn;
     HWND lastHoveredCaptureBtn;
 } InteractionState;
@@ -204,42 +182,8 @@ static void ActionToolbar_OnSettings(void);
 
 /**
  * Check for audio encoder errors after ReplayBuffer_Start and notify user.
- * Shows a MessageBox if audio was requested but encoder failed.
+ * Currently unused; kept removed per code review.
  */
-static void CheckAudioError(void) {
-    if (!g_config.audioEnabled) return;
-    
-    AACEncoderError err = (AACEncoderError)InterlockedCompareExchange(&g_replayBuffer.audioError, 0, 0);
-    if (err == AAC_OK) return;
-    
-    const char* msg = NULL;
-    switch (err) {
-        case AAC_ERR_ENCODER_NOT_FOUND:
-            msg = "AAC audio encoder not available.\n\n"
-                  "Windows Media Foundation AAC encoder is required for audio recording.\n"
-                  "Audio will be disabled for this session.";
-            break;
-        case AAC_ERR_TYPE_NEGOTIATION:
-            msg = "AAC encoder failed to initialize (type negotiation error).\n\n"
-                  "Audio will be disabled for this session.";
-            break;
-        case AAC_ERR_START_STREAM:
-            msg = "AAC encoder failed to start streaming.\n\n"
-                  "Audio will be disabled for this session.";
-            break;
-        case AAC_ERR_MEMORY:
-            msg = "Failed to allocate memory for audio encoder.\n\n"
-                  "Audio will be disabled for this session.";
-            break;
-        default:
-            msg = "Audio encoder initialization failed.\n\n"
-                  "Audio will be disabled for this session.";
-            break;
-    }
-    
-    Logger_Log("Audio encoder error displayed to user: %d\n", (int)err);
-    MessageBoxA(NULL, msg, "Audio Error", MB_OK | MB_ICONWARNING);
-}
 
 // Draw dotted selection rectangle on a DC
 static void DrawSelectionBorder(HDC hdc, RECT* rect) {
@@ -272,8 +216,8 @@ static void UpdateOverlayBitmap(void) {
     // Use 32-bit fill — single pass instead of per-byte writes
     DWORD overlayPixel = 100u << 24;  // alpha=100, RGB=0
     DWORD* pixels32 = (DWORD*)lb.pixels;
-    int pixelCount = width * height;
-    for (int i = 0; i < pixelCount; i++) {
+    size_t pixelCount = (size_t)width * (size_t)height;
+    for (size_t i = 0; i < pixelCount; i++) {
         pixels32[i] = overlayPixel;
     }
     
@@ -742,7 +686,7 @@ BOOL Overlay_Create(HINSTANCE hInstance) {
     UpdateWindow(g_controlWnd);
     
     // Add system tray icon (always visible)
-    TrayIcon_Add(g_controlWnd, hInstance);
+    TrayIcon_Add(g_controlWnd);
     
     return TRUE;
 }
@@ -1285,9 +1229,10 @@ static LRESULT CALLBACK OverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
 }
 
 // Track which mode button is hovered/selected
-static int g_hoveredButton = 0;
 static HFONT g_uiFont = NULL;
-static HFONT g_iconFont = NULL;
+static HFONT g_iconFont = NULL;       /* Segoe MDL2 Assets, size 14 (settings) */
+static HFONT g_iconFontSmall = NULL;  /* Segoe MDL2 Assets, size 12 (min/close) */
+static HBRUSH g_ctlBgBrush = NULL;    /* Cached background brush for WM_CTLCOLOR* */
 
 /* ============================================================================
  * CONTROL PANEL WM_DRAWITEM HELPERS
@@ -1389,15 +1334,12 @@ static void DrawRecordButton(LPDRAWITEMSTRUCT dis, BOOL isRecording, BOOL isDisa
  * @param size    Font size
  */
 static void DrawMDL2IconButton(LPDRAWITEMSTRUCT dis, LPCWSTR icon, int size) {
-    HFONT mdl2Font = CreateFontW(size, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
-        DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-        CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe MDL2 Assets");
-    HFONT oldFont = (HFONT)SelectObject(dis->hDC, mdl2Font);
+    HFONT mdl2Font = (size >= 14) ? g_iconFont : g_iconFontSmall;
+    HFONT oldFont = mdl2Font ? (HFONT)SelectObject(dis->hDC, mdl2Font) : NULL;
     SetBkMode(dis->hDC, TRANSPARENT);
     SetTextColor(dis->hDC, RGB(150, 150, 150));
     DrawTextW(dis->hDC, icon, -1, &dis->rcItem, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
-    SelectObject(dis->hDC, oldFont);
-    DeleteObject(mdl2Font);
+    if (oldFont) SelectObject(dis->hDC, oldFont);
 }
 
 /**
@@ -1470,9 +1412,10 @@ static void DrawRecordingPanel(LPDRAWITEMSTRUCT dis, const char* timerText) {
     
     /* Draw vertical divider at center */
     HPEN dividerPen = CreatePen(PS_SOLID, 1, RGB(80, 80, 80));
-    SelectObject(dis->hDC, dividerPen);
+    HPEN oldDividerPen = (HPEN)SelectObject(dis->hDC, dividerPen);
     MoveToEx(dis->hDC, rect.left + centerX, rect.top + 6, NULL);
     LineTo(dis->hDC, rect.left + centerX, rect.bottom - 6);
+    SelectObject(dis->hDC, oldDividerPen);
     DeleteObject(dividerPen);
     
     /* Right half: red stop square + "Stop" (centered) */
@@ -1507,7 +1450,10 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
             g_iconFont = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI Symbol");
+                CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe MDL2 Assets");
+            g_iconFontSmall = CreateFontW(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
+                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
+                CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe MDL2 Assets");
             
             // Create mode buttons (owner-drawn for Snipping Tool style)
             // Layout: [Capture Area][Capture Window][Capture Monitor] ... [Settings - O X]
@@ -1694,9 +1640,6 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
                 case ID_BTN_MINIMIZE:
                     // Minimize to system tray
                     TrayIcon_Minimize(g_controlWnd, g_overlayWnd, g_windows.settingsWnd);
-                    break;
-                case ID_BTN_STOP:
-                    Overlay_StopRecording();
                     break;
                 case ID_RECORDING_PANEL:
                     // Click on recording panel stops recording - thread-safe check
@@ -1931,9 +1874,8 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             HDC hdcCtrl = (HDC)wParam;
             SetBkMode(hdcCtrl, TRANSPARENT);
             SetTextColor(hdcCtrl, RGB(255, 255, 255));
-            static HBRUSH hBrush = NULL;
-            if (!hBrush) hBrush = CreateSolidBrush(RGB(32, 32, 32));
-            return (LRESULT)hBrush;
+            if (!g_ctlBgBrush) g_ctlBgBrush = CreateSolidBrush(RGB(32, 32, 32));
+            return (LRESULT)g_ctlBgBrush;
         }
         
         case WM_HOTKEY: {
@@ -2171,8 +2113,10 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             return 0;
         
         case WM_DESTROY:
-            if (g_uiFont) DeleteObject(g_uiFont);
-            if (g_iconFont) DeleteObject(g_iconFont);
+            if (g_uiFont) { DeleteObject(g_uiFont); g_uiFont = NULL; }
+            if (g_iconFont) { DeleteObject(g_iconFont); g_iconFont = NULL; }
+            if (g_iconFontSmall) { DeleteObject(g_iconFontSmall); g_iconFontSmall = NULL; }
+            if (g_ctlBgBrush) { DeleteObject(g_ctlBgBrush); g_ctlBgBrush = NULL; }
             return 0;
     }
     

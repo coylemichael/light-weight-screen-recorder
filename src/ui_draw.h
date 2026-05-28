@@ -9,8 +9,8 @@
 
 #include <windows.h>
 
-/* Convert COLORREF to ARGB format for GDI+ */
-DWORD ColorRefToARGB(COLORREF cr, BYTE alpha);
+/* Convert COLORREF to ARGB format for GDI+ (opaque, alpha=255) */
+DWORD ColorRefToARGB(COLORREF cr);
 
 /* Draw anti-aliased filled rounded rectangle */
 void DrawRoundedRectAA(HDC hdc, RECT* rect, int radius, COLORREF fillColor, COLORREF borderColor);

@@ -1,10 +1,12 @@
 /*
- * action_toolbar.c - Custom action toolbar with smooth rounded corners
+ * action_toolbar.c - Custom floating toolbar with smooth rounded corners for selection UI
  * Uses layered window with per-pixel alpha for anti-aliased transparency
  *
  * ERROR HANDLING PATTERN:
  * - Early return for simple validation checks
- * - GDI+ function return codes checked (GpStatus != Ok)
+ * - GDI+ status checked only on the critical-path entry points
+ *   (CreatePath, CreateFromHDC); downstream calls are guarded by out-param
+ *   NULL checks instead of inspecting every GpStatus
  * - Window creation failures return FALSE
  * - GDI/GDI+ resource cleanup in shutdown function
  * - Returns BOOL to propagate errors; callers must check
@@ -31,12 +33,11 @@ typedef DWORD ARGB;
  */
 
 /* Button definitions */
-#define BTN_COUNT 5
+#define BTN_COUNT 4
 #define BTN_MINIMIZE 0
 #define BTN_RECORD   1
 #define BTN_CLOSE    2
 #define BTN_SETTINGS 3
-#define BTN_UNUSED   4  /* Reserved */
 
 typedef struct {
     RECT rect;
@@ -134,12 +135,16 @@ static void PaintToolbar(HDC hdc, int width, int height) {
         g_gdip.DeletePath(bgPath);
     }
     
-    // Create cached font resources on first paint
+    // Create cached font resources on first paint. Each resource is gated
+    // independently so a partial failure (e.g. family OK but font NULL) does
+    // not permanently suppress retries on later paints.
     if (!g_cachedFontFamily) {
         g_gdip.CreateFontFamilyFromName(L"Segoe UI", NULL, &g_cachedFontFamily);
-        if (g_cachedFontFamily) {
-            g_gdip.CreateFont(g_cachedFontFamily, 11.0f, 0, 2, &g_cachedFont);
-        }
+    }
+    if (g_cachedFontFamily && !g_cachedFont) {
+        g_gdip.CreateFont(g_cachedFontFamily, 11.0f, 0, 2, &g_cachedFont);
+    }
+    if (!g_cachedFormat) {
         g_gdip.CreateStringFormat(0, 0, &g_cachedFormat);
         if (g_cachedFormat) {
             g_gdip.SetStringFormatAlign(g_cachedFormat, 1); // StringAlignmentCenter
@@ -243,9 +248,6 @@ static LRESULT CALLBACK ToolbarWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             g_ui.buttons[BTN_SETTINGS].rect.top = (TOOLBAR_HEIGHT - BTN_HEIGHT) / 2;
             g_ui.buttons[BTN_SETTINGS].rect.right = x + settingsBtnWidth;
             g_ui.buttons[BTN_SETTINGS].rect.bottom = g_ui.buttons[BTN_SETTINGS].rect.top + BTN_HEIGHT;
-            
-            // BTN_UNUSED has zero rect (not displayed)
-            g_ui.buttons[BTN_UNUSED].rect = (RECT){0, 0, 0, 0};
             return 0;
         }
         
@@ -319,6 +321,8 @@ BOOL ActionToolbar_Init(HINSTANCE hInstance) {
     if (g_ui.initialized) return TRUE;
     
     g_ui.hInstance = hInstance;
+    g_ui.hoveredButton = -1;
+    g_ui.pressedButton = -1;
     
     // GDI+ is now initialized globally via g_gdip in main.c
     if (!g_gdip.initialized) return FALSE;

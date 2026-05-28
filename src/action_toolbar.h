@@ -23,7 +23,7 @@ void ActionToolbar_Hide(void);
 // onMinimize: called when "-" button clicked (minimize to tray)
 // onRecord: called when record button clicked
 // onClose: called when "X" button clicked
-// onSettings: called when "..." button clicked
+// onSettings: called when "Settings" button clicked
 void ActionToolbar_SetCallbacks(void (*onMinimize)(void), void (*onRecord)(void), 
                                  void (*onClose)(void), void (*onSettings)(void));
 

@@ -86,6 +86,15 @@
         } \
     } while (0)
 
+/* For GDI objects (HBRUSH, HPEN, HFONT, HBITMAP, etc.) */
+#define SAFE_DELETE_OBJECT(h) \
+    do { \
+        if ((h) != NULL) { \
+            DeleteObject(h); \
+            (h) = NULL; \
+        } \
+    } while (0)
+
 /* ============================================================================
  * ALLOCATION RESULT CHECKING
  * ============================================================================
