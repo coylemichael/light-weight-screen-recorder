@@ -7,7 +7,16 @@
 
 #include <windows.h>
 
-/* Settings window dimensions */
+/* Settings window dimensions
+ *
+ * SETTINGS_HEIGHT budget (re-measured 2026-05-28):
+ *   General tab content stack ends ~y=420 (tallest tab).
+ *   Video tab content stack ends ~y=360.
+ *   Add WS_BORDER non-client (~24) + safety (~10) → ~454.
+ *   Current value of 600 leaves ~146px headroom.
+ *   IF YOU ADD CONTROLS TO ANY TAB: re-measure layout->y after the last
+ *   AddToSection() call and confirm total stays under SETTINGS_HEIGHT - 34.
+ */
 #define SETTINGS_WIDTH  620
 #define SETTINGS_HEIGHT 600
 

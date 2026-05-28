@@ -95,6 +95,15 @@ void Logger_Log(const char* fmt, ...);
 #define MF_UNITS_PER_SECOND         10000000LL
 
 /* ============================================================================
+ * GLOBAL HOTKEY IDS
+ * ============================================================================
+ * Shared by main.c (register/unregister), overlay.c (WM_HOTKEY dispatch),
+ * and settings_dialog.c (re-register on key rebind).
+ */
+#define HOTKEY_REPLAY_SAVE          1
+#define HOTKEY_MARKER               2
+
+/* ============================================================================
  * PIXEL FORMAT SIZES
  * ============================================================================
  * 
@@ -227,6 +236,7 @@ void Logger_Log(const char* fmt, ...);
 #define INITIAL_AUDIO_CAPACITY          1024
 #define AUDIO_CAPACITY_GROWTH_FACTOR    2
 #define AUDIO_MIX_CHUNK_SIZE            4096
+#define MAX_AUDIO_SAMPLES               16384
 
 /* ============================================================================
  * AUDIO FORMAT CONSTANTS - Sample Value Normalization

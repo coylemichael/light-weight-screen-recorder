@@ -1,8 +1,8 @@
 /*
- * replay_buffer.h - Instant Replay (ShadowPlay-style)
- * 
+ * replay_buffer.h - Orchestrates capture→encode→buffer→save pipeline (replay mode)
+ *
  * USES: nvenc_encoder, gpu_converter, frame_buffer, mp4_muxer (batch)
- * 
+ *
  * Continuously captures to RAM ring buffer; saves last N seconds on demand.
  * State machine with event-based synchronization for thread safety.
  */
@@ -12,11 +12,9 @@
 
 #include <windows.h>
 #include "config.h"
+#include "constants.h"    // For MAX_AUDIO_SAMPLES
 #include "markers.h"
 #include "aac_encoder.h"  // For AACEncoderError
-
-// Maximum encoded audio samples to store
-#define MAX_AUDIO_SAMPLES 16384
 
 // Minimum frames required before save is allowed (1 second worth)
 #define MIN_FRAMES_FOR_SAVE 30
@@ -51,15 +49,13 @@ typedef struct {
     
     // Save parameters (protected by hSaveRequestEvent sequencing)
     char savePath[MAX_PATH];
-    volatile BOOL saveSuccess;  // Result of last save
-    
+    volatile LONG saveSuccess;  // Result of last save (BOOL stored as LONG for Interlocked ops)
+    volatile LONG savePending;  // CAS guard: 1 while a save is queued/in-flight, 0 otherwise
+
     // Legacy compatibility
     BOOL isBuffering;
-    volatile BOOL bufferReady;
-    
-    int frameWidth;
-    int frameHeight;
-    
+    volatile LONG bufferReady;  // BOOL stored as LONG for Interlocked ops
+
     // Audio state
     BOOL audioEnabled;
     char audioSource1[256];
@@ -88,6 +84,12 @@ BOOL ReplayBuffer_Init(ReplayBufferState* state);
 void ReplayBuffer_Shutdown(ReplayBufferState* state);
 BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config);
 void ReplayBuffer_Stop(ReplayBufferState* state);
+
+/* Returns TRUE while the buffer thread holds NVENC / capture resources
+ * (STARTING, CAPTURING, or STOPPING). Used by Recording_Start to enforce
+ * the "never start recording while replay buffer is running" rule and
+ * avoid the documented deadlock on shared NVENC state. Thread-safe. */
+BOOL ReplayBuffer_IsActive(const ReplayBufferState* state);
 
 // Asynchronous save (returns immediately, posts notifyMessage when done)
 // wParam = success (BOOL), lParam = 0

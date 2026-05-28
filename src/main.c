@@ -131,9 +131,9 @@ HWND g_overlayWnd = NULL;
 HWND g_controlWnd = NULL;
 
 /* Hotkey ID for replay save */
-#define HOTKEY_REPLAY_SAVE 1
+/* HOTKEY_REPLAY_SAVE, HOTKEY_MARKER defined in constants.h */
 /* Hotkey ID for marker */
-#define HOTKEY_MARKER 2
+
 
 /*
  * Debug mode flag (enabled via --debug CLI argument).

@@ -1,8 +1,8 @@
 /*
- * recording.h - Traditional Recording (NVENC Hardware Path)
- * 
+ * recording.h - Direct-to-disk NVENC recording (thread, start/stop, state machine)
+ *
  * USES: nvenc_encoder, gpu_converter, mp4_muxer (streaming)
- * 
+ *
  * Direct-to-disk recording; writes frames as they arrive.
  * Symmetric with replay_buffer.h - both use same encoding modules.
  * Audio recording is handled by replay_buffer only (by design).
@@ -35,7 +35,8 @@ typedef struct {
     
     // Thread management
     HANDLE thread;
-    volatile LONG stopRequested;    // Thread-safe stop flag
+    HANDLE hStopEvent;              // Auto-reset event; signals capture thread to exit
+    volatile LONG stopRequested;    // Legacy flag; retained for IsActive-style probes
     
     // Video pipeline (owned)
     NVENCEncoder* encoder;          // NVENC hardware encoder
@@ -59,13 +60,9 @@ typedef struct {
     // Stats
     volatile LONG framesCaptured;
     volatile LONG framesEncoded;
-    
-    // Markers
+
+    // Markers (managed externally by overlay.c via Markers_* API)
     MarkerList markers;
-    
-    // Callbacks for UI notification (optional)
-    HWND notifyWindow;
-    UINT notifyMessage;             // Posted when recording stops
 } RecordingState;
 
 // Initialize recording state (call once at startup)

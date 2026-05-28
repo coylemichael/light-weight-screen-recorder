@@ -1,8 +1,8 @@
 /*
- * replay_buffer.c - Instant Replay (ShadowPlay-style)
- * 
+ * replay_buffer.c - Orchestrates capture→encode→buffer→save pipeline (replay mode)
+ *
  * USES: nvenc_encoder.c, gpu_converter.c, frame_buffer.c, mp4_muxer.c (batch)
- * 
+ *
  * Continuously captures to RAM-based circular buffer of encoded HEVC frames.
  * On save: muxes buffered frames to MP4 (no re-encoding needed).
  * Pipeline: DXGI capture → GPU color convert → NVENC → FrameBuffer ring
@@ -157,7 +157,7 @@ static void AudioEncoderCallback(const AACSample* sample, void* userData) {
             /* Evict oldest sample */
             if (audio->samples[0].data) {
                 LEAK_TRACK_AAC_SAMPLE_FREE();
-                free(audio->samples[0].data);
+                SAFE_FREE(audio->samples[0].data);
             }
             memmove(audio->samples, audio->samples + 1, 
                     (audio->sampleCount - 1) * sizeof(MuxerAudioSample));
@@ -190,7 +190,7 @@ static void AudioEncoderCallback(const AACSample* sample, void* userData) {
             for (int i = 0; i < toRemove && i < audio->sampleCount; i++) {
                 if (audio->samples[i].data) {
                     LEAK_TRACK_AAC_SAMPLE_FREE();
-                    free(audio->samples[i].data);
+                    SAFE_FREE(audio->samples[i].data);
                 }
             }
             
@@ -252,7 +252,7 @@ static void PerSourceEncoderCallback(const AACSample* sample, void* userData) {
             LONGLONG span = sample->timestamp - oldest;
             if (span <= audio->maxDuration) break;
             
-            if (audio->perSourceSamples[idx][0].data) free(audio->perSourceSamples[idx][0].data);
+            if (audio->perSourceSamples[idx][0].data) SAFE_FREE(audio->perSourceSamples[idx][0].data);
             memmove(audio->perSourceSamples[idx], audio->perSourceSamples[idx] + 1,
                     (audio->perSourceSampleCount[idx] - 1) * sizeof(MuxerAudioSample));
             audio->perSourceSampleCount[idx]--;
@@ -281,7 +281,7 @@ static void PerSourceEncoderCallback(const AACSample* sample, void* userData) {
             int toKeep = (int)(newCap * EMERGENCY_KEEP_FRACTION);
             int toRemove = audio->perSourceSampleCount[idx] - toKeep;
             for (int i = 0; i < toRemove; i++) {
-                if (audio->perSourceSamples[idx][i].data) free(audio->perSourceSamples[idx][i].data);
+                if (audio->perSourceSamples[idx][i].data) SAFE_FREE(audio->perSourceSamples[idx][i].data);
             }
             memmove(audio->perSourceSamples[idx], audio->perSourceSamples[idx] + toRemove,
                     toKeep * sizeof(MuxerAudioSample));
@@ -332,6 +332,15 @@ BOOL ReplayBuffer_Init(ReplayBufferState* state) {
     if (!state) return FALSE;
     ZeroMemory(state, sizeof(ReplayBufferState));
     
+    /* Re-init robustness: tear down a prior critical section before re-zero,
+     * otherwise a second Init without an intervening Shutdown would leak the CS
+     * and re-Initialize over a live one. */
+    if (g_internal.audio.lockInitialized) {
+        ReplayLog("ReplayBuffer_Init: prior audio CS still initialized, tearing it down\n");
+        DeleteCriticalSection(&g_internal.audio.lock);
+        g_internal.audio.lockInitialized = FALSE;
+    }
+    
     /* Initialize internal state structure */
     ZeroMemory(&g_internal, sizeof(g_internal));
     
@@ -379,10 +388,9 @@ void ReplayBuffer_Shutdown(ReplayBufferState* state) {
         EnterCriticalSection(&audio->lock);
         if (audio->samples) {
             for (int i = 0; i < audio->sampleCount; i++) {
-                if (audio->samples[i].data) free(audio->samples[i].data);
+                if (audio->samples[i].data) SAFE_FREE(audio->samples[i].data);
             }
-            free(audio->samples);
-            audio->samples = NULL;
+            SAFE_FREE(audio->samples);
         }
         audio->sampleCount = 0;
         audio->sampleCapacity = 0;
@@ -412,8 +420,11 @@ BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
     /* Copy audio settings */
     state->audioEnabled = config->audioEnabled;
     strncpy(state->audioSource1, config->audioSource1, sizeof(state->audioSource1) - 1);
+    state->audioSource1[sizeof(state->audioSource1) - 1] = '\0';
     strncpy(state->audioSource2, config->audioSource2, sizeof(state->audioSource2) - 1);
+    state->audioSource2[sizeof(state->audioSource2) - 1] = '\0';
     strncpy(state->audioSource3, config->audioSource3, sizeof(state->audioSource3) - 1);
+    state->audioSource3[sizeof(state->audioSource3) - 1] = '\0';
     state->audioVolume1 = config->audioVolume1;
     state->audioVolume2 = config->audioVolume2;
     state->audioVolume3 = config->audioVolume3;
@@ -430,7 +441,8 @@ BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
     InterlockedExchange(&state->state, REPLAY_STATE_STARTING);
     InterlockedExchange(&state->framesCaptured, 0);
     InterlockedExchange(&state->audioError, AAC_OK);  // Reset audio error
-    state->saveSuccess = FALSE;
+    InterlockedExchange(&state->saveSuccess, FALSE);
+    InterlockedExchange(&state->savePending, 0);
     state->savePath[0] = '\0';
     Markers_Init(&state->markers);
     
@@ -440,15 +452,14 @@ BOOL ReplayBuffer_Start(ReplayBufferState* state, const AppConfig* config) {
     ResetEvent(state->hStopEvent);
     
     /* Legacy flags */
-    state->bufferReady = FALSE;
+    InterlockedExchange(&state->bufferReady, FALSE);
     
     /* Reset audio buffer using new struct */
     ReplayAudioState* audio = &g_internal.audio;
     EnterCriticalSection(&audio->lock);
     for (int i = 0; i < audio->sampleCount; i++) {
         if (audio->samples[i].data) {
-            free(audio->samples[i].data);
-            audio->samples[i].data = NULL;
+            SAFE_FREE(audio->samples[i].data);
         }
     }
     audio->sampleCount = 0;
@@ -500,10 +511,17 @@ void ReplayBuffer_Stop(ReplayBufferState* state) {
             }
         }
         
-        CloseHandle(state->bufferThread);
-        state->bufferThread = NULL;
+        SAFE_CLOSE_HANDLE(state->bufferThread);
     }
     state->isBuffering = FALSE;
+}
+
+BOOL ReplayBuffer_IsActive(const ReplayBufferState* state) {
+    if (!state) return FALSE;
+    LONG s = InterlockedCompareExchange((volatile LONG*)&state->state, 0, 0);
+    return (s == REPLAY_STATE_STARTING ||
+            s == REPLAY_STATE_CAPTURING ||
+            s == REPLAY_STATE_STOPPING);
 }
 
 BOOL ReplayBuffer_SaveAsync(ReplayBufferState* state, const char* outputPath,
@@ -533,10 +551,18 @@ BOOL ReplayBuffer_SaveAsync(ReplayBufferState* state, const char* outputPath,
         return FALSE;
     }
     
+    /* CAS guard: reject if a save is already pending/in-flight. This closes
+     * the producer/consumer race on savePath / notifyWindow / notifyMessage.
+     * The buffer thread clears savePending after PostMessage completes. */
+    if (InterlockedCompareExchange(&state->savePending, 1, 0) != 0) {
+        ReplayLog("SaveAsync rejected: prior save still pending\n");
+        return FALSE;
+    }
+    
     // Set up save parameters and notification target
     strncpy(state->savePath, outputPath, MAX_PATH - 1);
     state->savePath[MAX_PATH - 1] = '\0';
-    state->saveSuccess = FALSE;
+    InterlockedExchange(&state->saveSuccess, FALSE);
     state->notifyWindow = notifyWindow;
     state->notifyMessage = notifyMessage;
     
@@ -809,10 +835,9 @@ static void ShutdownAudioPipeline(ReplayAudioState* audio) {
         if (audio->perSourceLocksInit[i]) {
             EnterCriticalSection(&audio->perSourceLocks[i]);
             for (int j = 0; j < audio->perSourceSampleCount[i]; j++) {
-                if (audio->perSourceSamples[i][j].data) free(audio->perSourceSamples[i][j].data);
+                if (audio->perSourceSamples[i][j].data) SAFE_FREE(audio->perSourceSamples[i][j].data);
             }
-            free(audio->perSourceSamples[i]);
-            audio->perSourceSamples[i] = NULL;
+            SAFE_FREE(audio->perSourceSamples[i]);
             audio->perSourceSampleCount[i] = 0;
             audio->perSourceSampleCapacity[i] = 0;
             LeaveCriticalSection(&audio->perSourceLocks[i]);
@@ -884,6 +909,10 @@ static BOOL CopyAudioSamplesForMuxing(ReplayAudioState* audio, MuxerAudioSample*
     int copiedCount = 0;
     
     for (int i = 0; i < audioCount; i++) {
+        /* Defensive: skip zero-size or null entries (callback should already reject them) */
+        if (audio->samples[i].size <= 0 || !audio->samples[i].data) {
+            continue;
+        }
         audioCopy[i].data = (BYTE*)malloc(audio->samples[i].size);
         if (audioCopy[i].data) {
             memcpy(audioCopy[i].data, audio->samples[i].data, audio->samples[i].size);
@@ -985,6 +1014,9 @@ static BOOL CopyPerSourceSamplesForMuxing(ReplayAudioState* audio, int srcIdx,
     
     for (int i = 0; i < count; i++) {
         MuxerAudioSample* src = &audio->perSourceSamples[srcIdx][i];
+        if (src->size <= 0 || !src->data) {
+            continue;
+        }
         copy[i].data = (BYTE*)malloc(src->size);
         if (copy[i].data) {
             memcpy(copy[i].data, src->data, src->size);
@@ -1130,13 +1162,19 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     ReplayBufferState* state = (ReplayBufferState*)param;
     if (!state) return 1;
     
-    /* Initialize COM on this thread for WASAPI audio device access */
+    /* Initialize COM on this thread for WASAPI audio device access.
+     * Track whether this call actually acquired an init reference so we only
+     * call CoUninitialize() when paired with a successful init. Per MSDN,
+     * RPC_E_CHANGED_MODE means the thread was already initialized by someone
+     * else with a different concurrency model — we did NOT take a reference
+     * and must NOT uninitialize. */
     HRESULT hrCom = CoInitializeEx(NULL, COINIT_MULTITHREADED);
     if (FAILED(hrCom) && hrCom != RPC_E_CHANGED_MODE) {
         ReplayLog("BufferThread: CoInitializeEx failed (0x%08X)\n", hrCom);
         InterlockedExchange(&state->state, REPLAY_STATE_ERROR);
         return 1;
     }
+    BOOL coInitialized = (hrCom == S_OK || hrCom == S_FALSE);
     
     /* Reset internal state at start of each run to prevent stale state
      * NOTE: We only zero the video state, not audio state.
@@ -1162,7 +1200,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     if (!InitCaptureRegion(state, capture, &rect)) {
         ReplayLog("InitCaptureRegion failed\n");
         InterlockedExchange(&state->state, REPLAY_STATE_ERROR);
-        CoUninitialize();
+        if (coInitialized) CoUninitialize();
         return 1;
     }
     
@@ -1178,7 +1216,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     if (width <= 0 || height <= 0) {
         ReplayLog("Invalid capture size: %dx%d\n", width, height);
         InterlockedExchange(&state->state, REPLAY_STATE_ERROR);
-        CoUninitialize();
+        if (coInitialized) CoUninitialize();
         return 1;
     }
     
@@ -1187,7 +1225,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
         ReplayLog("Capture_SetRegion failed - cannot capture region %d,%d,%d,%d\n",
                   rect.left, rect.top, rect.right, rect.bottom);
         InterlockedExchange(&state->state, REPLAY_STATE_ERROR);
-        CoUninitialize();
+        if (coInitialized) CoUninitialize();
         return 1;
     }
     
@@ -1196,9 +1234,6 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     // capture's actual dimensions guarantees zero resizing in the pipeline.
     width = capture->captureWidth;
     height = capture->captureHeight;
-    
-    state->frameWidth = width;
-    state->frameHeight = height;
     
     int fps = g_config.replayFPS;
     if (fps < MIN_FPS) fps = MIN_FPS;
@@ -1213,7 +1248,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     
     if (!InitVideoPipeline(capture, video, &gpuConverter, width, height, fps)) {
         InterlockedExchange(&state->state, REPLAY_STATE_ERROR);
-        CoUninitialize();
+        if (coInitialized) CoUninitialize();
         return 1;
     }
     
@@ -1263,7 +1298,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     // Transition to CAPTURING state and signal ready
     // (but don't signal hReadyEvent until we have frames)
     InterlockedExchange(&state->state, REPLAY_STATE_CAPTURING);
-    state->bufferReady = TRUE;  // Legacy flag
+    InterlockedExchange(&state->bufferReady, TRUE);  // Legacy flag (atomic write)
     ReplayLog("Buffer thread ready, entering capture loop\n");
     
     // Build wait handle array for event-driven loop
@@ -1293,27 +1328,43 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
             double realElapsedSec = (double)(nowTime.QuadPart - captureStartTime.QuadPart) / perfFreq.QuadPart;
             double actualFPS = (realElapsedSec > 0) ? frameCount / realElapsedSec : 0;
             
+            /* Snapshot audio->sampleCount under its lock — diagnostic-only read,
+             * but still racy without the lock since audio thread mutates it. */
+            int audioSampleSnapshot = 0;
+            EnterCriticalSection(&audio->lock);
+            audioSampleSnapshot = audio->sampleCount;
+            LeaveCriticalSection(&audio->lock);
+            
             ReplayLog("SAVE REQUEST: %d video samples (%.2fs), %d audio samples, after %.2fs real time\n", 
-                      count, duration, audio->sampleCount, realElapsedSec);
+                      count, duration, audioSampleSnapshot, realElapsedSec);
             ReplayLog("  Actual capture rate: %.2f fps (target: %d fps)\n", actualFPS, fps);
             ReplayLog("  Output path: %s\n", state->savePath);
             
             /* Use helper function for save operation */
-            state->saveSuccess = HandleSaveRequest(state, video, audio);
+            BOOL saveOk = HandleSaveRequest(state, video, audio);
+            InterlockedExchange(&state->saveSuccess, saveOk);
+            
+            /* Snapshot notification target before signaling/clearing so a fast
+             * second SaveAsync cannot race the read against its own write.
+             * SaveAsync gates new requests on savePending until we clear it below. */
+            HWND notifyWnd = state->notifyWindow;
+            UINT notifyMsg = state->notifyMessage;
+            state->notifyWindow = NULL;
+            state->notifyMessage = 0;
             
             /* Signal completion event (for sync API) */
             SetEvent(state->hSaveCompleteEvent);
             
             /* Post async notification if window was specified */
-            if (state->notifyWindow && state->notifyMessage) {
-                PostMessage(state->notifyWindow, state->notifyMessage, 
-                           (WPARAM)state->saveSuccess, 0);
+            if (notifyWnd && notifyMsg) {
+                PostMessage(notifyWnd, notifyMsg, (WPARAM)saveOk, 0);
                 ReplayLog("Posted save completion to hwnd=%p msg=%u success=%d\n",
-                          (void*)state->notifyWindow, state->notifyMessage, state->saveSuccess);
-                /* Clear notification target to prevent duplicate posts */
-                state->notifyWindow = NULL;
-                state->notifyMessage = 0;
+                          (void*)notifyWnd, notifyMsg, saveOk);
             }
+            
+            /* Release the SaveAsync gate now that savePath/notify slots are
+             * free to reuse and the completion notification has been posted. */
+            InterlockedExchange(&state->savePending, 0);
             
             continue;  /* Skip frame capture this iteration */
         }
@@ -1434,8 +1485,10 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                         if (stabilizeWait == WAIT_OBJECT_0 + 1) {
                             // Save requested during reinit - can't save with stale data
                             ReplayLog("Save requested during reinit - rejecting (access lost)\n");
-                            state->saveSuccess = FALSE;
+                            InterlockedExchange(&state->saveSuccess, FALSE);
                             SetEvent(state->hSaveCompleteEvent);
+                            /* Release SaveAsync gate so caller can retry once reinit completes */
+                            InterlockedExchange(&state->savePending, 0);
                         }
                         
                         if (Capture_ReinitDuplication(capture)) {
@@ -1528,7 +1581,7 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     }
     ShutdownVideoPipeline(video, &gpuConverter);
     
-    CoUninitialize();
+    if (coInitialized) CoUninitialize();
     ReplayLog("BufferThread exit\n");
     return 0;
 }

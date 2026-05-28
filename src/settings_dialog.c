@@ -8,7 +8,6 @@
 #define WIN32_LEAN_AND_MEAN
 #define COBJMACROS
 #include <windows.h>
-#include <windowsx.h>
 #include <commctrl.h>
 #include <shlobj.h>
 #include <stdio.h>
@@ -21,6 +20,7 @@
 #include "replay_buffer.h"
 #include "logger.h"
 #include "constants.h"
+#include "mem_utils.h"
 #include "overlay.h"
 #include "debug_console.h"
 
@@ -48,9 +48,7 @@ extern void SaveAreaSelectorPosition(void);
 static void AutoClipRegionOverlay_Show(void);
 static void AutoClipRegionOverlay_Hide(void);
 
-/* Hotkey ID (must match main.c/overlay.c) */
-#define HOTKEY_REPLAY_SAVE 1
-#define HOTKEY_MARKER 2
+/* Hotkey IDs HOTKEY_REPLAY_SAVE, HOTKEY_MARKER defined in constants.h */
 
 /* ============================================================================
  * MODULE-LEVEL STATE
@@ -59,8 +57,8 @@ static void AutoClipRegionOverlay_Hide(void);
 static HWND s_settingsWnd = NULL;
 static HFONT s_settingsFont = NULL;
 static HFONT s_settingsSmallFont = NULL;
-static HFONT s_settingsTitleFont = NULL;
 static HBRUSH s_settingsBgBrush = NULL;
+static HBRUSH s_editBrush = NULL;
 static HINSTANCE s_hInstance = NULL;
 static HWND* s_externalHandleRef = NULL;  /* For updating caller's reference */
 
@@ -335,8 +333,12 @@ typedef struct {
  * Add a control to a section's control array for show/hide management.
  */
 static void AddToSection(HWND hwnd, HWND* controls, int* count) {
+    LWSR_ASSERT(*count < MAX_SECTION_CONTROLS);
     if (*count < MAX_SECTION_CONTROLS) {
         controls[(*count)++] = hwnd;
+    } else {
+        Logger_Log("AddToSection: MAX_SECTION_CONTROLS (%d) exceeded; control dropped\n",
+                   MAX_SECTION_CONTROLS);
     }
 }
 
@@ -1080,21 +1082,49 @@ static DWORD WINAPI ReplayReloadWorker(LPVOID param) {
     return 0;
 }
 
+/* Schedule an async replay buffer Stop/Start.
+ * Used by FPS, audio source 1/2/3, and duration-on-close handlers.
+ * In-place Stop/Start on the UI thread races the buffer thread and leaks
+ * the NVENC encoder when Stop times out (crash 2026-05-27).
+ * The in-flight guard collapses rapid edits into one reload; the worker
+ * re-reads g_config when it runs, so the final values win. */
+static void ScheduleReplayReload(const char* reason) {
+    if (!g_config.replayEnabled || !g_replayBuffer.isBuffering) return;
+    if (InterlockedCompareExchange(&s_replayReloadInFlight, 1, 0) != 0) {
+        Logger_Log("ScheduleReplayReload(%s): reload already in flight, skipping\n",
+                   reason ? reason : "?");
+        return;
+    }
+    Logger_Log("ScheduleReplayReload(%s): dispatching worker (async)\n",
+               reason ? reason : "?");
+    HANDLE hThr = CreateThread(NULL, 0, ReplayReloadWorker, NULL, 0, NULL);
+    if (hThr) {
+        CloseHandle(hThr);
+    } else {
+        Logger_Log("ScheduleReplayReload: CreateThread failed, falling back to inline\n");
+        ReplayReloadWorker(NULL);
+    }
+}
+
 static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARAM lParam) {
     switch (msg) {
         case WM_CREATE: {
             s_replayDurationAtOpen = g_config.replayDuration;
-            /* Create fonts */
+            /* Create fonts (NULL-checked: GDI failures yield NULL handles that
+             * silently no-op on WM_SETFONT — log so failures aren't invisible). */
             s_settingsFont = CreateFontW(14, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
             s_settingsSmallFont = CreateFontW(12, 0, 0, 0, FW_NORMAL, FALSE, FALSE, FALSE,
                 DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
                 CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
-            s_settingsTitleFont = CreateFontW(16, 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE,
-                DEFAULT_CHARSET, OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS,
-                CLEARTYPE_QUALITY, DEFAULT_PITCH | FF_DONTCARE, L"Segoe UI");
             s_settingsBgBrush = CreateSolidBrush(RGB(32, 32, 32));
+            s_editBrush = CreateSolidBrush(RGB(45, 45, 45));
+            if (!s_settingsFont || !s_settingsSmallFont || !s_settingsBgBrush || !s_editBrush) {
+                Logger_Log("WM_CREATE: GDI allocation failed (font=%p smallFont=%p bg=%p edit=%p)\n",
+                           (void*)s_settingsFont, (void*)s_settingsSmallFont,
+                           (void*)s_settingsBgBrush, (void*)s_editBrush);
+            }
             
             /* Initialize layout parameters - same starting position for all tabs */
             SettingsLayout layout = {
@@ -1120,8 +1150,8 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             SettingsLayout audioLayout = layout;
             CreateAudioSection(hwnd, &audioLayout);
             
-            /* Show default tab (General) and update RAM estimate */
-            s_currentTab = SETTINGS_TAB_GENERAL;
+            /* Show default tab (General) and update RAM estimate.
+             * SwitchToTab assigns s_currentTab itself; no separate assignment needed. */
             SwitchToTab(SETTINGS_TAB_GENERAL);
             UpdateReplayRAMEstimate(hwnd);
             
@@ -1155,9 +1185,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             HDC hdc = (HDC)wParam;
             SetTextColor(hdc, RGB(220, 220, 220));
             SetBkColor(hdc, RGB(45, 45, 45));
-            static HBRUSH editBrush = NULL;
-            if (!editBrush) editBrush = CreateSolidBrush(RGB(45, 45, 45));
-            return (LRESULT)editBrush;
+            return (LRESULT)s_editBrush;
         }
         
         case WM_COMMAND: {
@@ -1200,10 +1228,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         if (SHGetPathFromIDListW(pidl, path)) {
                             char pathA[MAX_PATH];
                             WideCharToMultiByte(CP_ACP, 0, path, -1, pathA, MAX_PATH, NULL, NULL);
+                            pathA[MAX_PATH - 1] = '\0';
                             SetWindowTextA(GetDlgItem(hwnd, ID_EDT_PATH), pathA);
                             strncpy(g_config.savePath, pathA, MAX_PATH - 1);
+                            g_config.savePath[MAX_PATH - 1] = '\0';
                         }
-                        CoTaskMemFree(pidl);
+                        SAFE_COTASKMEM_FREE(pidl);
                     }
                     break;
                 }
@@ -1290,15 +1320,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                             int oldFPS = g_config.replayFPS;
                             g_config.replayFPS = newFPS;
                             Logger_Log("Replay FPS changed: %d -> %d\n", oldFPS, newFPS);
-                            
-                            if (g_config.replayEnabled && g_replayBuffer.isBuffering) {
-                                Logger_Log("Hot-reloading replay buffer with new FPS...\n");
-                                Logger_ResetHeartbeat(THREAD_BUFFER);
-                                Logger_ResetHeartbeat(THREAD_NVENC_OUTPUT);
-                                ReplayBuffer_Stop(&g_replayBuffer);
-                                ReplayBuffer_Start(&g_replayBuffer, &g_config);
-                                Logger_Log("Replay buffer restarted at %d FPS\n", newFPS);
-                            }
+                            ScheduleReplayReload("FPS change");
                         }
                         
                         UpdateReplayRAMEstimate(hwnd);
@@ -1354,8 +1376,15 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                             GetLocalTime(&st);
                             snprintf(logFilename, sizeof(logFilename), "%s\\lwsr_log_%04d%02d%02d_%02d%02d%02d.txt",
                                     debugFolder, (int)st.wYear, (int)st.wMonth, (int)st.wDay, (int)st.wHour, (int)st.wMinute, (int)st.wSecond);
-                            Logger_Init(logFilename, "w");
-                            Logger_Log("Debug logging enabled (live toggle)\n");
+                            if (!Logger_Init(logFilename, "w")) {
+                                MessageBoxA(hwnd,
+                                    "Failed to create debug log file. Check write permissions for the Debug folder.",
+                                    "Debug Logging", MB_OK | MB_ICONWARNING);
+                                g_config.debugLogging = FALSE;
+                                CheckDlgButton(hwnd, ID_CHK_DEBUG_LOGGING, BST_UNCHECKED);
+                            } else {
+                                Logger_Log("Debug logging enabled (live toggle)\n");
+                            }
                         }
                     } else if (!g_config.debugLogging && Logger_IsInitialized()) {
                         Logger_Log("Debug logging disabled (live toggle)\n");
@@ -1389,13 +1418,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         char* deviceId = (char*)SendMessage(GetDlgItem(hwnd, ID_CMB_AUDIO_SOURCE1), CB_GETITEMDATA, idx, 0);
                         if (deviceId && deviceId != (char*)CB_ERR) {
                             strncpy(g_config.audioSource1, deviceId, sizeof(g_config.audioSource1) - 1);
+                            g_config.audioSource1[sizeof(g_config.audioSource1) - 1] = '\0';
                         } else {
                             g_config.audioSource1[0] = '\0';
                         }
-                        if (g_replayBuffer.isBuffering) {
-                            ReplayBuffer_Stop(&g_replayBuffer);
-                            ReplayBuffer_Start(&g_replayBuffer, &g_config);
-                        }
+                        ScheduleReplayReload("audio source 1");
                     }
                     break;
                     
@@ -1405,13 +1432,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         char* deviceId = (char*)SendMessage(GetDlgItem(hwnd, ID_CMB_AUDIO_SOURCE2), CB_GETITEMDATA, idx, 0);
                         if (deviceId && deviceId != (char*)CB_ERR) {
                             strncpy(g_config.audioSource2, deviceId, sizeof(g_config.audioSource2) - 1);
+                            g_config.audioSource2[sizeof(g_config.audioSource2) - 1] = '\0';
                         } else {
                             g_config.audioSource2[0] = '\0';
                         }
-                        if (g_replayBuffer.isBuffering) {
-                            ReplayBuffer_Stop(&g_replayBuffer);
-                            ReplayBuffer_Start(&g_replayBuffer, &g_config);
-                        }
+                        ScheduleReplayReload("audio source 2");
                     }
                     break;
                     
@@ -1421,13 +1446,11 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                         char* deviceId = (char*)SendMessage(GetDlgItem(hwnd, ID_CMB_AUDIO_SOURCE3), CB_GETITEMDATA, idx, 0);
                         if (deviceId && deviceId != (char*)CB_ERR) {
                             strncpy(g_config.audioSource3, deviceId, sizeof(g_config.audioSource3) - 1);
+                            g_config.audioSource3[sizeof(g_config.audioSource3) - 1] = '\0';
                         } else {
                             g_config.audioSource3[0] = '\0';
                         }
-                        if (g_replayBuffer.isBuffering) {
-                            ReplayBuffer_Stop(&g_replayBuffer);
-                            ReplayBuffer_Start(&g_replayBuffer, &g_config);
-                        }
+                        ScheduleReplayReload("audio source 3");
                     }
                     break;
                 
@@ -1560,20 +1583,12 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
         case WM_CLOSE: {
             /* Apply replay duration change once, on close, to avoid the race
              * where rapid in-place Stop/Start hangs and leaks the encoder.
-             * Run on a worker thread so the UI close stays responsive. */
+             * Runs on a worker thread so the UI close stays responsive. */
             if (s_replayDurationAtOpen >= 0 &&
-                g_config.replayDuration != s_replayDurationAtOpen &&
-                g_config.replayEnabled && g_replayBuffer.isBuffering &&
-                InterlockedCompareExchange(&s_replayReloadInFlight, 1, 0) == 0) {
+                g_config.replayDuration != s_replayDurationAtOpen) {
                 Logger_Log("Scheduling replay duration change on close: %ds -> %ds (async)\n",
                            s_replayDurationAtOpen, g_config.replayDuration);
-                HANDLE hThr = CreateThread(NULL, 0, ReplayReloadWorker, NULL, 0, NULL);
-                if (hThr) {
-                    CloseHandle(hThr);
-                } else {
-                    Logger_Log("Replay reload: CreateThread failed, falling back to inline\n");
-                    ReplayReloadWorker(NULL);
-                }
+                ScheduleReplayReload("duration on close");
             }
             s_replayDurationAtOpen = -1;
             SaveAreaSelectorPosition();
@@ -1601,29 +1616,18 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             
             AreaSelector_Shutdown();
             
-            if (s_settingsFont) { DeleteObject(s_settingsFont); s_settingsFont = NULL; }
-            if (s_settingsSmallFont) { DeleteObject(s_settingsSmallFont); s_settingsSmallFont = NULL; }
-            if (s_settingsBgBrush) { DeleteObject(s_settingsBgBrush); s_settingsBgBrush = NULL; }
-            
+            /* GDI cleanup happens in WM_DESTROY (single source of truth). */
             DestroyWindow(hwnd);
             s_settingsWnd = NULL;
             if (s_externalHandleRef) *s_externalHandleRef = NULL;
             
-            /* Refresh mode buttons and settings button in control panel */
+            /* Refresh mode buttons and settings button in control panel.
+             * IDs imported from overlay.h. */
             if (g_controlWnd) {
-                /* Mode button IDs from overlay.c */
-                #define ID_MODE_AREA    1001
-                #define ID_MODE_WINDOW  1002
-                #define ID_MODE_MONITOR 1003
-                #define ID_BTN_SETTINGS 1013
                 InvalidateRect(GetDlgItem(g_controlWnd, ID_MODE_AREA), NULL, TRUE);
                 InvalidateRect(GetDlgItem(g_controlWnd, ID_MODE_WINDOW), NULL, TRUE);
                 InvalidateRect(GetDlgItem(g_controlWnd, ID_MODE_MONITOR), NULL, TRUE);
                 InvalidateRect(GetDlgItem(g_controlWnd, ID_BTN_SETTINGS), NULL, TRUE);
-                #undef ID_MODE_AREA
-                #undef ID_MODE_WINDOW
-                #undef ID_MODE_MONITOR
-                #undef ID_BTN_SETTINGS
             }
             return 0;
         }
@@ -1632,6 +1636,7 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
             if (s_settingsFont) { DeleteObject(s_settingsFont); s_settingsFont = NULL; }
             if (s_settingsSmallFont) { DeleteObject(s_settingsSmallFont); s_settingsSmallFont = NULL; }
             if (s_settingsBgBrush) { DeleteObject(s_settingsBgBrush); s_settingsBgBrush = NULL; }
+            if (s_editBrush) { DeleteObject(s_editBrush); s_editBrush = NULL; }
             return 0;
     }
     

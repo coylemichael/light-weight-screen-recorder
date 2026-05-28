@@ -39,11 +39,6 @@ typedef struct {
     BOOL initialized;
     BOOL accessLost;  // Set when DXGI_ERROR_ACCESS_LOST occurs
     
-    // OCR readback staging (reused across calls)
-    ID3D11Texture2D* ocrStagingTexture;
-    int ocrStagingW;
-    int ocrStagingH;
-    
 } CaptureState;
 
 // Initialize the capture system

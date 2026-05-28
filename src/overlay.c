@@ -60,9 +60,9 @@ typedef void* GpImage;
 #pragma comment(lib, "dwmapi.lib")
 
 // Hotkey ID for replay save (must match main.c)
-#define HOTKEY_REPLAY_SAVE 1
+/* HOTKEY_REPLAY_SAVE, HOTKEY_MARKER defined in constants.h */
 // Hotkey ID for marker (must match main.c)
-#define HOTKEY_MARKER 2
+
 
 // Custom window message for async replay save completion
 #define WM_REPLAY_SAVE_COMPLETE (WM_USER + 200)
@@ -77,13 +77,11 @@ extern HWND g_overlayWnd;
 extern HWND g_controlWnd;
 
 // Control IDs - overlay specific
-#define ID_MODE_AREA       1001
-#define ID_MODE_WINDOW     1002
-#define ID_MODE_MONITOR    1003
+/* ID_MODE_AREA, ID_MODE_WINDOW, ID_MODE_MONITOR, ID_BTN_SETTINGS in overlay.h */
 #define ID_BTN_CLOSE       1005
 #define ID_BTN_STOP        1006
 #define ID_BTN_MINIMIZE    1020
-#define ID_BTN_SETTINGS    1013
+
 #define ID_BTN_RECORD      1015
 #define ID_RECORDING_PANEL 1019  // Inline timer + stop button
 #define ID_TIMER_RECORD    2001

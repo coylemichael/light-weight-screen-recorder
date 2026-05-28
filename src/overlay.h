@@ -24,4 +24,11 @@ void UpdateReplayPreview(void);
 // Save the current area selector position to config
 void SaveAreaSelectorPosition(void);
 
+/* Control panel button IDs - shared with settings_dialog.c for cross-window
+ * invalidation (e.g. settings dialog refreshes mode buttons on close). */
+#define ID_MODE_AREA       1001
+#define ID_MODE_WINDOW     1002
+#define ID_MODE_MONITOR    1003
+#define ID_BTN_SETTINGS    1013
+
 #endif // OVERLAY_H

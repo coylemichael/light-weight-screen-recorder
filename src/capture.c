@@ -144,11 +144,16 @@ static void ReleaseDuplication(CaptureState* state) {
     SAFE_RELEASE(state->duplication);
 }
 
-// Initialize desktop duplication for a specific DXGI output index
+// Initialize desktop duplication for a specific DXGI output index.
+// All writes to `state` are deferred until every step has succeeded, so a
+// partial failure leaves the caller's prior state intact.
 static BOOL InitDuplicationForOutput(CaptureState* state, IDXGIAdapter* adapter, int outputIndex) {
     BOOL result = FALSE;
     IDXGIOutput* dxgiOutput = NULL;
     IDXGIOutput1* dxgiOutput1 = NULL;
+    IDXGIOutputDuplication* newDuplication = NULL;
+    DXGI_OUTPUT_DESC localDesc = {0};
+    int localRefreshRate = DEFAULT_REFRESH_RATE;
     
     HRESULT hr = adapter->lpVtbl->EnumOutputs(adapter, outputIndex, &dxgiOutput);
     if (FAILED(hr)) {
@@ -156,56 +161,55 @@ static BOOL InitDuplicationForOutput(CaptureState* state, IDXGIAdapter* adapter,
         goto cleanup;
     }
     
-    // Get output description
-    hr = dxgiOutput->lpVtbl->GetDesc(dxgiOutput, &state->outputDesc);
+    hr = dxgiOutput->lpVtbl->GetDesc(dxgiOutput, &localDesc);
     if (FAILED(hr)) {
         Logger_Log("InitDuplicationForOutput: GetDesc failed (0x%08X)\n", hr);
         goto cleanup;
     }
     
-    // Get refresh rate from display mode
     DXGI_MODE_DESC desiredMode = {0};
-    desiredMode.Width = state->outputDesc.DesktopCoordinates.right - state->outputDesc.DesktopCoordinates.left;
-    desiredMode.Height = state->outputDesc.DesktopCoordinates.bottom - state->outputDesc.DesktopCoordinates.top;
+    desiredMode.Width = localDesc.DesktopCoordinates.right - localDesc.DesktopCoordinates.left;
+    desiredMode.Height = localDesc.DesktopCoordinates.bottom - localDesc.DesktopCoordinates.top;
     desiredMode.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
     
     DXGI_MODE_DESC closestMode = {0};
     hr = dxgiOutput->lpVtbl->FindClosestMatchingMode(dxgiOutput, &desiredMode, &closestMode, (IUnknown*)state->device);
-    
     if (SUCCEEDED(hr) && closestMode.RefreshRate.Denominator > 0) {
-        state->monitorRefreshRate = closestMode.RefreshRate.Numerator / closestMode.RefreshRate.Denominator;
-    } else {
-        state->monitorRefreshRate = DEFAULT_REFRESH_RATE;
+        localRefreshRate = closestMode.RefreshRate.Numerator / closestMode.RefreshRate.Denominator;
     }
     
-    // Get Output1 interface for duplication
     hr = dxgiOutput->lpVtbl->QueryInterface(dxgiOutput, &IID_IDXGIOutput1, (void**)&dxgiOutput1);
     if (FAILED(hr)) {
         Logger_Log("InitDuplicationForOutput: QueryInterface IDXGIOutput1 failed (0x%08X)\n", hr);
         goto cleanup;
     }
     
-    // Create desktop duplication
-    hr = dxgiOutput1->lpVtbl->DuplicateOutput(dxgiOutput1, (IUnknown*)state->device, &state->duplication);
+    hr = dxgiOutput1->lpVtbl->DuplicateOutput(dxgiOutput1, (IUnknown*)state->device, &newDuplication);
     if (FAILED(hr)) {
         Logger_Log("InitDuplicationForOutput: DuplicateOutput failed (0x%08X)\n", hr);
         goto cleanup;
     }
     
+    // All steps succeeded — commit to state.
+    state->outputDesc = localDesc;
+    state->monitorRefreshRate = localRefreshRate;
+    state->duplication = newDuplication;
+    newDuplication = NULL;  // ownership transferred
     state->monitorIndex = outputIndex;
-    state->monitorWidth = state->outputDesc.DesktopCoordinates.right - 
-                          state->outputDesc.DesktopCoordinates.left;
-    state->monitorHeight = state->outputDesc.DesktopCoordinates.bottom - 
-                           state->outputDesc.DesktopCoordinates.top;
+    state->monitorWidth = localDesc.DesktopCoordinates.right -
+                          localDesc.DesktopCoordinates.left;
+    state->monitorHeight = localDesc.DesktopCoordinates.bottom -
+                           localDesc.DesktopCoordinates.top;
     
     // Default capture region is full monitor
-    state->captureRect = state->outputDesc.DesktopCoordinates;
+    state->captureRect = localDesc.DesktopCoordinates;
     state->captureWidth = state->monitorWidth;
     state->captureHeight = state->monitorHeight;
     
     result = TRUE;
     
 cleanup:
+    SAFE_RELEASE(newDuplication);
     SAFE_RELEASE(dxgiOutput1);
     SAFE_RELEASE(dxgiOutput);
     
@@ -356,6 +360,7 @@ BOOL Capture_SetRegion(CaptureState* state, RECT region) {
     if (newSize > state->frameBufferSize) {
         BYTE* newBuffer = (BYTE*)malloc(newSize);
         if (newBuffer) {
+            ZeroMemory(newBuffer, newSize);  // prevent uninitialized read on first-frame timeout
             free(state->frameBuffer);
             state->frameBuffer = newBuffer;
             state->frameBufferSize = newSize;
@@ -375,6 +380,11 @@ BOOL Capture_SetMonitor(CaptureState* state, int monitorIndex) {
     
     if (!state) return FALSE;
     
+    // NOTE: `monitorIndex` here is in GDI EnumDisplayMonitors order. Capture_SetRegion
+    // (called below) then resolves the matching DXGI output via FindOutputForRegion,
+    // and overwrites state->monitorIndex with the DXGI order. The two enumeration
+    // orders are not guaranteed to match. Callers should treat `state->monitorIndex`
+    // as an opaque DXGI output index, not the value originally passed here.
     MonitorSearchData search = {0};
     search.targetIndex = monitorIndex;
     search.currentIndex = 0;
@@ -389,21 +399,71 @@ BOOL Capture_SetMonitor(CaptureState* state, int monitorIndex) {
     return FALSE;
 }
 
+// Acquire next duplicated desktop frame and query its ID3D11Texture2D.
+// Returns the HRESULT from AcquireNextFrame (or from the QI), so callers can
+// distinguish DXGI_ERROR_WAIT_TIMEOUT / DXGI_ERROR_ACCESS_LOST / etc.
+// On S_OK: caller owns *outDesktopTexture and MUST Release it and call
+// state->duplication->ReleaseFrame after use.
+// On non-S_OK: no cleanup is required by the caller; *outDesktopTexture is NULL.
+static HRESULT AcquireDesktopTexture(CaptureState* state, DWORD timeoutMs,
+                                     DXGI_OUTDUPL_FRAME_INFO* outInfo,
+                                     ID3D11Texture2D** outDesktopTexture) {
+    *outDesktopTexture = NULL;
+    IDXGIResource* desktopResource = NULL;
+    
+    HRESULT hr = state->duplication->lpVtbl->AcquireNextFrame(
+        state->duplication, timeoutMs, outInfo, &desktopResource);
+    if (FAILED(hr)) return hr;
+    
+    hr = desktopResource->lpVtbl->QueryInterface(desktopResource, &IID_ID3D11Texture2D,
+                                                  (void**)outDesktopTexture);
+    desktopResource->lpVtbl->Release(desktopResource);
+    
+    if (FAILED(hr)) {
+        state->duplication->lpVtbl->ReleaseFrame(state->duplication);
+        *outDesktopTexture = NULL;
+        return hr;
+    }
+    return S_OK;
+}
+
+// Copy the configured capture region from desktopTexture into destTexture,
+// then release the desktop texture and the acquired frame.
+static void CopyCaptureRegionAndRelease(CaptureState* state,
+                                        ID3D11Texture2D* desktopTexture,
+                                        ID3D11Texture2D* destTexture) {
+    D3D11_BOX srcBox = {0};
+    srcBox.left = state->captureRect.left - state->outputDesc.DesktopCoordinates.left;
+    srcBox.top = state->captureRect.top - state->outputDesc.DesktopCoordinates.top;
+    srcBox.right = srcBox.left + state->captureWidth;
+    srcBox.bottom = srcBox.top + state->captureHeight;
+    srcBox.front = 0;
+    srcBox.back = 1;
+    
+    state->context->lpVtbl->CopySubresourceRegion(
+        state->context,
+        (ID3D11Resource*)destTexture, 0, 0, 0, 0,
+        (ID3D11Resource*)desktopTexture, 0, &srcBox);
+    
+    desktopTexture->lpVtbl->Release(desktopTexture);
+    state->duplication->lpVtbl->ReleaseFrame(state->duplication);
+}
+
 BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
     // Precondition
     LWSR_ASSERT(state != NULL);
     
     if (!state || !state->initialized || !state->duplication) return NULL;
     
-    IDXGIResource* desktopResource = NULL;
     DXGI_OUTDUPL_FRAME_INFO frameInfo = {0};
+    ID3D11Texture2D* desktopTexture = NULL;
     
-    // Try to acquire next frame - wait up to 16ms for vsync
-    HRESULT hr = state->duplication->lpVtbl->AcquireNextFrame(
-        state->duplication, FRAME_ACQUIRE_TIMEOUT_MS, &frameInfo, &desktopResource);
+    HRESULT hr = AcquireDesktopTexture(state, FRAME_ACQUIRE_TIMEOUT_MS, &frameInfo, &desktopTexture);
     
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
-        // No new frame, return last frame if available (for static content)
+        // No new frame, return last frame if available (for static content).
+        // frameBuffer is zeroed at allocation, so the first-frame-timeout case
+        // returns valid (black) pixels rather than uninitialized memory.
         if (state->frameBuffer && state->frameBufferSize > 0) {
             if (timestamp) *timestamp = state->lastFrameTime;
             return state->frameBuffer;
@@ -411,33 +471,23 @@ BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
         return NULL;
     }
     
-    if (hr == DXGI_ERROR_DEVICE_REMOVED || hr == DXGI_ERROR_ACCESS_LOST) {
-        // Device removed or access lost - need to reinitialize
-        // Caller should handle NULL return and reinit capture
+    if (hr == DXGI_ERROR_ACCESS_LOST ||
+        hr == DXGI_ERROR_DEVICE_REMOVED ||
+        hr == DXGI_ERROR_DEVICE_RESET) {
+        // Desktop duplication lost - signal caller to call Capture_ReinitDuplication.
+        state->accessLost = TRUE;
         return NULL;
     }
     
     if (FAILED(hr)) {
-        // Duplication might need to be recreated (resolution change, etc.)
         return NULL;
     }
     
-    // Get texture from resource
-    ID3D11Texture2D* desktopTexture = NULL;
-    hr = desktopResource->lpVtbl->QueryInterface(desktopResource, &IID_ID3D11Texture2D, 
-                                                  (void**)&desktopTexture);
-    desktopResource->lpVtbl->Release(desktopResource);
-    
-    if (FAILED(hr)) {
-        state->duplication->lpVtbl->ReleaseFrame(state->duplication);
-        return NULL;
-    }
-    
-    // Create or update staging texture
-    D3D11_TEXTURE2D_DESC desc = {0};
-    desktopTexture->lpVtbl->GetDesc(desktopTexture, &desc);
-    
+    // Create or update staging texture (sized to full desktop)
     if (!state->stagingTexture) {
+        D3D11_TEXTURE2D_DESC desc = {0};
+        desktopTexture->lpVtbl->GetDesc(desktopTexture, &desc);
+        
         D3D11_TEXTURE2D_DESC stagingDesc = {0};
         stagingDesc.Width = desc.Width;
         stagingDesc.Height = desc.Height;
@@ -458,37 +508,16 @@ BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
         }
     }
     
-    // Copy region to staging texture
-    D3D11_BOX srcBox = {0};
-    srcBox.left = state->captureRect.left - state->outputDesc.DesktopCoordinates.left;
-    srcBox.top = state->captureRect.top - state->outputDesc.DesktopCoordinates.top;
-    srcBox.right = srcBox.left + state->captureWidth;
-    srcBox.bottom = srcBox.top + state->captureHeight;
-    srcBox.front = 0;
-    srcBox.back = 1;
-    
-    state->context->lpVtbl->CopySubresourceRegion(
-        state->context,
-        (ID3D11Resource*)state->stagingTexture, 0, 0, 0, 0,
-        (ID3D11Resource*)desktopTexture, 0, &srcBox
-    );
-    
-    desktopTexture->lpVtbl->Release(desktopTexture);
+    CopyCaptureRegionAndRelease(state, desktopTexture, state->stagingTexture);
     
     // Map staging texture to CPU memory
     D3D11_MAPPED_SUBRESOURCE mapped = {0};
     hr = state->context->lpVtbl->Map(state->context, (ID3D11Resource*)state->stagingTexture,
                                       0, D3D11_MAP_READ, 0, &mapped);
+    if (FAILED(hr)) return NULL;
     
-    if (FAILED(hr)) {
-        state->duplication->lpVtbl->ReleaseFrame(state->duplication);
-        return NULL;
-    }
-    
-    // Copy to frame buffer (handle pitch difference)
     if (!state->frameBuffer) {
         state->context->lpVtbl->Unmap(state->context, (ID3D11Resource*)state->stagingTexture, 0);
-        state->duplication->lpVtbl->ReleaseFrame(state->duplication);
         return NULL;
     }
     
@@ -503,7 +532,6 @@ BYTE* Capture_GetFrame(CaptureState* state, UINT64* timestamp) {
     }
     
     state->context->lpVtbl->Unmap(state->context, (ID3D11Resource*)state->stagingTexture, 0);
-    state->duplication->lpVtbl->ReleaseFrame(state->duplication);
     
     state->lastFrameTime = frameInfo.LastPresentTime.QuadPart;
     if (timestamp) *timestamp = state->lastFrameTime;
@@ -517,12 +545,11 @@ ID3D11Texture2D* Capture_GetFrameTexture(CaptureState* state, UINT64* timestamp)
     
     if (!state || !state->initialized || !state->duplication) return NULL;
     
-    IDXGIResource* desktopResource = NULL;
     DXGI_OUTDUPL_FRAME_INFO frameInfo = {0};
+    ID3D11Texture2D* desktopTexture = NULL;
     
-    // Use 0ms timeout - caller handles frame pacing, don't wait here
-    HRESULT hr = state->duplication->lpVtbl->AcquireNextFrame(
-        state->duplication, 0, &frameInfo, &desktopResource);
+    // 0ms timeout - caller handles frame pacing, don't wait here
+    HRESULT hr = AcquireDesktopTexture(state, 0, &frameInfo, &desktopTexture);
     
     if (hr == DXGI_ERROR_WAIT_TIMEOUT) {
         // No new frame available - return last texture to maintain frame rate
@@ -530,34 +557,21 @@ ID3D11Texture2D* Capture_GetFrameTexture(CaptureState* state, UINT64* timestamp)
             if (timestamp) *timestamp = state->lastFrameTime;
             return state->gpuTexture;
         }
-        // No texture yet - first frame not captured, need to wait
         return NULL;
     }
     
-    if (hr == DXGI_ERROR_ACCESS_LOST || 
-        hr == DXGI_ERROR_DEVICE_REMOVED || 
+    if (hr == DXGI_ERROR_ACCESS_LOST ||
+        hr == DXGI_ERROR_DEVICE_REMOVED ||
         hr == DXGI_ERROR_DEVICE_RESET) {
-        // Desktop duplication lost - set flag for caller to handle
         state->accessLost = TRUE;
         return NULL;
     }
     
     if (FAILED(hr)) {
-        // Other error - return last texture if available to maintain framerate
         if (state->gpuTexture) {
             if (timestamp) *timestamp = state->lastFrameTime;
             return state->gpuTexture;
         }
-        return NULL;
-    }
-    
-    ID3D11Texture2D* desktopTexture = NULL;
-    hr = desktopResource->lpVtbl->QueryInterface(desktopResource, &IID_ID3D11Texture2D, 
-                                                  (void**)&desktopTexture);
-    desktopResource->lpVtbl->Release(desktopResource);
-    
-    if (FAILED(hr)) {
-        state->duplication->lpVtbl->ReleaseFrame(state->duplication);
         return NULL;
     }
     
@@ -586,23 +600,7 @@ ID3D11Texture2D* Capture_GetFrameTexture(CaptureState* state, UINT64* timestamp)
         }
     }
     
-    // Copy region to GPU texture (GPU to GPU copy)
-    D3D11_BOX srcBox = {0};
-    srcBox.left = state->captureRect.left - state->outputDesc.DesktopCoordinates.left;
-    srcBox.top = state->captureRect.top - state->outputDesc.DesktopCoordinates.top;
-    srcBox.right = srcBox.left + state->captureWidth;
-    srcBox.bottom = srcBox.top + state->captureHeight;
-    srcBox.front = 0;
-    srcBox.back = 1;
-    
-    state->context->lpVtbl->CopySubresourceRegion(
-        state->context,
-        (ID3D11Resource*)state->gpuTexture, 0, 0, 0, 0,
-        (ID3D11Resource*)desktopTexture, 0, &srcBox
-    );
-    
-    desktopTexture->lpVtbl->Release(desktopTexture);
-    state->duplication->lpVtbl->ReleaseFrame(state->duplication);
+    CopyCaptureRegionAndRelease(state, desktopTexture, state->gpuTexture);
     
     state->lastFrameTime = frameInfo.LastPresentTime.QuadPart;
     if (timestamp) *timestamp = state->lastFrameTime;
@@ -614,7 +612,7 @@ int Capture_GetRefreshRate(CaptureState* state) {
     // Precondition
     LWSR_ASSERT(state != NULL);
     
-    if (!state) return 60;  // Safe default
+    if (!state) return DEFAULT_REFRESH_RATE;  // Safe default
     
     return state->monitorRefreshRate;
 }
@@ -624,7 +622,6 @@ void Capture_Shutdown(CaptureState* state) {
     if (!state) return;
     
     SAFE_FREE(state->frameBuffer);
-    SAFE_RELEASE(state->ocrStagingTexture);
     SAFE_RELEASE(state->gpuTexture);
     SAFE_RELEASE(state->stagingTexture);
     SAFE_RELEASE(state->duplication);
@@ -666,60 +663,96 @@ BOOL Capture_ReinitDuplication(CaptureState* state) {
 
 BOOL Capture_ReadbackRegion(CaptureState* state, ID3D11Texture2D* srcTexture,
                             int srcX, int srcY, int regionW, int regionH,
-                            BYTE* outBuffer, int* outStride)
-{
-    LWSR_ASSERT(state != NULL && srcTexture != NULL && outBuffer != NULL);
-    if (!state || !srcTexture || !outBuffer || regionW <= 0 || regionH <= 0)
-        return FALSE;
-    if (!state->device || !state->context)
-        return FALSE;
-
-    /* Create or recreate staging texture if size changed */
-    if (!state->ocrStagingTexture || state->ocrStagingW != regionW || state->ocrStagingH != regionH) {
-        SAFE_RELEASE(state->ocrStagingTexture);
-        D3D11_TEXTURE2D_DESC desc = {0};
-        desc.Width = regionW;
-        desc.Height = regionH;
-        desc.MipLevels = 1;
-        desc.ArraySize = 1;
-        desc.Format = DXGI_FORMAT_B8G8R8A8_UNORM;
-        desc.SampleDesc.Count = 1;
-        desc.Usage = D3D11_USAGE_STAGING;
-        desc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        HRESULT hr = state->device->lpVtbl->CreateTexture2D(state->device, &desc, NULL, &state->ocrStagingTexture);
-        if (FAILED(hr)) return FALSE;
-        state->ocrStagingW = regionW;
-        state->ocrStagingH = regionH;
+                            BYTE* outBuffer, int* outStride) {
+    // Preconditions
+    LWSR_ASSERT(state != NULL);
+    LWSR_ASSERT(srcTexture != NULL);
+    LWSR_ASSERT(outBuffer != NULL);
+    LWSR_ASSERT(regionW > 0 && regionH > 0);
+    
+    if (!state || !srcTexture || !outBuffer) return FALSE;
+    if (!state->initialized || !state->device || !state->context) return FALSE;
+    if (regionW <= 0 || regionH <= 0) return FALSE;
+    
+    BOOL result = FALSE;
+    ID3D11Texture2D* staging = NULL;
+    BOOL mapped = FALSE;
+    D3D11_MAPPED_SUBRESOURCE mappedRes = {0};
+    
+    // Validate region against source texture extents
+    D3D11_TEXTURE2D_DESC srcDesc = {0};
+    srcTexture->lpVtbl->GetDesc(srcTexture, &srcDesc);
+    if (srcX < 0 || srcY < 0 ||
+        (UINT)(srcX + regionW) > srcDesc.Width ||
+        (UINT)(srcY + regionH) > srcDesc.Height) {
+        Logger_Log("Capture_ReadbackRegion: region (%d,%d %dx%d) out of bounds for %ux%u source\n",
+                   srcX, srcY, regionW, regionH, srcDesc.Width, srcDesc.Height);
+        goto cleanup;
     }
-
-    /* Copy sub-region from GPU texture to staging */
-    D3D11_BOX box = {0};
-    box.left = srcX;
-    box.top = srcY;
-    box.right = srcX + regionW;
-    box.bottom = srcY + regionH;
-    box.front = 0;
-    box.back = 1;
-    state->context->lpVtbl->CopySubresourceRegion(state->context,
-        (ID3D11Resource*)state->ocrStagingTexture, 0, 0, 0, 0,
-        (ID3D11Resource*)srcTexture, 0, &box);
-
-    /* Map staging texture for CPU read */
-    D3D11_MAPPED_SUBRESOURCE mapped = {0};
-    HRESULT hr = state->context->lpVtbl->Map(state->context,
-        (ID3D11Resource*)state->ocrStagingTexture, 0, D3D11_MAP_READ, 0, &mapped);
-    if (FAILED(hr)) return FALSE;
-
-    /* Copy rows to output buffer (handle stride mismatch) */
-    int dstStride = regionW * 4;
+    
+    // Create a CPU-readable staging texture sized to the region.
+    // Allocated per-call; kill_feed_sampler only invokes this every SCAN_INTERVAL_MS
+    // (seconds), so per-call create/release overhead is negligible and keeps
+    // CaptureState free of caller-specific staging fields.
+    D3D11_TEXTURE2D_DESC stagingDesc = {0};
+    stagingDesc.Width = (UINT)regionW;
+    stagingDesc.Height = (UINT)regionH;
+    stagingDesc.MipLevels = 1;
+    stagingDesc.ArraySize = 1;
+    stagingDesc.Format = srcDesc.Format;
+    stagingDesc.SampleDesc.Count = 1;
+    stagingDesc.Usage = D3D11_USAGE_STAGING;
+    stagingDesc.BindFlags = 0;
+    stagingDesc.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    stagingDesc.MiscFlags = 0;
+    
+    HRESULT hr = state->device->lpVtbl->CreateTexture2D(state->device, &stagingDesc, NULL, &staging);
+    if (FAILED(hr)) {
+        Logger_Log("Capture_ReadbackRegion: CreateTexture2D failed (0x%08X)\n", hr);
+        goto cleanup;
+    }
+    
+    D3D11_BOX srcBox = {0};
+    srcBox.left = (UINT)srcX;
+    srcBox.top = (UINT)srcY;
+    srcBox.right = (UINT)(srcX + regionW);
+    srcBox.bottom = (UINT)(srcY + regionH);
+    srcBox.front = 0;
+    srcBox.back = 1;
+    
+    state->context->lpVtbl->CopySubresourceRegion(
+        state->context,
+        (ID3D11Resource*)staging, 0, 0, 0, 0,
+        (ID3D11Resource*)srcTexture, 0, &srcBox);
+    
+    hr = state->context->lpVtbl->Map(state->context, (ID3D11Resource*)staging,
+                                      0, D3D11_MAP_READ, 0, &mappedRes);
+    if (FAILED(hr)) {
+        Logger_Log("Capture_ReadbackRegion: Map failed (0x%08X)\n", hr);
+        goto cleanup;
+    }
+    mapped = TRUE;
+    
+    // Copy out compactly: outBuffer is sized regionW*regionH*BYTES_PER_PIXEL_BGRA
+    // (no padding), and outStride is reported as the compact row length so
+    // callers iterating with `outStride` stay within the allocated buffer
+    // regardless of the GPU staging row pitch.
+    size_t rowBytes = (size_t)regionW * BYTES_PER_PIXEL_BGRA;
+    BYTE* src = (BYTE*)mappedRes.pData;
+    BYTE* dst = outBuffer;
     for (int y = 0; y < regionH; y++) {
-        memcpy(outBuffer + y * dstStride,
-               (BYTE*)mapped.pData + y * mapped.RowPitch,
-               dstStride);
+        memcpy(dst, src, rowBytes);
+        src += mappedRes.RowPitch;
+        dst += rowBytes;
     }
-
-    state->context->lpVtbl->Unmap(state->context, (ID3D11Resource*)state->ocrStagingTexture, 0);
-
-    if (outStride) *outStride = dstStride;
-    return TRUE;
+    
+    if (outStride) *outStride = (int)rowBytes;
+    result = TRUE;
+    
+cleanup:
+    if (mapped) {
+        state->context->lpVtbl->Unmap(state->context, (ID3D11Resource*)staging, 0);
+    }
+    SAFE_RELEASE(staging);
+    return result;
 }
