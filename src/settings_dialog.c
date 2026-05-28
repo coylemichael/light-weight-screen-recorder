@@ -69,6 +69,15 @@ static BOOL s_waitingForMarkerHotkey = FALSE;
 /* Tab state */
 static SettingsTab s_currentTab = SETTINGS_TAB_GENERAL;
 
+/* Log child-control creation failures without aborting the dialog. Downstream
+ * use (SendMessage, AddToSection, ShowSection) already tolerates NULL HWNDs,
+ * so a failed control just leaves a visible gap and a diagnostic line.
+ * Per docs/tracking/may26review/plan/settings_dialog.md item 9. */
+#define CHECK_CTL(h_) do { \
+    if (!(h_)) Logger_Log("settings_dialog: control creation failed at %s:%d (err=%lu)\n", \
+                          __FILE__, __LINE__, (unsigned long)GetLastError()); \
+} while (0)
+
 /* Control handle arrays for each tab section (max 48 controls for Video which is larger) */
 #define MAX_SECTION_CONTROLS 48
 static HWND s_generalControls[MAX_SECTION_CONTROLS];
@@ -418,6 +427,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"BUTTON", L"Capture mouse cursor",
         WS_CHILD | BS_AUTOCHECKBOX,
         layout->labelX, layout->y, 200, 24, hwnd, (HMENU)ID_CHK_MOUSE, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     CheckDlgButton(hwnd, ID_CHK_MOUSE, g_config.captureMouse ? BST_CHECKED : BST_UNCHECKED);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
@@ -426,6 +436,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"BUTTON", L"Show recording border",
         WS_CHILD | BS_AUTOCHECKBOX,
         layout->labelX + 220, layout->y, 200, 24, hwnd, (HMENU)ID_CHK_BORDER, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     CheckDlgButton(hwnd, ID_CHK_BORDER, g_config.showRecordingBorder ? BST_CHECKED : BST_UNCHECKED);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
@@ -435,6 +446,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"Time limit",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y, layout->labelW, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
     
@@ -449,6 +461,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
         layout->controlX, layout->y, 55, 300, hwnd, (HMENU)ID_CMB_HOURS, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     SendMessage(ctl, CB_SETITEMHEIGHT, (WPARAM)-1, 18);
     for (int i = 0; i <= 24; i++) {
@@ -461,6 +474,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"h",
         WS_CHILD | SS_CENTERIMAGE,
         layout->controlX + 58, layout->y, 15, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
     
@@ -468,6 +482,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
         layout->controlX + 78, layout->y, 55, 300, hwnd, (HMENU)ID_CMB_MINUTES, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     SendMessage(ctl, CB_SETITEMHEIGHT, (WPARAM)-1, 18);
     for (int i = 0; i <= 59; i++) {
@@ -480,6 +495,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"m",
         WS_CHILD | SS_CENTERIMAGE,
         layout->controlX + 136, layout->y, 18, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
     
@@ -487,6 +503,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
         layout->controlX + 158, layout->y, 55, 300, hwnd, (HMENU)ID_CMB_SECONDS, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     SendMessage(ctl, CB_SETITEMHEIGHT, (WPARAM)-1, 18);
     for (int i = 0; i <= 59; i++) {
@@ -499,6 +516,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"s",
         WS_CHILD | SS_CENTERIMAGE,
         layout->controlX + 216, layout->y, 15, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
     layout->y += layout->rowH;
@@ -507,6 +525,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"Save to",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y + 1, layout->labelW, 22, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
     
@@ -514,6 +533,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD | ES_AUTOHSCROLL,
         layout->controlX, layout->y, layout->controlW - 80, 22, hwnd, (HMENU)ID_EDT_PATH, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     SetWindowTextA(ctl, g_config.savePath);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
@@ -522,6 +542,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"BUTTON", L"Browse",
         WS_CHILD | BS_PUSHBUTTON,
         layout->controlX + layout->controlW - 72, layout->y, 72, 22, hwnd, (HMENU)ID_BTN_BROWSE, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
     layout->y += layout->rowH + 12;
@@ -530,6 +551,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"",
         WS_CHILD | SS_ETCHEDHORZ,
         layout->labelX, layout->y, layout->contentW, 2, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
     layout->y += 14;
     
@@ -537,6 +559,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"Marker Hotkey",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y, layout->labelW, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
     
@@ -547,6 +570,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
         ctl = CreateWindowExA(0, "BUTTON", keyName,
             WS_CHILD | BS_PUSHBUTTON,
             layout->controlX, layout->y, 100, 24, hwnd, (HMENU)ID_BTN_MARKER_HOTKEY, s_hInstance, NULL);
+        CHECK_CTL(ctl);
         SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
         AddToSection(ctl, s_generalControls, &s_generalControlCount);
     }
@@ -556,6 +580,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"BUTTON", L"Enable debug logging (creates log files in Debug folder)",
         WS_CHILD | BS_AUTOCHECKBOX,
         layout->labelX, layout->y, 400, 24, hwnd, (HMENU)ID_CHK_DEBUG_LOGGING, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     CheckDlgButton(hwnd, ID_CHK_DEBUG_LOGGING, g_config.debugLogging ? BST_CHECKED : BST_UNCHECKED);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
@@ -565,6 +590,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"",
         WS_CHILD | SS_ETCHEDHORZ,
         layout->labelX, layout->y, layout->contentW, 2, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
     layout->y += 14;
     
@@ -572,6 +598,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"BUTTON", L"Kill feed instant clipping (requires Tesseract OCR)",
         WS_CHILD | BS_AUTOCHECKBOX,
         layout->labelX, layout->y, 420, 24, hwnd, (HMENU)ID_CHK_AUTOCLIP_ENABLED, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     CheckDlgButton(hwnd, ID_CHK_AUTOCLIP_ENABLED, g_config.autoClipEnabled ? BST_CHECKED : BST_UNCHECKED);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
@@ -581,6 +608,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"BUTTON", L"Show detection regions (calibration)",
         WS_CHILD | BS_AUTOCHECKBOX,
         layout->labelX + 16, layout->y, 300, 24, hwnd, (HMENU)ID_CHK_AUTOCLIP_SHOW_REGIONS, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     CheckDlgButton(hwnd, ID_CHK_AUTOCLIP_SHOW_REGIONS, g_config.autoClipShowRegions ? BST_CHECKED : BST_UNCHECKED);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
@@ -590,6 +618,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"BUTTON", L"Debug console (live OCR feed)",
         WS_CHILD | BS_AUTOCHECKBOX,
         layout->labelX + 16, layout->y, 300, 24, hwnd, (HMENU)ID_CHK_AUTOCLIP_DEBUG_CONSOLE, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     CheckDlgButton(hwnd, ID_CHK_AUTOCLIP_DEBUG_CONSOLE, DebugConsole_IsOpen() ? BST_CHECKED : BST_UNCHECKED);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
@@ -599,6 +628,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"Cooldown (sec)",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y, layout->labelW, 22, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
     
@@ -609,6 +639,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
         ctl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | ES_NUMBER | ES_CENTER,
             layout->controlX + 155, layout->y + 2, 40, 20, hwnd, (HMENU)ID_LBL_AUTOCLIP_COOLDOWN, s_hInstance, NULL);
+        CHECK_CTL(ctl);
         SendMessage(ctl, WM_SETFONT, (WPARAM)layout->smallFont, TRUE);
         SetWindowTextA(ctl, cdBuf);
         AddToSection(ctl, s_generalControls, &s_generalControlCount);
@@ -618,6 +649,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(TRACKBAR_CLASSW, L"",
         WS_CHILD | TBS_HORZ | TBS_NOTICKS | TBS_TRANSPARENTBKGND,
         layout->controlX, layout->y, 150, 26, hwnd, (HMENU)ID_SLD_AUTOCLIP_COOLDOWN, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, TBM_SETRANGE, TRUE, MAKELPARAM(AUTOCLIP_COOLDOWN_MIN_SEC, AUTOCLIP_COOLDOWN_MAX_SEC));
     SendMessage(ctl, TBM_SETPOS, TRUE, g_config.autoClipCooldownSec);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
@@ -627,6 +659,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"Save delay (sec)",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y, layout->labelW, 22, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
     
@@ -637,6 +670,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
         ctl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
             WS_CHILD | ES_NUMBER | ES_CENTER,
             layout->controlX + 155, layout->y + 2, 40, 20, hwnd, (HMENU)ID_LBL_AUTOCLIP_DELAY, s_hInstance, NULL);
+        CHECK_CTL(ctl);
         SendMessage(ctl, WM_SETFONT, (WPARAM)layout->smallFont, TRUE);
         SetWindowTextA(ctl, dlBuf);
         AddToSection(ctl, s_generalControls, &s_generalControlCount);
@@ -646,6 +680,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(TRACKBAR_CLASSW, L"",
         WS_CHILD | TBS_HORZ | TBS_NOTICKS | TBS_TRANSPARENTBKGND,
         layout->controlX, layout->y, 150, 26, hwnd, (HMENU)ID_SLD_AUTOCLIP_DELAY, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, TBM_SETRANGE, TRUE, MAKELPARAM(AUTOCLIP_DELAY_MIN_SEC, AUTOCLIP_DELAY_MAX_SEC));
     SendMessage(ctl, TBM_SETPOS, TRUE, g_config.autoClipDelaySec);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
@@ -667,6 +702,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"Output Format",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y + 3, layout->labelW, 20, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
     
@@ -674,6 +710,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST,
         layout->controlX, layout->y, layout->controlW, 120, hwnd, (HMENU)ID_CMB_FORMAT, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     SendMessageW(ctl, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.264) - Best compatibility");
     SendMessageW(ctl, CB_ADDSTRING, 0, (LPARAM)L"MP4 (H.265) - Smaller files, less compatible");
@@ -687,6 +724,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"Quality",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y + 3, layout->labelW, 20, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
     
@@ -694,6 +732,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST,
         layout->controlX, layout->y, layout->controlW, 120, hwnd, (HMENU)ID_CMB_QUALITY, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     SendMessageW(ctl, CB_ADDSTRING, 0, (LPARAM)L"Good ~60 Mbps (YouTube, TikTok)");
     SendMessageW(ctl, CB_ADDSTRING, 0, (LPARAM)L"High ~75 Mbps (Discord, Twitter/X)");
@@ -707,6 +746,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"Frame Rate",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y + 3, layout->labelW, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
     
@@ -714,6 +754,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST,
         layout->controlX, layout->y, 120, 120, hwnd, (HMENU)ID_CMB_REPLAY_FPS, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     SendMessageW(ctl, CB_ADDSTRING, 0, (LPARAM)L"30 fps");
     SendMessageW(ctl, CB_ADDSTRING, 0, (LPARAM)L"60 fps");
@@ -731,6 +772,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"(used for replay buffer; regular recording captures at display refresh rate)",
         WS_CHILD | SS_CENTERIMAGE,
         layout->controlX + 130, layout->y + 3, 320, 20, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->smallFont, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
     layout->y += layout->rowH + 8;
@@ -741,6 +783,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"BUTTON", L"Enable replay buffer (records constantly in background)",
         WS_CHILD | BS_AUTOCHECKBOX,
         layout->labelX, layout->y, 400, 24, hwnd, (HMENU)ID_CHK_REPLAY_ENABLED, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     CheckDlgButton(hwnd, ID_CHK_REPLAY_ENABLED, g_config.replayEnabled ? BST_CHECKED : BST_UNCHECKED);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
@@ -750,6 +793,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"Source",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y, layout->labelW, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
     
@@ -757,6 +801,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     HWND cmbSource = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
         layout->controlX, layout->y, 250, 200, hwnd, (HMENU)ID_CMB_REPLAY_SOURCE, s_hInstance, NULL);
+    CHECK_CTL(cmbSource);
     SendMessage(cmbSource, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(cmbSource, s_videoControls, &s_videoControlCount);
     
@@ -799,6 +844,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"Aspect Ratio",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y, layout->labelW, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
     
@@ -806,6 +852,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     HWND cmbAspect = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST,
         layout->controlX, layout->y, 180, 120, hwnd, (HMENU)ID_CMB_REPLAY_ASPECT, s_hInstance, NULL);
+    CHECK_CTL(cmbAspect);
     SendMessage(cmbAspect, WM_SETFONT, (WPARAM)layout->font, TRUE);
     
     /* Each entry: {label, aspectIndex matching Util_GetAspectRatioDimensions} */
@@ -834,6 +881,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"Duration",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y, layout->labelW, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
     
@@ -847,6 +895,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
         layout->controlX, layout->y, 50, 300, hwnd, (HMENU)ID_CMB_REPLAY_HOURS, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     for (int i = 0; i <= 1; i++) {
         WCHAR buf[8]; wsprintfW(buf, L"%d", i);
@@ -858,6 +907,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"h",
         WS_CHILD | SS_CENTERIMAGE,
         layout->controlX + 53, layout->y, 15, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
     
@@ -865,6 +915,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
         layout->controlX + 70, layout->y, 50, 300, hwnd, (HMENU)ID_CMB_REPLAY_MINS, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     for (int i = 0; i <= 59; i++) {
         WCHAR buf[8]; wsprintfW(buf, L"%d", i);
@@ -876,6 +927,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"m",
         WS_CHILD | SS_CENTERIMAGE,
         layout->controlX + 123, layout->y, 18, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
     
@@ -883,6 +935,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
         layout->controlX + 142, layout->y, 50, 300, hwnd, (HMENU)ID_CMB_REPLAY_SECS, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     for (int i = 0; i <= 59; i++) {
         WCHAR buf[8]; wsprintfW(buf, L"%d", i);
@@ -894,6 +947,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"s",
         WS_CHILD | SS_CENTERIMAGE,
         layout->controlX + 195, layout->y, 15, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
     layout->y += layout->rowH;
@@ -902,6 +956,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"RAM Usage",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y, layout->labelW, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
     
@@ -909,6 +964,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"~0 MB RAM",
         WS_CHILD | SS_CENTERIMAGE,
         layout->controlX, layout->y, 100, 26, hwnd, (HMENU)ID_STATIC_REPLAY_RAM, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
     
@@ -916,6 +972,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"",
         WS_CHILD | SS_CENTERIMAGE,
         layout->controlX + 105, layout->y, 250, 26, hwnd, (HMENU)ID_STATIC_REPLAY_CALC, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->smallFont, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
     layout->y += layout->rowH;
@@ -924,6 +981,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"Save Hotkey",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y, layout->labelW, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
     
@@ -933,6 +991,7 @@ static void CreateVideoSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowExA(0, "BUTTON", keyName,
         WS_CHILD | BS_PUSHBUTTON,
         layout->controlX, layout->y, 100, 24, hwnd, (HMENU)ID_BTN_REPLAY_HOTKEY, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_videoControls, &s_videoControlCount);
 }
@@ -952,6 +1011,7 @@ static void CreateAudioSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"BUTTON", L"Enable audio recording",
         WS_CHILD | BS_AUTOCHECKBOX,
         layout->labelX, layout->y, 250, 24, hwnd, (HMENU)ID_CHK_AUDIO_ENABLED, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     CheckDlgButton(hwnd, ID_CHK_AUDIO_ENABLED, g_config.audioEnabled ? BST_CHECKED : BST_UNCHECKED);
     AddToSection(ctl, s_audioControls, &s_audioControlCount);
@@ -965,18 +1025,21 @@ static void CreateAudioSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"Source 1",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y, 60, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_audioControls, &s_audioControlCount);
     
     HWND cmbAudio1 = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
         layout->labelX + 65, layout->y, 330, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE1, s_hInstance, NULL);
+    CHECK_CTL(cmbAudio1);
     SendMessage(cmbAudio1, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(cmbAudio1, s_audioControls, &s_audioControlCount);
     
     ctl = CreateWindowW(TRACKBAR_CLASSW, L"",
         WS_CHILD | TBS_HORZ | TBS_NOTICKS | TBS_TRANSPARENTBKGND,
         layout->labelX + 400, layout->y, 120, 26, hwnd, (HMENU)ID_SLD_AUDIO_VOLUME1, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, TBM_SETRANGE, TRUE, MAKELPARAM(0, AUDIO_VOLUME_MAX));
     SendMessage(ctl, TBM_SETPOS, TRUE, g_config.audioVolume1);
     AddToSection(ctl, s_audioControls, &s_audioControlCount);
@@ -986,6 +1049,7 @@ static void CreateAudioSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD | ES_NUMBER | ES_CENTER,
         layout->labelX + 525, layout->y + 2, 40, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL1, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->smallFont, TRUE);
     SetWindowTextA(ctl, volBuf1);
     AddToSection(ctl, s_audioControls, &s_audioControlCount);
@@ -995,18 +1059,21 @@ static void CreateAudioSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"Source 2",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y, 60, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_audioControls, &s_audioControlCount);
     
     HWND cmbAudio2 = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
         layout->labelX + 65, layout->y, 330, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE2, s_hInstance, NULL);
+    CHECK_CTL(cmbAudio2);
     SendMessage(cmbAudio2, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(cmbAudio2, s_audioControls, &s_audioControlCount);
     
     ctl = CreateWindowW(TRACKBAR_CLASSW, L"",
         WS_CHILD | TBS_HORZ | TBS_NOTICKS | TBS_TRANSPARENTBKGND,
         layout->labelX + 400, layout->y, 120, 26, hwnd, (HMENU)ID_SLD_AUDIO_VOLUME2, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, TBM_SETRANGE, TRUE, MAKELPARAM(0, AUDIO_VOLUME_MAX));
     SendMessage(ctl, TBM_SETPOS, TRUE, g_config.audioVolume2);
     AddToSection(ctl, s_audioControls, &s_audioControlCount);
@@ -1016,6 +1083,7 @@ static void CreateAudioSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD | ES_NUMBER | ES_CENTER,
         layout->labelX + 525, layout->y + 2, 40, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL2, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->smallFont, TRUE);
     SetWindowTextA(ctl, volBuf2);
     AddToSection(ctl, s_audioControls, &s_audioControlCount);
@@ -1025,18 +1093,21 @@ static void CreateAudioSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowW(L"STATIC", L"Source 3",
         WS_CHILD | SS_CENTERIMAGE,
         layout->labelX, layout->y, 60, 26, hwnd, NULL, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(ctl, s_audioControls, &s_audioControlCount);
     
     HWND cmbAudio3 = CreateWindowW(L"COMBOBOX", L"",
         WS_CHILD | CBS_DROPDOWNLIST | WS_VSCROLL,
         layout->labelX + 65, layout->y, 330, 200, hwnd, (HMENU)ID_CMB_AUDIO_SOURCE3, s_hInstance, NULL);
+    CHECK_CTL(cmbAudio3);
     SendMessage(cmbAudio3, WM_SETFONT, (WPARAM)layout->font, TRUE);
     AddToSection(cmbAudio3, s_audioControls, &s_audioControlCount);
     
     ctl = CreateWindowW(TRACKBAR_CLASSW, L"",
         WS_CHILD | TBS_HORZ | TBS_NOTICKS | TBS_TRANSPARENTBKGND,
         layout->labelX + 400, layout->y, 120, 26, hwnd, (HMENU)ID_SLD_AUDIO_VOLUME3, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, TBM_SETRANGE, TRUE, MAKELPARAM(0, AUDIO_VOLUME_MAX));
     SendMessage(ctl, TBM_SETPOS, TRUE, g_config.audioVolume3);
     AddToSection(ctl, s_audioControls, &s_audioControlCount);
@@ -1046,6 +1117,7 @@ static void CreateAudioSection(HWND hwnd, SettingsLayout* layout) {
     ctl = CreateWindowExW(WS_EX_CLIENTEDGE, L"EDIT", L"",
         WS_CHILD | ES_NUMBER | ES_CENTER,
         layout->labelX + 525, layout->y + 2, 40, 20, hwnd, (HMENU)ID_LBL_AUDIO_VOL3, s_hInstance, NULL);
+    CHECK_CTL(ctl);
     SendMessage(ctl, WM_SETFONT, (WPARAM)layout->smallFont, TRUE);
     SetWindowTextA(ctl, volBuf3);
     AddToSection(ctl, s_audioControls, &s_audioControlCount);
@@ -1657,11 +1729,15 @@ BOOL SettingsDialog_Register(HINSTANCE hInstance) {
     wc.hCursor = LoadCursor(NULL, IDC_ARROW);
     wc.hbrBackground = (HBRUSH)(COLOR_3DFACE + 1);
     wc.lpszClassName = "LWSRSettings";
-    /* Load icons from EXE resource for taskbar */
+    /* Load icons from EXE resource for taskbar (NULL falls back to default icon) */
     wc.hIcon = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(1), IMAGE_ICON,
                                   GetSystemMetrics(SM_CXICON), GetSystemMetrics(SM_CYICON), 0);
+    if (!wc.hIcon) Logger_Log("settings_dialog: LoadImageA(hIcon) failed err=%lu\n",
+                              (unsigned long)GetLastError());
     wc.hIconSm = (HICON)LoadImageA(hInstance, MAKEINTRESOURCEA(1), IMAGE_ICON,
                                     GetSystemMetrics(SM_CXSMICON), GetSystemMetrics(SM_CYSMICON), 0);
+    if (!wc.hIconSm) Logger_Log("settings_dialog: LoadImageA(hIconSm) failed err=%lu\n",
+                                (unsigned long)GetLastError());
     
     return RegisterClassExA(&wc) != 0;
 }
@@ -1687,6 +1763,9 @@ HWND SettingsDialog_ShowAt(HINSTANCE hInstance, int x, int y) {
         if (s_externalHandleRef) *s_externalHandleRef = s_settingsWnd;
         ShowWindow(s_settingsWnd, SW_SHOW);
         UpdateWindow(s_settingsWnd);
+    } else {
+        Logger_Log("settings_dialog: CreateWindowExA(LWSRSettings) failed err=%lu\n",
+                   (unsigned long)GetLastError());
     }
     
     return s_settingsWnd;
@@ -1860,7 +1939,11 @@ static void AutoClipRegionOverlay_Show(void)
         0, 0, monW, monH,
         NULL, NULL, s_hInstance, NULL);
     
-    if (!s_regionOverlayWnd) return;
+    if (!s_regionOverlayWnd) {
+        Logger_Log("settings_dialog: CreateWindowExA(%s) failed err=%lu\n",
+                   REGION_OVERLAY_CLASS, (unsigned long)GetLastError());
+        return;
+    }
     
     UpdateRegionOverlayBitmap();
     ShowWindow(s_regionOverlayWnd, SW_SHOWNA);

@@ -6,6 +6,9 @@ Each entry: `**Title** — short description.`
 
 ## [Unreleased]
 
+### Changed
+- **Settings dialog child-control creation now logs failures** — Added a `CHECK_CTL` macro and post-create NULL checks at all 63 `CreateWindow*` callsites in `CreateGeneralSection` / `CreateVideoSection` / `CreateAudioSection`, plus the two `LoadImageA` icon loads and the top-level `s_settingsWnd` / `s_regionOverlayWnd` window creates in `src/settings_dialog.c`. Failures log file/line/`GetLastError`; downstream `SendMessage` / `AddToSection` / `ShowSection` already tolerate NULL HWNDs so the dialog still constructs. Closes item 9 of `docs/tracking/may26review/plan/settings_dialog.md`.
+
 ### Fixed
 - **Spurious "Buffer thread hung" warning on stop** — `ReplayBuffer_Stop`'s 5 s join was shorter than the sum of inner cleanup waits (kill-feed 5 s + audio up to 12 s), so the warning fired and the AAC/FrameBuffer queues were abandoned whenever the auto-clip scanner happened to be busy at stop time. `ScanWorkerProc` in `src/kill_feed_sampler.c` now polls `hStopEvent` between templates so it exits within one template's worth of work; `KillFeedSampler_Shutdown` join reduced 5000 → 1000 ms; `ReplayBuffer_Stop` join raised 5000 → 10000 ms for audio worst-case margin. Verified on a 30 s record/stop cycle: buffer thread now exits cleanly 1.2 s after stop event.
 
