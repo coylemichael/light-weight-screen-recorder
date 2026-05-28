@@ -156,10 +156,14 @@ void Util_GenerateRecordingFilename(char* buffer, size_t size,
     if (!buffer || size == 0 || !basePath) return;
     
     time_t now = time(NULL);
-    struct tm* tm_info = localtime(&now);
+    struct tm tm_buf;
+    if (localtime_s(&tm_buf, &now) != 0) {
+        buffer[0] = '\0';
+        return;
+    }
     
     char timestamp[64];
-    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d_%H-%M-%S", tm_info);
+    strftime(timestamp, sizeof(timestamp), "%Y-%m-%d_%H-%M-%S", &tm_buf);
     
     snprintf(buffer, size, "%s\\Recording_%s%s", 
              basePath, timestamp, Config_GetFormatExtension(format));

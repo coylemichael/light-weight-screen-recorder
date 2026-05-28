@@ -1,6 +1,5 @@
 /*
- * Configuration Management
- * Persistent settings via INI file
+ * config.h - INI file read/write for settings
  */
 
 #ifndef CONFIG_H
@@ -8,12 +7,9 @@
 
 #include <windows.h>
 
-// Output formats
+// Output formats (only MP4/H.264 is implemented; enum kept for future expansion)
 typedef enum {
     FORMAT_MP4 = 0,    // H.264 in MP4 container
-    FORMAT_HEVC,       // H.265/HEVC in MP4 container
-    FORMAT_AVI,
-    FORMAT_WMV,
     FORMAT_COUNT
 } OutputFormat;
 
@@ -46,7 +42,7 @@ typedef struct {
     
     // Replay buffer settings (instant replay)
     BOOL replayEnabled;              // Enable replay buffer
-    int replayDuration;              // Buffer duration in seconds (60-1200)
+    int replayDuration;              // Buffer duration in seconds (REPLAY_DURATION_MIN_SECS..REPLAY_DURATION_MAX_SECS)
     CaptureMode replayCaptureSource; // What to capture for replay
     int replayMonitorIndex;          // Which monitor (if MODE_MONITOR)
     int replaySaveKey;               // Hotkey to save replay (default: F9)
@@ -88,13 +84,17 @@ typedef struct {
     
 } AppConfig;
 
-// Load config from INI file
+// Load config from INI file.
+// Threading: UI thread only (called at startup before worker threads exist).
 void Config_Load(AppConfig* config);
 
-// Save config to INI file
+// Save config to INI file.
+// Threading: UI thread only. All call sites (main.c WM_CLOSE, overlay.c, settings_dialog.c)
+// are window procedures on the UI thread. Not reentrant-safe; do not call from worker
+// threads or share g_config with mutating threads without external serialization.
 void Config_Save(const AppConfig* config);
 
-// Get format extension
+// Get format extension for the given output format. Returns ".mp4" for unknown values.
 const char* Config_GetFormatExtension(OutputFormat format);
 
 #endif // CONFIG_H

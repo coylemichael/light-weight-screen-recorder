@@ -18,6 +18,5 @@ extern volatile LONG g_isRecording;
 extern volatile LONG g_isSelecting;
 extern HWND g_overlayWnd;
 extern HWND g_controlWnd;
-extern HANDLE g_mutex;
 
 #endif /* MAIN_H */

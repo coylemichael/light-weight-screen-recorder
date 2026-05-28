@@ -1,11 +1,5 @@
 /*
- * Configuration Implementation
- *
- * ERROR HANDLING PATTERN:
- * - Early return for simple validation checks
- * - Uses sensible defaults when config file missing/corrupt
- * - File I/O errors are silent (defaults used instead)
- * - No HRESULT usage - pure Win32 file/registry APIs
+ * config.c - INI file read/write for settings
  */
 
 #include "config.h"
@@ -13,13 +7,8 @@
 #include <shlobj.h>
 #include <stdio.h>
 
-/* ============================================================================
- * CONSTANT LOOKUP TABLES
- * ============================================================================
- * Read-only after compile time. Used by Config_GetFormatExtension.
- * Thread Access: [ReadOnly - safe for concurrent access]
- */
-static const char* const FORMAT_EXTENSIONS[] = { ".mp4", ".mp4", ".avi", ".wmv" };
+/* Read-only lookup. Indexed by OutputFormat; FORMAT_COUNT entries. */
+static const char* const FORMAT_EXTENSIONS[FORMAT_COUNT] = { ".mp4" };
 
 static void Config_GetPath(char* buffer, size_t size) {
     // Preconditions
@@ -112,7 +101,9 @@ void Config_Load(AppConfig* config) {
     config->killfeedWPct = 0.0f;
     config->killfeedHPct = 0.0f;
     
-    // Default save path to Videos folder
+    // Default save path to Videos folder.
+    // Note: SHGetFolderPathA is deprecated since Vista in favor of SHGetKnownFolderPath
+    // (FOLDERID_Videos). Kept for ANSI simplicity; migrate if Unicode paths become needed.
     if (SUCCEEDED(SHGetFolderPathA(NULL, CSIDL_MYVIDEO, NULL, 0, config->savePath))) {
         strncat(config->savePath, "\\Recordings", sizeof(config->savePath) - strlen(config->savePath) - 1);
         config->savePath[sizeof(config->savePath) - 1] = '\0';
@@ -126,8 +117,8 @@ void Config_Load(AppConfig* config) {
     
     // Load from INI if exists
     if (GetFileAttributesA(configPath) != INVALID_FILE_ATTRIBUTES) {
-        config->outputFormat = (OutputFormat)GetPrivateProfileIntA(
-            "Recording", "Format", FORMAT_MP4, configPath);
+        // Note: Format INI key intentionally not read/written. Only FORMAT_MP4 is
+        // implemented; outputFormat stays at its default.
         config->quality = (QualityPreset)GetPrivateProfileIntA(
             "Recording", "Quality", QUALITY_LOSSLESS, configPath);
         config->captureMouse = GetPrivateProfileIntA(
@@ -191,6 +182,9 @@ void Config_Load(AppConfig* config) {
         config->autoClipDelaySec = GetPrivateProfileIntA(
             "AutoClip", "DelaySec", 10, configPath);
         {
+            // Note: atof returns 0.0 on parse failure, indistinguishable from a legitimate
+            // "0". Acceptable here because the default is also 0.0 and values are clamped
+            // to [0,1] below; corrupt INI yields zeroed killfeed rect, not undefined behavior.
             char floatBuf[32];
             GetPrivateProfileStringA("AutoClip", "killfeedXPct", "0", floatBuf, sizeof(floatBuf), configPath);
             config->killfeedXPct = (float)atof(floatBuf);
@@ -216,7 +210,8 @@ void Config_Load(AppConfig* config) {
         config->lastMode = (CaptureMode)GetPrivateProfileIntA(
             "LastCapture", "Mode", MODE_AREA, configPath);
         
-        // Validate/clamp loaded values to prevent corrupted INI from causing issues
+        // Validate/clamp loaded values to prevent corrupted INI from causing issues.
+        // Defend at point of use: INI is an untrusted boundary (user-editable).
         if (config->outputFormat < 0 || config->outputFormat >= FORMAT_COUNT)
             config->outputFormat = FORMAT_MP4;
         if (config->quality < QUALITY_LOW || config->quality > QUALITY_LOSSLESS)
@@ -225,7 +220,9 @@ void Config_Load(AppConfig* config) {
             config->replayDuration = REPLAY_DURATION_MIN_SECS;
         if (config->replayDuration > REPLAY_DURATION_MAX_SECS)
             config->replayDuration = REPLAY_DURATION_MAX_SECS;
-        if (config->replayFPS != 30 && config->replayFPS != 60 && 
+        // Supported FPS set: 30/60/120/240 (matches settings dialog combo; see
+        // Util_GetAspectRatioDimensions / replay_buffer for downstream assumptions).
+        if (config->replayFPS != 30 && config->replayFPS != 60 &&
             config->replayFPS != 120 && config->replayFPS != 240)
             config->replayFPS = DEFAULT_FPS;
         if (config->audioVolume1 < 0) config->audioVolume1 = 0;
@@ -242,6 +239,52 @@ void Config_Load(AppConfig* config) {
             config->autoClipDelaySec = AUTOCLIP_DELAY_MIN_SEC;
         if (config->autoClipDelaySec > AUTOCLIP_DELAY_MAX_SEC)
             config->autoClipDelaySec = AUTOCLIP_DELAY_MAX_SEC;
+
+        // Hotkey virtual-key codes: valid VK range is 0x01..0xFE (0 = none/disabled).
+        // Out-of-range values would silently fail RegisterHotKey later; reset to defaults.
+        if (config->cancelKey < 0 || config->cancelKey > 0xFE)
+            config->cancelKey = VK_ESCAPE;
+        if (config->replaySaveKey < 0 || config->replaySaveKey > 0xFE)
+            config->replaySaveKey = VK_F9;
+        if (config->markerKey < 0 || config->markerKey > 0xFE)
+            config->markerKey = VK_F6;
+
+        if (config->replayMonitorIndex < 0)
+            config->replayMonitorIndex = 0;
+
+        // Aspect ratio: 0=Native, 1..8 are defined in Util_GetAspectRatioDimensions.
+        if (config->replayAspectRatio < 0 || config->replayAspectRatio > 8)
+            config->replayAspectRatio = 0;
+
+        // CaptureMode enum bounds (MODE_NONE..MODE_MONITOR).
+        if ((int)config->replayCaptureSource < MODE_NONE ||
+            (int)config->replayCaptureSource > MODE_MONITOR)
+            config->replayCaptureSource = MODE_MONITOR;
+        if ((int)config->lastMode < MODE_NONE || (int)config->lastMode > MODE_MONITOR)
+            config->lastMode = MODE_AREA;
+
+        // Degenerate rect (right<=left or bottom<=top) is unusable downstream;
+        // reset to the default centered area.
+        if (config->replayAreaRect.right <= config->replayAreaRect.left ||
+            config->replayAreaRect.bottom <= config->replayAreaRect.top) {
+            config->replayAreaRect.left = 200;
+            config->replayAreaRect.top = 200;
+            config->replayAreaRect.right = 1000;
+            config->replayAreaRect.bottom = 800;
+        }
+
+        if (config->maxRecordingSeconds < 0)
+            config->maxRecordingSeconds = 0;
+
+        // Kill-feed region is stored as screen-relative percentages; clamp to [0,1].
+        if (config->killfeedXPct < 0.0f) config->killfeedXPct = 0.0f;
+        if (config->killfeedXPct > 1.0f) config->killfeedXPct = 1.0f;
+        if (config->killfeedYPct < 0.0f) config->killfeedYPct = 0.0f;
+        if (config->killfeedYPct > 1.0f) config->killfeedYPct = 1.0f;
+        if (config->killfeedWPct < 0.0f) config->killfeedWPct = 0.0f;
+        if (config->killfeedWPct > 1.0f) config->killfeedWPct = 1.0f;
+        if (config->killfeedHPct < 0.0f) config->killfeedHPct = 0.0f;
+        if (config->killfeedHPct > 1.0f) config->killfeedHPct = 1.0f;
     }
     
     // Ensure save directory exists (ignore ERROR_ALREADY_EXISTS)
@@ -265,10 +308,8 @@ void Config_Save(const AppConfig* config) {
     Config_GetPath(configPath, MAX_PATH);
     
     char buffer[32];
-    
-    snprintf(buffer, sizeof(buffer), "%d", config->outputFormat);
-    WritePrivateProfileStringA("Recording", "Format", buffer, configPath);
-    
+
+    // Note: Format INI key intentionally not written. Only FORMAT_MP4 is implemented.
     snprintf(buffer, sizeof(buffer), "%d", config->quality);
     WritePrivateProfileStringA("Recording", "Quality", buffer, configPath);
     
@@ -374,9 +415,6 @@ void Config_Save(const AppConfig* config) {
 }
 
 const char* Config_GetFormatExtension(OutputFormat format) {
-    // Precondition: format in valid range (defensive, returns default if invalid)
-    LWSR_ASSERT(format >= 0 && format < FORMAT_COUNT);
-    
     if (format >= 0 && format < FORMAT_COUNT) {
         return FORMAT_EXTENSIONS[format];
     }

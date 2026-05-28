@@ -32,11 +32,13 @@ void Util_GenerateRecordingFilename(char* buffer, size_t size,
 // ============================================================================
 
 // Convert wide string to UTF-8
-// Returns number of bytes written (excluding null terminator), or 0 on failure
+// Returns number of bytes written (excluding null terminator) on success,
+// or 0 on empty input OR API failure. Callers should treat 0 as "not available".
 int Util_WideToUtf8(const WCHAR* wide, char* utf8, int maxLen);
 
 // Convert UTF-8 string to wide string
-// Returns number of characters written (excluding null terminator), or 0 on failure
+// Returns number of characters written (excluding null terminator) on success,
+// or 0 on empty input OR API failure. Callers should treat 0 as "not available".
 int Util_Utf8ToWide(const char* utf8, WCHAR* wide, int maxLen);
 
 #endif // UTIL_H

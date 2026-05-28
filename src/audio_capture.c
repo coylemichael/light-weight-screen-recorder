@@ -519,7 +519,7 @@ static DWORD WINAPI SourceCaptureThread(LPVOID param) {
     
     while (InterlockedCompareExchange(&src->active, 0, 0)) {
         // Heartbeat (use AUDIO_SRC1 - we could differentiate but keep it simple)
-        Logger_Heartbeat(THREAD_AUDIO_SRC1);
+        Logger_Heartbeat(THREAD_AUDIO_SRC);
         
         UINT32 packetLength = 0;
         HRESULT hr = src->captureClient->lpVtbl->GetNextPacketSize(

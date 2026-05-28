@@ -1,22 +1,24 @@
 /*
- * constants.h - Centralized Configuration Constants
+ * constants.h - Centralized Configuration Constants and Assertion Macros
  * ============================================================================
- * 
+ *
  * This header consolidates all "magic numbers" used throughout the codebase
- * into named constants. Magic numbers are raw numeric literals embedded in
- * code (like `timeout = 500`) that are problematic because:
- * 
+ * into named constants, and defines the project's `LWSR_ASSERT` /
+ * `LWSR_ASSERT_MSG` assertion macros (which log before aborting). Magic
+ * numbers are raw numeric literals embedded in code (like `timeout = 500`)
+ * that are problematic because:
+ *
  *   1. Their meaning is unclear without context
  *   2. The same value might be duplicated in multiple places
  *   3. Changing a value requires finding all occurrences
  *   4. Typos create subtle bugs that are hard to track down
- * 
+ *
  * By defining constants here, we gain:
  *   - Self-documenting code (MUTEX_ACQUIRE_TIMEOUT_MS vs 500)
  *   - Single point of change for tuning parameters
  *   - Compile-time validation of constant names
  *   - Clear documentation of why each value was chosen
- * 
+ *
  * USAGE: Include this header in any source file that needs these constants.
  * All values are compile-time constants using #define for zero runtime cost.
  */
@@ -24,6 +26,7 @@
 #ifndef CONSTANTS_H
 #define CONSTANTS_H
 
+#include <windows.h>   /* WM_USER for custom message IDs below */
 #include <assert.h>
 
 /* ============================================================================
@@ -398,19 +401,6 @@ void Logger_Log(const char* fmt, ...);
 #define WASAPI_BUFFER_DURATION_100NS 1000000
 
 /* ============================================================================
- * VIDEO CODEC PROFILES
- * ============================================================================
- * 
- * H264_PROFILE_HIGH: The H.264 High Profile (100) enables advanced
- *   compression features like 8x8 transforms and CABAC entropy coding.
- *   This produces smaller files than Baseline or Main profiles at the
- *   same quality, and is universally supported by modern decoders.
- *   
- *   Value 100 corresponds to eAVEncH264VProfile_High in Media Foundation.
- */
-#define H264_PROFILE_HIGH           100
-
-/* ============================================================================
  * USER INTERFACE CONSTANTS
  * ============================================================================
  * 
@@ -425,18 +415,16 @@ void Logger_Log(const char* fmt, ...);
 /* ============================================================================
  * WINDOWS MESSAGE IDS - Custom Application Messages
  * ============================================================================
- * 
+ *
  * Windows reserves WM_USER and above for application-defined messages.
  * We use these for inter-thread/inter-process communication.
- * 
- * WM_LWSR_STOP: Posted to trigger recording stop from another instance
- *   or from a global hotkey. Using a named constant prevents collisions
- *   if we add more custom messages later.
+ *
+ * WM_AUTOCLIP_SAVE / _COMPLETE / _DELAYED: Auto-clip pipeline messages
+ *   posted between kill_feed_sampler.c and overlay.c. The +7 gap on
+ *   _DELAYED is preserved to avoid disturbing any historical IDs.
  */
-#define WM_LWSR_STOP                (WM_USER + 1)
 #define WM_AUTOCLIP_SAVE            (WM_USER + 2)  /* lParam = heap-alloc'd game name or NULL (receiver frees) */
 #define WM_AUTOCLIP_SAVE_COMPLETE   (WM_USER + 3)
-#define WM_AUTOCLIP_ERROR           (WM_USER + 4)  /* wParam = error string pointer */
 #define WM_AUTOCLIP_SAVE_DELAYED    (WM_USER + 7)  /* Internal: timer-triggered deferred save */
 
 /* ============================================================================
@@ -445,7 +433,6 @@ void Logger_Log(const char* fmt, ...);
  *
  * Cooldown and delay settings for template-matching-based auto-clip detection.
  */
-#define AUTOCLIP_COOLDOWN_DEFAULT_MS    10000
 #define AUTOCLIP_COOLDOWN_MIN_SEC       5
 #define AUTOCLIP_COOLDOWN_MAX_SEC       30
 #define AUTOCLIP_DELAY_MIN_SEC          0
@@ -500,20 +487,16 @@ void Logger_Log(const char* fmt, ...);
 #define CAPTURE_BTN_WIDTH           130     /* Width of capture mode buttons */
 #define CAPTURE_BTN_HEIGHT          30      /* Height of capture mode buttons */
 #define CAPTURE_BTN_GAP             4       /* Gap between capture buttons */
-#define CAPTURE_BTN_COUNT           3       /* Number of capture mode buttons */
 
 /* Icon button dimensions (Settings, Minimize, Record, Close) */
 #define ICON_BTN_SIZE               28      /* Square icon buttons */
-#define ICON_BTN_GAP                4       /* Gap between icon buttons */
-#define ICON_BTN_COUNT              4       /* Number of icon buttons */
 
 /* Control panel layout */
 #define CONTROL_PANEL_PADDING       8       /* Left/right padding */
 #define CONTROL_PANEL_HEIGHT        44      /* Panel height (touch-friendly) */
 
-/* Calculated control panel width:
- * padding + (btn_width * btn_count) + (btn_gap * (btn_count-1)) + gap + 
- * (icon_size * icon_count) + (icon_gap * (icon_count-1)) + padding
+/* Calculated control panel width (3 capture buttons + 4 icon buttons):
+ * padding + (btn_width * 3) + (btn_gap * 2) + gap + (icon_size * 4) + (4 * 3) + padding
  * = 8 + (130*3) + (4*2) + 16 + (28*4) + (4*3) + 8 = 596
  */
 #define CONTROL_PANEL_WIDTH         596

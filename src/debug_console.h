@@ -1,8 +1,5 @@
 /*
- * Debug Console - AllocConsole-based debug output for auto-clip pipeline
- *
- * Opens a console window showing live OCR/detection feed when enabled.
- * Tied to the "Show Regions" debug checkbox in settings.
+ * Debug Console - AllocConsole-based live debug output (no-ops when closed).
  */
 
 #ifndef DEBUG_CONSOLE_H
@@ -11,11 +8,14 @@
 #include <windows.h>
 
 /* Open a console window and redirect stdout/stderr to it.
- * No-op if already open. */
+ * No-op if already open. UI-thread only. */
 void DebugConsole_Open(void);
 
 /* Close the console window. No-op if not open. */
 void DebugConsole_Close(void);
+
+/* Release the critical section. Call once at process shutdown after Close(). */
+void DebugConsole_Destroy(void);
 
 /* Print a timestamped, formatted message to the console.
  * No-op if console is not open. Thread-safe. */

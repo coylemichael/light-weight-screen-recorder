@@ -9,17 +9,20 @@
 #include "debug_console.h"
 #include <stdio.h>
 #include <stdarg.h>
+#include <errno.h>
 
-static volatile BOOL s_consoleOpen = FALSE;
+static volatile LONG s_consoleOpen = 0;
 static CRITICAL_SECTION s_cs;
-static volatile BOOL s_csInit = FALSE;
+static volatile LONG s_csInit = 0;
 static FILE* s_logFile = NULL;
 
 static void OpenLogFile(void)
 {
     /* Write next to the exe in Debug\ folder (same as main logs) */
     char exePath[MAX_PATH];
-    GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    DWORD pathLen = GetModuleFileNameA(NULL, exePath, MAX_PATH);
+    if (pathLen == 0 || pathLen >= MAX_PATH) return;
+
     char* slash = strrchr(exePath, '\\');
     if (slash) *(slash + 1) = '\0';
 
@@ -49,19 +52,19 @@ static void OpenLogFile(void)
 
 void DebugConsole_Open(void)
 {
-    if (s_consoleOpen) return;
+    if (InterlockedCompareExchange(&s_consoleOpen, 0, 0)) return;
 
-    if (!s_csInit) {
+    /* Atomic one-shot init of the critical section. */
+    if (InterlockedCompareExchange(&s_csInit, 1, 0) == 0) {
         InitializeCriticalSection(&s_cs);
-        s_csInit = TRUE;
     }
 
     if (!AllocConsole()) return;
 
     /* Redirect C stdio to the new console */
     FILE* fp = NULL;
-    freopen_s(&fp, "CONOUT$", "w", stdout);
-    freopen_s(&fp, "CONOUT$", "w", stderr);
+    errno_t errOut = freopen_s(&fp, "CONOUT$", "w", stdout);
+    errno_t errErr = freopen_s(&fp, "CONOUT$", "w", stderr);
 
     /* Set console title and size */
     SetConsoleTitleA("LWSR - Auto-Clip Debug");
@@ -82,21 +85,27 @@ void DebugConsole_Open(void)
     /* Open log file alongside console */
     OpenLogFile();
 
-    s_consoleOpen = TRUE;
+    InterlockedExchange(&s_consoleOpen, 1);
 
-    printf("=== LWSR Auto-Clip Debug Console ===\n");
-    printf("Showing live OCR / kill detection feed.\n");
-    if (s_logFile)
-        printf("Logging to: bin\\Debug\\autoclip_debug_*.txt\n");
-    printf("Uncheck 'Debug console' to stop.\n\n");
+    if (errOut == 0) {
+        printf("=== LWSR Auto-Clip Debug Console ===\n");
+        printf("Showing live OCR / kill detection feed.\n");
+        if (s_logFile)
+            printf("Logging to: bin\\Debug\\autoclip_debug_*.txt\n");
+        printf("Uncheck 'Debug console' to stop.\n\n");
+    }
+    if (errErr != 0 && s_logFile) {
+        fprintf(s_logFile, "[warn] freopen_s(stderr) failed: errno=%d\n", errErr);
+        fflush(s_logFile);
+    }
 }
 
 void DebugConsole_Close(void)
 {
-    if (!s_consoleOpen) return;
+    if (!InterlockedCompareExchange(&s_consoleOpen, 0, 0)) return;
 
     /* Set flag first to prevent new Print calls from entering */
-    s_consoleOpen = FALSE;
+    InterlockedExchange(&s_consoleOpen, 0);
 
     /* Wait for any in-flight Print call to finish */
     EnterCriticalSection(&s_cs);
@@ -114,23 +123,34 @@ void DebugConsole_Close(void)
      * This ensures no thread can write to the console handle after it's freed,
      * and FreeConsole won't conflict with in-flight CRT console writes. */
     FILE* nul = NULL;
-    freopen_s(&nul, "NUL", "w", stdout);
-    freopen_s(&nul, "NUL", "w", stderr);
+    (void)freopen_s(&nul, "NUL", "w", stdout);
+    (void)freopen_s(&nul, "NUL", "w", stderr);
 
     FreeConsole();
 
     LeaveCriticalSection(&s_cs);
 }
 
+void DebugConsole_Destroy(void)
+{
+    /* Ensure console is closed first. */
+    DebugConsole_Close();
+
+    if (InterlockedCompareExchange(&s_csInit, 0, 1) == 1) {
+        DeleteCriticalSection(&s_cs);
+    }
+}
+
 void DebugConsole_Print(const char* fmt, ...)
 {
-    if (!s_consoleOpen) return;
+    if (!InterlockedCompareExchange(&s_consoleOpen, 0, 0)) return;
+    if (!InterlockedCompareExchange(&s_csInit, 0, 0)) return;
 
     EnterCriticalSection(&s_cs);
 
     /* Re-check after acquiring lock: Close() may have freed the console
      * between our flag check and entering the CS */
-    if (!s_consoleOpen) {
+    if (!InterlockedCompareExchange(&s_consoleOpen, 0, 0)) {
         LeaveCriticalSection(&s_cs);
         return;
     }
@@ -164,5 +184,5 @@ void DebugConsole_Print(const char* fmt, ...)
 
 BOOL DebugConsole_IsOpen(void)
 {
-    return s_consoleOpen;
+    return InterlockedCompareExchange(&s_consoleOpen, 0, 0) ? TRUE : FALSE;
 }

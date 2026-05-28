@@ -2072,18 +2072,6 @@ static LRESULT CALLBACK ControlWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPARA
             return 0;
         }
         
-        case WM_AUTOCLIP_ERROR: {
-            Logger_Log("WM_AUTOCLIP_ERROR: Kill feed region outside capture crop\n");
-            MessageBoxA(NULL,
-                "Auto-clip: Kill feed region is outside the capture area.\n\n"
-                "Your replay aspect ratio crops out the kill feed.\n"
-                "Change the replay aspect ratio (e.g. Native or 32:9)\n"
-                "so the capture includes the kill feed region.",
-                "LWSR - Auto-Clip Error",
-                MB_OK | MB_ICONWARNING | MB_TOPMOST);
-            return 0;
-        }
-        
         case WM_TRAYICON:
             if (lParam == WM_LBUTTONUP || lParam == WM_LBUTTONDBLCLK) {
                 // Left click or double-click on tray icon - restore window

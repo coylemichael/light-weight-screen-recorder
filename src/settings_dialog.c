@@ -1074,7 +1074,6 @@ static DWORD WINAPI ReplayReloadWorker(LPVOID param) {
     Logger_Log("Replay reload worker: starting Stop/Start for duration=%ds\n",
                g_config.replayDuration);
     Logger_ResetHeartbeat(THREAD_BUFFER);
-    Logger_ResetHeartbeat(THREAD_NVENC_OUTPUT);
     ReplayBuffer_Stop(&g_replayBuffer);
     ReplayBuffer_Start(&g_replayBuffer, &g_config);
     Logger_Log("Replay reload worker: done\n");

@@ -47,7 +47,6 @@
 #include <shlobj.h>
 #include <stdio.h>
 #include <string.h>
-#include <time.h>
 
 #pragma comment(lib, "user32.lib")
 #pragma comment(lib, "gdi32.lib")
@@ -70,6 +69,9 @@
 #include "gdiplus_api.h"
 #include "audio_device.h"
 #include "audio_capture.h"
+#include "aac_encoder.h"
+#include "mem_utils.h"
+#include "debug_console.h"
 
 #include "constants.h"
 
@@ -136,114 +138,128 @@ HWND g_controlWnd = NULL;
 
 
 /*
- * Debug mode flag (enabled via --debug CLI argument).
- * Thread Access: [ReadOnly after ParseCommandLine]
- */
-static BOOL g_debugMode = FALSE;
-
-/*
  * Single instance mutex handle.
  * Thread Access: [Main thread only]
  * Lifetime: Created at startup, closed at shutdown
  */
-HANDLE g_mutex = NULL;
+static HANDLE g_mutex = NULL;
 
 /*
  * String constants - read-only after compile time.
  */
 static const char* const MUTEX_NAME = "LightweightScreenRecorderMutex";
-static const char* const WINDOW_CLASS = "LWSROverlay";
 
-// Parse command line for --debug flag
-static void ParseCommandLine(LPSTR lpCmdLine) {
-    if (lpCmdLine && (strstr(lpCmdLine, "--debug") || strstr(lpCmdLine, "-d"))) {
-        g_debugMode = TRUE;
-    }
-}
-
-int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance, 
+int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
                    _In_ LPSTR lpCmdLine, _In_ int nCmdShow) {
     (void)hPrevInstance;
     (void)nCmdShow;
-    
+    (void)lpCmdLine;
+
+    BOOL crashHandlerInited = FALSE;
+    BOOL comInited = FALSE;
+    BOOL mfInited = FALSE;
+    BOOL gdiInited = FALSE;
+    BOOL captureInited = FALSE;
+    BOOL overlayCreated = FALSE;
+    BOOL replayInited = FALSE;
+    BOOL loggerInited = FALSE;
+    BOOL configLoaded = FALSE;
+    BOOL mutexOwned = FALSE;
+    BOOL hotkeyReplayRegistered = FALSE;
+    BOOL hotkeyMarkerRegistered = FALSE;
+    BOOL watchdogStarted = FALSE;
+    int exitCode = 0;
+    MSG msg = {0};
+    DWORD msgCount = 0;
+    DWORD hotkeyCount = 0;
+    HRESULT hr;
+
     // Initialize crash handler first
     CrashHandler_Init();
-    
-    // Parse command line arguments
-    ParseCommandLine(lpCmdLine);
-    
-    // Check for existing instance - toggle recording if running
+    crashHandlerInited = TRUE;
+
+    // Check for existing instance - enforce single-instance and exit if running
     g_mutex = OpenMutexA(MUTEX_ALL_ACCESS, FALSE, MUTEX_NAME);
     if (g_mutex) {
-        // Another instance exists - signal it to stop recording
-        HWND existingWnd = FindWindowA(WINDOW_CLASS, NULL);
-        if (existingWnd) {
-            PostMessage(existingWnd, WM_LWSR_STOP, 0, 0);
-        }
-        CloseHandle(g_mutex);
-        return 0;
+        SAFE_CLOSE_HANDLE(g_mutex);
+        exitCode = 0;
+        goto cleanup;
     }
-    
+
     // Create mutex for this instance
     g_mutex = CreateMutexA(NULL, TRUE, MUTEX_NAME);
     if (!g_mutex || GetLastError() == ERROR_ALREADY_EXISTS) {
         // Another instance won the race between OpenMutex and CreateMutex
-        if (g_mutex) CloseHandle(g_mutex);
-        return 0;
+        SAFE_CLOSE_HANDLE(g_mutex);
+        exitCode = 0;
+        goto cleanup;
     }
-    
+    mutexOwned = TRUE;
+
     // Initialize COM - STA for main thread (UI message pump).
     // Buffer thread uses MTA (COINIT_MULTITHREADED) separately.
     // COM objects must not be passed between threads without marshaling.
-    HRESULT hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
+    hr = CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     if (FAILED(hr)) {
         MessageBoxA(NULL, "Failed to initialize COM", "Error", MB_OK | MB_ICONERROR);
-        goto cleanup_mutex;
+        exitCode = 1;
+        goto cleanup;
     }
-    
+    comInited = TRUE;
+
     // Set AppUserModelID for taskbar pinning
     SetCurrentProcessExplicitAppUserModelID(L"CarnmorCyber.LightWeightScreenRecorder");
-    
+
     // Initialize Media Foundation
     hr = MFStartup(MF_VERSION, MFSTARTUP_NOSOCKET);
     if (FAILED(hr)) {
         MessageBoxA(NULL, "Failed to initialize Media Foundation", "Error", MB_OK | MB_ICONERROR);
-        goto cleanup_com;
+        exitCode = 1;
+        goto cleanup;
     }
-    
+    mfInited = TRUE;
+
     // Load configuration
     Config_Load(&g_config);
-    
+    configLoaded = TRUE;
+
     // Initialize leak tracker (runtime-controlled via config)
     LeakTracker_Init();
-    
+
     // Initialize shared GDI+ (used by overlay and action_toolbar)
     if (!GdiplusAPI_Init(&g_gdip)) {
         MessageBoxA(NULL, "Failed to initialize GDI+", "Error", MB_OK | MB_ICONERROR);
-        goto cleanup_mf;
+        exitCode = 1;
+        goto cleanup;
     }
-    
+    gdiInited = TRUE;
+
     // Initialize capture system
     if (!Capture_Init(&g_capture)) {
         MessageBoxA(NULL, "Failed to initialize screen capture", "Error", MB_OK | MB_ICONERROR);
-        goto cleanup_gdi;
+        exitCode = 1;
+        goto cleanup;
     }
-    
+    captureInited = TRUE;
+
     // Create and show overlay
     if (!Overlay_Create(hInstance)) {
         MessageBoxA(NULL, "Failed to create overlay", "Error", MB_OK | MB_ICONERROR);
-        goto cleanup_capture;
+        exitCode = 1;
+        goto cleanup;
     }
-    
+    overlayCreated = TRUE;
+
     // Initialize replay buffer
     ReplayBuffer_Init(&g_replayBuffer);
-    
+    replayInited = TRUE;
+
     // Initialize logger only if debug logging is enabled in config
     if (g_config.debugLogging) {
         char exePath[MAX_PATH];
         char debugFolder[MAX_PATH];
         char logFilename[MAX_PATH];
-        
+
         // Get exe directory and create Debug subfolder
         GetModuleFileNameA(NULL, exePath, MAX_PATH);
         char* lastSlash = strrchr(exePath, '\\');
@@ -251,7 +267,7 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
             *lastSlash = '\0';
             snprintf(debugFolder, sizeof(debugFolder), "%s\\Debug", exePath);
             CreateDirectoryA(debugFolder, NULL);  // Create Debug folder if it doesn't exist
-            
+
             SYSTEMTIME st;
             GetLocalTime(&st);
             snprintf(logFilename, sizeof(logFilename), "%s\\lwsr_log_%04d%02d%02d_%02d%02d%02d.txt",
@@ -261,126 +277,139 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
             // Fallback: use current directory
             Logger_Init("lwsr_log.txt", "w");
         }
+        loggerInited = TRUE;
         Logger_Log("Debug logging enabled\n");
-        Logger_Log("Debug mode: %s\n", g_debugMode ? "YES" : "NO");
     }
-    
+
     // Start replay buffer if enabled in config
     if (g_config.replayEnabled) {
         Logger_Log("Starting replay buffer (enabled in config)\n");
         g_replayBuffer.autoClipWnd = g_controlWnd;
         ReplayBuffer_Start(&g_replayBuffer, &g_config);
-        
+
         // Check for audio encoder errors
         if (g_config.audioEnabled) {
             AACEncoderError audioErr = (AACEncoderError)InterlockedCompareExchange(&g_replayBuffer.audioError, 0, 0);
             if (audioErr != AAC_OK) {
-                const char* msg = (audioErr == AAC_ERR_ENCODER_NOT_FOUND)
+                const char* errMsg = (audioErr == AAC_ERR_ENCODER_NOT_FOUND)
                     ? "AAC audio encoder not available.\n\n"
                       "Windows Media Foundation AAC encoder is required for audio recording.\n"
                       "Audio will be disabled for this session."
                     : "Audio encoder initialization failed.\n\n"
                       "Audio will be disabled for this session.";
                 Logger_Log("Audio encoder error at startup: %d\n", (int)audioErr);
-                MessageBoxA(NULL, msg, "Audio Error", MB_OK | MB_ICONWARNING);
+                MessageBoxA(NULL, errMsg, "Audio Error", MB_OK | MB_ICONWARNING);
             }
         }
-        
+
         // Register global hotkey for saving replay
-        BOOL hotkeyOk = RegisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE, 0, g_config.replaySaveKey);
-        Logger_Log("RegisterHotKey(HOTKEY_REPLAY_SAVE, key=0x%02X): %s\n", 
-                   g_config.replaySaveKey, hotkeyOk ? "SUCCESS" : "FAILED");
-        if (!hotkeyOk) {
+        hotkeyReplayRegistered = RegisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE, 0, g_config.replaySaveKey);
+        Logger_Log("RegisterHotKey(HOTKEY_REPLAY_SAVE, key=0x%02X): %s\n",
+                   g_config.replaySaveKey, hotkeyReplayRegistered ? "SUCCESS" : "FAILED");
+        if (!hotkeyReplayRegistered) {
             Logger_Log("  GetLastError: %lu\n", GetLastError());
         }
     } else {
         Logger_Log("Replay buffer disabled in config\n");
     }
-    
+
     // Register marker hotkey (always active, ignored if not recording/replaying)
-    {
-        BOOL markerOk = RegisterHotKey(g_controlWnd, HOTKEY_MARKER, 0, g_config.markerKey);
-        Logger_Log("RegisterHotKey(HOTKEY_MARKER, key=0x%02X): %s\n",
-                   g_config.markerKey, markerOk ? "SUCCESS" : "FAILED");
-        if (!markerOk) {
-            Logger_Log("  GetLastError: %lu\n", GetLastError());
-        }
+    hotkeyMarkerRegistered = RegisterHotKey(g_controlWnd, HOTKEY_MARKER, 0, g_config.markerKey);
+    Logger_Log("RegisterHotKey(HOTKEY_MARKER, key=0x%02X): %s\n",
+               g_config.markerKey, hotkeyMarkerRegistered ? "SUCCESS" : "FAILED");
+    if (!hotkeyMarkerRegistered) {
+        Logger_Log("  GetLastError: %lu\n", GetLastError());
     }
 
     // Start watchdog for hang detection (optional - monitors for frozen app)
     CrashHandler_StartWatchdog();
-    
+    watchdogStarted = TRUE;
 
-    
     // Message loop with heartbeat tracking
-    MSG msg;
-    DWORD msgCount = 0;
-    DWORD hotkeyCount = 0;
-    
     Logger_Log("Entering message loop\n");
-    
+
     while (GetMessage(&msg, NULL, 0, 0)) {
         // Heartbeat to logger and crash handler
         Logger_Heartbeat(THREAD_MAIN);
         CrashHandler_Heartbeat();
         msgCount++;
-        
+
         // Track WM_HOTKEY messages
         if (msg.message == WM_HOTKEY) {
             hotkeyCount++;
-            Logger_Log("WM_HOTKEY received: wParam=%llu, hwnd=%p, total_hotkeys=%lu\n", 
+            Logger_Log("WM_HOTKEY received: wParam=%llu, hwnd=%p, total_hotkeys=%lu\n",
                        (unsigned long long)msg.wParam, (void*)msg.hwnd, hotkeyCount);
         }
-        
+
         TranslateMessage(&msg);
         DispatchMessage(&msg);
     }
-    
 
-    
-    // Stop watchdog before cleanup
-    CrashHandler_StopWatchdog();
-    
-    // Cleanup
-    Logger_Log("Shutting down (msgs=%lu, hotkeys=%lu)\n", msgCount, hotkeyCount);
-    UnregisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE);
-    UnregisterHotKey(g_controlWnd, HOTKEY_MARKER);
-    Overlay_Destroy();  // Must be before ReplayBuffer_Shutdown (stops recording first)
-    ReplayBuffer_Shutdown(&g_replayBuffer);
-    Logger_Flush();
-    Logger_Shutdown();
-    Config_Save(&g_config);
-    GdiplusAPI_Shutdown(&g_gdip);
-    Capture_Shutdown(&g_capture);
-    AudioCapture_Shutdown();
-    AudioDevice_Shutdown();
-    MFShutdown();
-    CoUninitialize();
-    
-    // Shutdown crash handler last
-    CrashHandler_Shutdown();
-    
-    if (g_mutex) {
-        ReleaseMutex(g_mutex);
-        CloseHandle(g_mutex);
+    exitCode = (int)msg.wParam;
+
+cleanup:
+    // Stop watchdog before tearing subsystems down
+    if (watchdogStarted) {
+        CrashHandler_StopWatchdog();
     }
-    
-    return (int)msg.wParam;
-    
-    // Error cleanup labels - reverse order of initialization
-cleanup_capture:
-    Capture_Shutdown(&g_capture);
-cleanup_gdi:
-    GdiplusAPI_Shutdown(&g_gdip);
-cleanup_mf:
-    MFShutdown();
-cleanup_com:
-    CoUninitialize();
-cleanup_mutex:
-    if (g_mutex) {
-        ReleaseMutex(g_mutex);
-        CloseHandle(g_mutex);
+
+    if (loggerInited) {
+        Logger_Log("Shutting down (msgs=%lu, hotkeys=%lu)\n", msgCount, hotkeyCount);
     }
-    CrashHandler_Shutdown();
-    return 1;
+
+    if (hotkeyReplayRegistered) {
+        UnregisterHotKey(g_controlWnd, HOTKEY_REPLAY_SAVE);
+    }
+    if (hotkeyMarkerRegistered) {
+        UnregisterHotKey(g_controlWnd, HOTKEY_MARKER);
+    }
+
+    if (overlayCreated) {
+        Overlay_Destroy();  // Must be before ReplayBuffer_Shutdown (stops recording first)
+    }
+    if (replayInited) {
+        ReplayBuffer_Shutdown(&g_replayBuffer);
+    }
+
+    if (loggerInited) {
+        Logger_Flush();
+        Logger_Shutdown();
+    }
+
+    if (configLoaded) {
+        Config_Save(&g_config);
+    }
+
+    if (gdiInited) {
+        GdiplusAPI_Shutdown(&g_gdip);
+    }
+    if (captureInited) {
+        Capture_Shutdown(&g_capture);
+    }
+
+    // Audio subsystems are owned by the replay buffer lifecycle.
+    if (replayInited) {
+        AudioCapture_Shutdown();
+        AudioDevice_Shutdown();
+    }
+
+    if (mfInited) {
+        MFShutdown();
+    }
+    if (comInited) {
+        CoUninitialize();
+    }
+
+    DebugConsole_Destroy();
+
+    if (mutexOwned && g_mutex) {
+        ReleaseMutex(g_mutex);
+        SAFE_CLOSE_HANDLE(g_mutex);
+    }
+
+    if (crashHandlerInited) {
+        CrashHandler_Shutdown();
+    }
+
+    return exitCode;
 }
