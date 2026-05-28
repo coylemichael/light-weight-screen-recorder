@@ -243,13 +243,9 @@ void Recording_Stop(RecordingState* state) {
         SAFE_CLOSE_HANDLE(state->thread);
     }
 
-    // Flush NVENC (get remaining frames)
+    // Destroy NVENC encoder (sync mode + frameIntervalP=1 has no queued
+    // frames to drain; Destroy sends EOS internally).
     if (state->encoder) {
-        EncodedFrame flushed;
-        while (NVENCEncoder_Flush(state->encoder, &flushed)) {
-            // Manually invoke callback - flush doesn't trigger async callback
-            EncoderCallback(&flushed, &g_encoderCtx);
-        }
         NVENCEncoder_Destroy(state->encoder);
         state->encoder = NULL;
     }

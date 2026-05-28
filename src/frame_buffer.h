@@ -46,7 +46,7 @@ typedef struct {
     CRITICAL_SECTION lock;      // Thread safety
     BOOL initialized;
     
-    int evictLogCounter;        // Log throttle (resets on buffer restart)
+    int evictionCallCounter;    // Log throttle, ticks per EvictOldFrames call (not per eviction)
     
 } FrameBuffer;
 
@@ -57,8 +57,12 @@ BOOL FrameBuffer_Init(FrameBuffer* buf, int durationSeconds, int fps,
 // Shutdown and free all resources
 void FrameBuffer_Shutdown(FrameBuffer* buf);
 
-// Add an encoded frame to the buffer
-// Takes ownership of frame->data, caller should not free it
+// Add an encoded frame to the buffer.
+// Takes ownership of frame->data; caller should not free it.
+// PRECONDITION: frame->timestamp must be monotonic non-decreasing across calls.
+// Eviction compares the incoming timestamp to the tail timestamp; a backwards
+// jump (clock reset, encoder re-init reusing this buffer) breaks span math and
+// will stop evicting until the timeline catches up.
 BOOL FrameBuffer_Add(FrameBuffer* buf, EncodedFrame* frame);
 
 // Get current buffered duration in seconds

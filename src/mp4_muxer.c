@@ -1,5 +1,5 @@
 /*
- * mp4_muxer.c - MP4 Container Muxer (HEVC Passthrough)
+ * mp4_muxer.c - Media Foundation IMFSinkWriter - passthrough mux to MP4
  * 
  * SHARED BY: replay_buffer.c (batch API), recording.c (streaming API)
  * 
@@ -25,6 +25,7 @@
 #include <mfapi.h>
 #include <mfidl.h>
 #include <mfreadwrite.h>
+#include <limits.h>
 
 /*
  * HEVC format GUID: {43564548-0000-0010-8000-00AA00389B71}
@@ -54,30 +55,44 @@ static IMFMediaType* CreateHEVCMediaType(const MuxerConfig* config) {
     UINT32 bitrate = Util_CalculateBitrate(config->width, config->height, 
                                            config->fps, config->quality);
     
-    videoType->lpVtbl->SetGUID(videoType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
-    videoType->lpVtbl->SetGUID(videoType, &MF_MT_SUBTYPE, &MFVideoFormat_HEVC_Local);
-    videoType->lpVtbl->SetUINT32(videoType, &MF_MT_AVG_BITRATE, bitrate);
-    videoType->lpVtbl->SetUINT32(videoType, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    hr = videoType->lpVtbl->SetGUID(videoType, &MF_MT_MAJOR_TYPE, &MFMediaType_Video);
+    if (FAILED(hr)) goto fail;
+    hr = videoType->lpVtbl->SetGUID(videoType, &MF_MT_SUBTYPE, &MFVideoFormat_HEVC_Local);
+    if (FAILED(hr)) goto fail;
+    hr = videoType->lpVtbl->SetUINT32(videoType, &MF_MT_AVG_BITRATE, bitrate);
+    if (FAILED(hr)) goto fail;
+    hr = videoType->lpVtbl->SetUINT32(videoType, &MF_MT_INTERLACE_MODE, MFVideoInterlace_Progressive);
+    if (FAILED(hr)) goto fail;
     
     UINT64 frameSize = ((UINT64)config->width << 32) | config->height;
-    videoType->lpVtbl->SetUINT64(videoType, &MF_MT_FRAME_SIZE, frameSize);
+    hr = videoType->lpVtbl->SetUINT64(videoType, &MF_MT_FRAME_SIZE, frameSize);
+    if (FAILED(hr)) goto fail;
     
     UINT64 frameRate = ((UINT64)config->fps << 32) | 1;
-    videoType->lpVtbl->SetUINT64(videoType, &MF_MT_FRAME_RATE, frameRate);
+    hr = videoType->lpVtbl->SetUINT64(videoType, &MF_MT_FRAME_RATE, frameRate);
+    if (FAILED(hr)) goto fail;
     
     UINT64 pixelAspect = ((UINT64)1 << 32) | 1;
-    videoType->lpVtbl->SetUINT64(videoType, &MF_MT_PIXEL_ASPECT_RATIO, pixelAspect);
+    hr = videoType->lpVtbl->SetUINT64(videoType, &MF_MT_PIXEL_ASPECT_RATIO, pixelAspect);
+    if (FAILED(hr)) goto fail;
     
     /* Set HEVC sequence header (VPS/SPS/PPS) if provided */
     if (config->seqHeader && config->seqHeaderSize > 0) {
         hr = videoType->lpVtbl->SetBlob(videoType, &MF_MT_MPEG_SEQUENCE_HEADER, 
                                         config->seqHeader, config->seqHeaderSize);
-        if (SUCCEEDED(hr)) {
-            MuxLog("MP4Muxer: Set video sequence header (%u bytes)\n", config->seqHeaderSize);
+        if (FAILED(hr)) {
+            MuxLog("MP4Muxer: SetBlob(sequence header) failed 0x%08X\n", hr);
+            goto fail;
         }
+        MuxLog("MP4Muxer: Set video sequence header (%u bytes)\n", config->seqHeaderSize);
     }
     
     return videoType;
+
+fail:
+    MuxLog("MP4Muxer: CreateHEVCMediaType failed 0x%08X\n", hr);
+    SAFE_RELEASE(videoType);
+    return NULL;
 }
 
 /**
@@ -89,21 +104,37 @@ static IMFMediaType* CreateAACMediaType(const MuxerAudioConfig* config) {
     HRESULT hr = MFCreateMediaType(&audioType);
     if (FAILED(hr)) return NULL;
     
-    audioType->lpVtbl->SetGUID(audioType, &MF_MT_MAJOR_TYPE, &MFMediaType_Audio);
-    audioType->lpVtbl->SetGUID(audioType, &MF_MT_SUBTYPE, &MFAudioFormat_AAC);
-    audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_SAMPLES_PER_SECOND, config->sampleRate);
-    audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_NUM_CHANNELS, config->channels);
-    audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-    audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_AVG_BYTES_PER_SECOND, config->bitrate / 8);
-    audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AAC_PAYLOAD_TYPE, 0);  /* Raw AAC */
+    hr = audioType->lpVtbl->SetGUID(audioType, &MF_MT_MAJOR_TYPE, &MFMediaType_Audio);
+    if (FAILED(hr)) goto fail;
+    hr = audioType->lpVtbl->SetGUID(audioType, &MF_MT_SUBTYPE, &MFAudioFormat_AAC);
+    if (FAILED(hr)) goto fail;
+    hr = audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_SAMPLES_PER_SECOND, config->sampleRate);
+    if (FAILED(hr)) goto fail;
+    hr = audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_NUM_CHANNELS, config->channels);
+    if (FAILED(hr)) goto fail;
+    hr = audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+    if (FAILED(hr)) goto fail;
+    hr = audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AUDIO_AVG_BYTES_PER_SECOND, config->bitrate / 8);
+    if (FAILED(hr)) goto fail;
+    hr = audioType->lpVtbl->SetUINT32(audioType, &MF_MT_AAC_PAYLOAD_TYPE, 0);  /* Raw AAC */
+    if (FAILED(hr)) goto fail;
     
     /* Set AudioSpecificConfig if available */
     if (config->configData && config->configSize > 0) {
-        audioType->lpVtbl->SetBlob(audioType, &MF_MT_USER_DATA, 
+        hr = audioType->lpVtbl->SetBlob(audioType, &MF_MT_USER_DATA, 
             config->configData, config->configSize);
+        if (FAILED(hr)) {
+            MuxLog("MP4Muxer: SetBlob(AudioSpecificConfig) failed 0x%08X\n", hr);
+            goto fail;
+        }
     }
     
     return audioType;
+
+fail:
+    MuxLog("MP4Muxer: CreateAACMediaType failed 0x%08X\n", hr);
+    SAFE_RELEASE(audioType);
+    return NULL;
 }
 
 /**
@@ -114,47 +145,46 @@ static BOOL WriteVideoSampleToWriter(IMFSinkWriter* writer, DWORD streamIndex,
                                       const MuxerSample* sample) {
     if (!sample->data || sample->size == 0) return FALSE;
     
+    BOOL result = FALSE;
     IMFMediaBuffer* mfBuffer = NULL;
-    HRESULT hr = MFCreateMemoryBuffer(sample->size, &mfBuffer);
-    if (FAILED(hr)) return FALSE;
-    
-    BYTE* bufData = NULL;
-    hr = mfBuffer->lpVtbl->Lock(mfBuffer, &bufData, NULL, NULL);
-    if (FAILED(hr)) {
-        mfBuffer->lpVtbl->Release(mfBuffer);
-        return FALSE;
-    }
-    LWSR_ASSERT(bufData != NULL);
-    if (!bufData) {
-        mfBuffer->lpVtbl->Unlock(mfBuffer);
-        mfBuffer->lpVtbl->Release(mfBuffer);
-        return FALSE;
-    }
-    
-    memcpy(bufData, sample->data, sample->size);
-    mfBuffer->lpVtbl->Unlock(mfBuffer);
-    mfBuffer->lpVtbl->SetCurrentLength(mfBuffer, sample->size);
-    
     IMFSample* mfSample = NULL;
-    hr = MFCreateSample(&mfSample);
-    if (FAILED(hr)) {
-        mfBuffer->lpVtbl->Release(mfBuffer);
-        return FALSE;
-    }
+    BOOL locked = FALSE;
+    BYTE* bufData = NULL;
+    HRESULT hr;
     
-    mfSample->lpVtbl->AddBuffer(mfSample, mfBuffer);
-    mfSample->lpVtbl->SetSampleTime(mfSample, sample->timestamp);
-    mfSample->lpVtbl->SetSampleDuration(mfSample, sample->duration);
+    hr = MFCreateMemoryBuffer(sample->size, &mfBuffer);
+    if (FAILED(hr)) goto cleanup;
+    
+    MF_LOCK_BUFFER(mfBuffer, &bufData, NULL, NULL, hr, cleanup, locked);
+    memcpy(bufData, sample->data, sample->size);
+    MF_UNLOCK_BUFFER(mfBuffer, locked);
+    
+    hr = mfBuffer->lpVtbl->SetCurrentLength(mfBuffer, sample->size);
+    if (FAILED(hr)) goto cleanup;
+    
+    hr = MFCreateSample(&mfSample);
+    if (FAILED(hr)) goto cleanup;
+    
+    hr = mfSample->lpVtbl->AddBuffer(mfSample, mfBuffer);
+    if (FAILED(hr)) goto cleanup;
+    hr = mfSample->lpVtbl->SetSampleTime(mfSample, sample->timestamp);
+    if (FAILED(hr)) goto cleanup;
+    hr = mfSample->lpVtbl->SetSampleDuration(mfSample, sample->duration);
+    if (FAILED(hr)) goto cleanup;
     
     if (sample->isKeyframe) {
-        mfSample->lpVtbl->SetUINT32(mfSample, &MFSampleExtension_CleanPoint, TRUE);
+        hr = mfSample->lpVtbl->SetUINT32(mfSample, &MFSampleExtension_CleanPoint, TRUE);
+        if (FAILED(hr)) goto cleanup;
     }
     
     hr = writer->lpVtbl->WriteSample(writer, streamIndex, mfSample);
-    mfSample->lpVtbl->Release(mfSample);
-    mfBuffer->lpVtbl->Release(mfBuffer);
+    result = SUCCEEDED(hr);
     
-    return SUCCEEDED(hr);
+cleanup:
+    MF_UNLOCK_BUFFER(mfBuffer, locked);
+    SAFE_RELEASE(mfSample);
+    SAFE_RELEASE(mfBuffer);
+    return result;
 }
 
 /**
@@ -165,43 +195,41 @@ static BOOL WriteAudioSampleToWriter(IMFSinkWriter* writer, DWORD streamIndex,
                                       const MuxerAudioSample* sample) {
     if (!sample->data || sample->size == 0) return FALSE;
     
+    BOOL result = FALSE;
     IMFMediaBuffer* mfBuffer = NULL;
-    HRESULT hr = MFCreateMemoryBuffer(sample->size, &mfBuffer);
-    if (FAILED(hr)) return FALSE;
-    
-    BYTE* bufData = NULL;
-    hr = mfBuffer->lpVtbl->Lock(mfBuffer, &bufData, NULL, NULL);
-    if (FAILED(hr)) {
-        mfBuffer->lpVtbl->Release(mfBuffer);
-        return FALSE;
-    }
-    LWSR_ASSERT(bufData != NULL);
-    if (!bufData) {
-        mfBuffer->lpVtbl->Unlock(mfBuffer);
-        mfBuffer->lpVtbl->Release(mfBuffer);
-        return FALSE;
-    }
-    
-    memcpy(bufData, sample->data, sample->size);
-    mfBuffer->lpVtbl->Unlock(mfBuffer);
-    mfBuffer->lpVtbl->SetCurrentLength(mfBuffer, sample->size);
-    
     IMFSample* mfSample = NULL;
-    hr = MFCreateSample(&mfSample);
-    if (FAILED(hr)) {
-        mfBuffer->lpVtbl->Release(mfBuffer);
-        return FALSE;
-    }
+    BOOL locked = FALSE;
+    BYTE* bufData = NULL;
+    HRESULT hr;
     
-    mfSample->lpVtbl->AddBuffer(mfSample, mfBuffer);
-    mfSample->lpVtbl->SetSampleTime(mfSample, sample->timestamp);
-    mfSample->lpVtbl->SetSampleDuration(mfSample, sample->duration);
+    hr = MFCreateMemoryBuffer(sample->size, &mfBuffer);
+    if (FAILED(hr)) goto cleanup;
+    
+    MF_LOCK_BUFFER(mfBuffer, &bufData, NULL, NULL, hr, cleanup, locked);
+    memcpy(bufData, sample->data, sample->size);
+    MF_UNLOCK_BUFFER(mfBuffer, locked);
+    
+    hr = mfBuffer->lpVtbl->SetCurrentLength(mfBuffer, sample->size);
+    if (FAILED(hr)) goto cleanup;
+    
+    hr = MFCreateSample(&mfSample);
+    if (FAILED(hr)) goto cleanup;
+    
+    hr = mfSample->lpVtbl->AddBuffer(mfSample, mfBuffer);
+    if (FAILED(hr)) goto cleanup;
+    hr = mfSample->lpVtbl->SetSampleTime(mfSample, sample->timestamp);
+    if (FAILED(hr)) goto cleanup;
+    hr = mfSample->lpVtbl->SetSampleDuration(mfSample, sample->duration);
+    if (FAILED(hr)) goto cleanup;
     
     hr = writer->lpVtbl->WriteSample(writer, streamIndex, mfSample);
-    mfSample->lpVtbl->Release(mfSample);
-    mfBuffer->lpVtbl->Release(mfBuffer);
+    result = SUCCEEDED(hr);
     
-    return SUCCEEDED(hr);
+cleanup:
+    MF_UNLOCK_BUFFER(mfBuffer, locked);
+    SAFE_RELEASE(mfSample);
+    SAFE_RELEASE(mfBuffer);
+    return result;
 }
 
 BOOL MP4Muxer_WriteFile(
@@ -233,9 +261,12 @@ BOOL MP4Muxer_WriteFile(
     
     MuxLog("MP4Muxer: Writing %d samples to %s\n", sampleCount, outputPath);
     
-    // Convert path to wide string
+    // Convert path to wide string (UTF-8 -> UTF-16) so non-ANSI paths survive
     WCHAR wPath[MAX_PATH];
-    MultiByteToWideChar(CP_ACP, 0, outputPath, -1, wPath, MAX_PATH);
+    if (MultiByteToWideChar(CP_UTF8, 0, outputPath, -1, wPath, MAX_PATH) == 0) {
+        MuxLog("MP4Muxer: MultiByteToWideChar failed (path too long or invalid UTF-8)\n");
+        return FALSE;
+    }
     
     // Create SinkWriter with hardware acceleration enabled
     HRESULT hr = MFCreateAttributes(&attrs, 2);
@@ -302,7 +333,7 @@ BOOL MP4Muxer_WriteFile(
            samplesWritten, sampleCount, (double)finalDuration / (double)MF_UNITS_PER_SECOND, keyframeCount);
     
     // Finalize - can be slow on cloud/network drives
-    if (beginWritingCalled) {
+    {
         DWORD finalizeStart = GetTickCount();
         hr = writer->lpVtbl->Finalize(writer);
         DWORD finalizeTime = GetTickCount() - finalizeStart;
@@ -363,9 +394,12 @@ BOOL MP4Muxer_WriteFileWithAudio(
     MuxLog("MP4Muxer: Writing %d video + %d audio samples to %s\n", 
            videoSampleCount, audioSampleCount, outputPath);
     
-    // Convert path to wide string
+    // Convert path to wide string (UTF-8 -> UTF-16) so non-ANSI paths survive
     WCHAR wPath[MAX_PATH];
-    MultiByteToWideChar(CP_ACP, 0, outputPath, -1, wPath, MAX_PATH);
+    if (MultiByteToWideChar(CP_UTF8, 0, outputPath, -1, wPath, MAX_PATH) == 0) {
+        MuxLog("MP4Muxer: MultiByteToWideChar failed (path too long or invalid UTF-8)\n");
+        return FALSE;
+    }
     
     // Create SinkWriter
     HRESULT hr = MFCreateAttributes(&attrs, 2);
@@ -470,7 +504,7 @@ BOOL MP4Muxer_WriteFileWithAudio(
     
     // Finalize - this can be VERY slow on cloud/network drives
     // because it rewrites the MP4 header (moov atom) with final timing info
-    if (beginWritingCalled) {
+    {
         DWORD finalizeStart = GetTickCount();
         hr = writer->lpVtbl->Finalize(writer);
         DWORD finalizeTime = GetTickCount() - finalizeStart;
@@ -530,19 +564,22 @@ BOOL MP4Muxer_WriteFileWithMultiAudio(
     IMFSinkWriter* writer = NULL;
     IMFAttributes* attrs = NULL;
     IMFMediaType* videoType = NULL;
-    IMFMediaType* audioTypes[8] = {0};   /* Max 8 audio tracks */
+    IMFMediaType* audioTypes[MAX_AUDIO_TRACKS] = {0};
     DWORD videoStreamIndex = 0;
-    DWORD audioStreamIndices[8] = {0};
+    DWORD audioStreamIndices[MAX_AUDIO_TRACKS] = {0};
     int actualTrackCount = 0;
     BOOL beginWritingCalled = FALSE;
 
-    if (audioTrackCount > 8) audioTrackCount = 8;
+    if (audioTrackCount > MAX_AUDIO_TRACKS) audioTrackCount = MAX_AUDIO_TRACKS;
 
     MuxLog("MP4Muxer: Writing %d video samples + %d audio tracks to %s\n",
            videoSampleCount, audioTrackCount, outputPath);
 
     WCHAR wPath[MAX_PATH];
-    MultiByteToWideChar(CP_ACP, 0, outputPath, -1, wPath, MAX_PATH);
+    if (MultiByteToWideChar(CP_UTF8, 0, outputPath, -1, wPath, MAX_PATH) == 0) {
+        MuxLog("MP4Muxer: MultiByteToWideChar failed (path too long or invalid UTF-8)\n");
+        return FALSE;
+    }
 
     HRESULT hr = MFCreateAttributes(&attrs, 2);
     CHECK_HR_LOG(hr, cleanup, "MP4Muxer: MFCreateAttributes");
@@ -600,14 +637,14 @@ BOOL MP4Muxer_WriteFileWithMultiAudio(
      * Use cursors for video + each audio track. */
     {
         int videoIdx = 0;
-        int audioIdx[8] = {0};
+        int audioIdx[MAX_AUDIO_TRACKS] = {0};
         int videoWritten = 0;
-        int audioWritten[8] = {0};
+        int audioWritten[MAX_AUDIO_TRACKS] = {0};
         int totalSamples = videoSampleCount;
         for (int t = 0; t < audioTrackCount; t++) totalSamples += audioTracks[t].sampleCount;
         int samplesProcessed = 0;
         int lastProgressPercent = -1;
-        int trackForIdx[8];  /* maps actualTrack -> original track index */
+        int trackForIdx[MAX_AUDIO_TRACKS];  /* maps actualTrack -> original track index */
         {
             int at = 0;
             for (int t = 0; t < audioTrackCount; t++) {
@@ -677,7 +714,7 @@ BOOL MP4Muxer_WriteFileWithMultiAudio(
     }
 
     /* Finalize */
-    if (beginWritingCalled) {
+    {
         DWORD finalizeStart = GetTickCount();
         hr = writer->lpVtbl->Finalize(writer);
         DWORD finalizeTime = GetTickCount() - finalizeStart;
@@ -691,7 +728,7 @@ BOOL MP4Muxer_WriteFileWithMultiAudio(
     MuxLog("MP4Muxer: Finalize %s\n", result ? "OK" : "FAILED");
 
 cleanup:
-    for (int t = 0; t < 8; t++) SAFE_RELEASE(audioTypes[t]);
+    for (int t = 0; t < MAX_AUDIO_TRACKS; t++) SAFE_RELEASE(audioTypes[t]);
     SAFE_RELEASE(videoType);
     SAFE_RELEASE(attrs);
     SAFE_RELEASE(writer);
@@ -756,9 +793,12 @@ StreamingMuxer* StreamingMuxer_CreateWithAudio(
     MuxLog("StreamingMuxer: Creating %s (%dx%d @ %d fps)\n", 
            outputPath, videoConfig->width, videoConfig->height, videoConfig->fps);
     
-    // Convert path to wide string
+    // Convert path to wide string (UTF-8 -> UTF-16) so non-ANSI paths survive
     WCHAR wPath[MAX_PATH];
-    MultiByteToWideChar(CP_ACP, 0, outputPath, -1, wPath, MAX_PATH);
+    if (MultiByteToWideChar(CP_UTF8, 0, outputPath, -1, wPath, MAX_PATH) == 0) {
+        MuxLog("StreamingMuxer: MultiByteToWideChar failed (path too long or invalid UTF-8)\n");
+        goto cleanup;
+    }
     
     // Create SinkWriter with hardware acceleration
     HRESULT hr = MFCreateAttributes(&attrs, 2);

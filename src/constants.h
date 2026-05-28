@@ -95,6 +95,14 @@ void Logger_Log(const char* fmt, ...);
 #define MF_UNITS_PER_SECOND         10000000LL
 
 /* ============================================================================
+ * MUXER LIMITS
+ * ============================================================================
+ * MAX_AUDIO_TRACKS bounds the multi-track audio path in mp4_muxer.c (one
+ * mixed track + per-source tracks). Sized to fit typical capture topologies.
+ */
+#define MAX_AUDIO_TRACKS            8
+
+/* ============================================================================
  * GLOBAL HOTKEY IDS
  * ============================================================================
  * Shared by main.c (register/unregister), overlay.c (WM_HOTKEY dispatch),
@@ -478,6 +486,7 @@ void Logger_Log(const char* fmt, ...);
 #define AAC_BITRATE                 192000
 #define AAC_LC_PROFILE_LEVEL        0x29
 #define AAC_OUTPUT_BUFFER_SIZE      8192
+#define AAC_SAMPLES_PER_FRAME       1024    // AAC-LC fixed frame size
 
 /* ============================================================================
  * OVERLAY UI CONSTANTS

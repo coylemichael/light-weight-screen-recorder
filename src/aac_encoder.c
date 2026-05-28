@@ -1,14 +1,5 @@
 /*
- * AAC Audio Encoder Implementation
- * Uses Media Foundation AAC encoder MFT
- *
- * ERROR HANDLING PATTERN:
- * - Goto-cleanup (cleanup_fail label) for Create with multiple allocations
- * - Uses CHECK_HR/CHECK_HR_LOG macros from mem_utils.h for HRESULT checks
- * - Continue-on-error for ProcessOutput loop (best effort encoding)
- * - All MF errors allow graceful degradation
- * - Returns NULL to propagate errors; callers must check
- * - "Always check creation, release in reverse order" (see mem_utils.h)
+ * aac_encoder.c - Media Foundation AAC encoding
  */
 
 #include "aac_encoder.h"
@@ -64,16 +55,26 @@ static IMFMediaType* CreatePCMType(void) {
     IMFMediaType* type = NULL;
     HRESULT hr = MFCreateMediaType(&type);
     if (FAILED(hr)) return NULL;
-    
-    type->lpVtbl->SetGUID(type, &MF_MT_MAJOR_TYPE, &MFMediaType_Audio);
-    type->lpVtbl->SetGUID(type, &MF_MT_SUBTYPE, &MFAudioFormat_PCM);
-    type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_SAMPLES_PER_SECOND, AAC_SAMPLE_RATE);
-    type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_NUM_CHANNELS, AAC_CHANNELS);
-    type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-    type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_BLOCK_ALIGNMENT, AAC_CHANNELS * 2);
-    type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AAC_SAMPLE_RATE * AAC_CHANNELS * 2);
-    
+
+    hr = type->lpVtbl->SetGUID(type, &MF_MT_MAJOR_TYPE, &MFMediaType_Audio);
+    if (FAILED(hr)) goto fail;
+    hr = type->lpVtbl->SetGUID(type, &MF_MT_SUBTYPE, &MFAudioFormat_PCM);
+    if (FAILED(hr)) goto fail;
+    hr = type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_SAMPLES_PER_SECOND, AAC_SAMPLE_RATE);
+    if (FAILED(hr)) goto fail;
+    hr = type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_NUM_CHANNELS, AAC_CHANNELS);
+    if (FAILED(hr)) goto fail;
+    hr = type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+    if (FAILED(hr)) goto fail;
+    hr = type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_BLOCK_ALIGNMENT, AAC_CHANNELS * 2);
+    if (FAILED(hr)) goto fail;
+    hr = type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AAC_SAMPLE_RATE * AAC_CHANNELS * 2);
+    if (FAILED(hr)) goto fail;
+
     return type;
+fail:
+    SAFE_RELEASE(type);
+    return NULL;
 }
 
 // Helper: Create AAC output type
@@ -81,17 +82,28 @@ static IMFMediaType* CreateAACType(void) {
     IMFMediaType* type = NULL;
     HRESULT hr = MFCreateMediaType(&type);
     if (FAILED(hr)) return NULL;
-    
-    type->lpVtbl->SetGUID(type, &MF_MT_MAJOR_TYPE, &MFMediaType_Audio);
-    type->lpVtbl->SetGUID(type, &MF_MT_SUBTYPE, &MFAudioFormat_AAC);
-    type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_SAMPLES_PER_SECOND, AAC_SAMPLE_RATE);
-    type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_NUM_CHANNELS, AAC_CHANNELS);
-    type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
-    type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AAC_BITRATE / 8);
-    type->lpVtbl->SetUINT32(type, &MF_MT_AAC_PAYLOAD_TYPE, 0);  // Raw AAC
-    type->lpVtbl->SetUINT32(type, &MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, AAC_LC_PROFILE_LEVEL);
-    
+
+    hr = type->lpVtbl->SetGUID(type, &MF_MT_MAJOR_TYPE, &MFMediaType_Audio);
+    if (FAILED(hr)) goto fail;
+    hr = type->lpVtbl->SetGUID(type, &MF_MT_SUBTYPE, &MFAudioFormat_AAC);
+    if (FAILED(hr)) goto fail;
+    hr = type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_SAMPLES_PER_SECOND, AAC_SAMPLE_RATE);
+    if (FAILED(hr)) goto fail;
+    hr = type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_NUM_CHANNELS, AAC_CHANNELS);
+    if (FAILED(hr)) goto fail;
+    hr = type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_BITS_PER_SAMPLE, 16);
+    if (FAILED(hr)) goto fail;
+    hr = type->lpVtbl->SetUINT32(type, &MF_MT_AUDIO_AVG_BYTES_PER_SECOND, AAC_BITRATE / 8);
+    if (FAILED(hr)) goto fail;
+    hr = type->lpVtbl->SetUINT32(type, &MF_MT_AAC_PAYLOAD_TYPE, 0);  // Raw AAC
+    if (FAILED(hr)) goto fail;
+    hr = type->lpVtbl->SetUINT32(type, &MF_MT_AAC_AUDIO_PROFILE_LEVEL_INDICATION, AAC_LC_PROFILE_LEVEL);
+    if (FAILED(hr)) goto fail;
+
     return type;
+fail:
+    SAFE_RELEASE(type);
+    return NULL;
 }
 
 // Process output from encoder
@@ -230,8 +242,8 @@ AACEncoder* AACEncoder_CreateEx(AACEncoderError* outError) {
         return NULL;
     }
     
-    // AAC-LC: 1024 samples per frame
-    encoder->samplesPerFrame = 1024;
+    // AAC-LC: AAC_SAMPLES_PER_FRAME samples per frame
+    encoder->samplesPerFrame = AAC_SAMPLES_PER_FRAME;
     encoder->bytesPerFrame = encoder->samplesPerFrame * AAC_CHANNELS * 2;  // 16-bit stereo
     
     // Frame duration in 100ns units
@@ -295,6 +307,10 @@ AACEncoder* AACEncoder_CreateEx(AACEncoderError* outError) {
     
     // Set output type first (AAC encoders often need this)
     encoder->outputType = CreateAACType();
+    if (encoder->outputType == NULL) {
+        err = AAC_ERR_MEMORY;
+        goto cleanup_fail;
+    }
     hr = encoder->transform->lpVtbl->SetOutputType(encoder->transform, 0, encoder->outputType, 0);
     if (FAILED(hr)) {
         // Try getting available output type
@@ -310,6 +326,10 @@ AACEncoder* AACEncoder_CreateEx(AACEncoderError* outError) {
     
     // Set input type
     encoder->inputType = CreatePCMType();
+    if (encoder->inputType == NULL) {
+        err = AAC_ERR_MEMORY;
+        goto cleanup_fail;
+    }
     hr = encoder->transform->lpVtbl->SetInputType(encoder->transform, 0, encoder->inputType, 0);
     if (FAILED(hr)) {
         SAFE_RELEASE(encoder->inputType);
@@ -325,7 +345,14 @@ AACEncoder* AACEncoder_CreateEx(AACEncoderError* outError) {
         err = AAC_ERR_TYPE_NEGOTIATION;
         goto cleanup_fail;
     }
-    
+
+    // Type negotiation fallback may have left outputType NULL on failure paths.
+    if (encoder->outputType == NULL) {
+        err = AAC_ERR_TYPE_NEGOTIATION;
+        hr = E_FAIL;
+        goto cleanup_fail;
+    }
+
     // Get AudioSpecificConfig from output type
     UINT32 blobSize = 0;
     hr = encoder->outputType->lpVtbl->GetBlobSize(encoder->outputType, &MF_MT_USER_DATA, &blobSize);

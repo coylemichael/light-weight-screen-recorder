@@ -36,6 +36,8 @@ BOOL AACEncoder_IsAvailable(void);
 
 // Create AAC encoder with error reporting
 // Returns NULL on failure, error code in *outError if non-NULL
+// Precondition: Caller must have initialized COM (CoInitializeEx) and
+// Media Foundation (MFStartup) on this thread before calling.
 AACEncoder* AACEncoder_CreateEx(AACEncoderError* outError);
 
 // Destroy encoder
@@ -48,12 +50,17 @@ void AACEncoder_SetCallback(AACEncoder* encoder, AACEncoderCallback callback, vo
 // pcmData: 16-bit stereo PCM at 48kHz
 // pcmSize: size in bytes
 // timestamp: presentation time in 100ns units
+// Precondition: Caller must have initialized COM and Media Foundation on
+// this thread. Not thread-safe; serialize calls from a single feeder thread.
 BOOL AACEncoder_Feed(AACEncoder* encoder, const BYTE* pcmData, int pcmSize, LONGLONG timestamp);
 
 // Get encoder info for muxer
 BOOL AACEncoder_GetConfig(AACEncoder* encoder, BYTE** configData, int* configSize);
 
 // Diagnostic accessors for A/V sync investigation.
+// Thread-safety: 64-bit reads are atomic on x64 (LWSR's only build target).
+// If ever ported to x86, add InterlockedRead64 or equivalent synchronization
+// when called from threads other than the audio feeder thread.
 // Total bytes of PCM ingested via AACEncoder_Feed (monotonic).
 LONGLONG AACEncoder_GetPcmBytesIngested(AACEncoder* encoder);
 // PTS (100ns units) of the most recently emitted AAC frame; 0 if none yet.

@@ -73,9 +73,9 @@ static void EvictOldFrames(FrameBuffer* buf, LONGLONG newTimestamp) {
         evicted++;
     }
     
-    // Log eviction occasionally to show buffer is working
-    buf->evictLogCounter++;
-    if (evicted > 0 && (buf->evictLogCounter % EVICT_LOG_INTERVAL) == 0 && buf->count > 0) {
+    // Log throttle ticks every call; emission still gated by evicted>0 so most bursts stay silent.
+    buf->evictionCallCounter++;
+    if (evicted > 0 && (buf->evictionCallCounter % EVICT_LOG_INTERVAL) == 0 && buf->count > 0) {
         double span = (double)(newTimestamp - buf->frames[buf->tail].timestamp) / 10000000.0;
         BufLog("Eviction: removed %d frames, count now %d, span=%.2fs\n", 
                evicted, buf->count, span);
@@ -97,11 +97,12 @@ BOOL FrameBuffer_Init(FrameBuffer* buf, int durationSeconds, int fps,
     LWSR_ASSERT(width > 0);
     LWSR_ASSERT(height > 0);
     
+    BOOL csInitialized = FALSE;
+
     if (!buf) return FALSE;
     if (durationSeconds <= 0 || fps <= 0 || width <= 0 || height <= 0) return FALSE;
     
     ZeroMemory(buf, sizeof(FrameBuffer));
-    BOOL csInitialized = FALSE;
     
     // Calculate capacity: frames for 1.5x duration (headroom)
     // Use size_t to prevent overflow during calculation
@@ -182,6 +183,8 @@ BOOL FrameBuffer_Add(FrameBuffer* buf, EncodedFrame* frame) {
     LWSR_ASSERT(buf != NULL);
     LWSR_ASSERT(frame != NULL);
     
+    // `initialized` read is unsynchronized; relies on external lifecycle ordering
+    // in replay_buffer.c (Init completes before Add; Shutdown follows producer stop).
     if (!buf || !buf->initialized || !frame || !frame->data) return FALSE;
     
     // Invariant checks
@@ -189,6 +192,9 @@ BOOL FrameBuffer_Add(FrameBuffer* buf, EncodedFrame* frame) {
     LWSR_ASSERT(buf->count <= buf->capacity);
     LWSR_ASSERT(buf->head >= 0 && buf->head < buf->capacity);
     LWSR_ASSERT(buf->tail >= 0 && buf->tail < buf->capacity);
+    // Eviction math assumes monotonic non-decreasing frame->timestamp (caller contract).
+    LWSR_ASSERT(buf->count == 0 ||
+                frame->timestamp >= buf->frames[(buf->head - 1 + buf->capacity) % buf->capacity].timestamp);
     
     EnterCriticalSection(&buf->lock);
     
@@ -232,6 +238,7 @@ double FrameBuffer_GetDuration(FrameBuffer* buf) {
     // Precondition
     LWSR_ASSERT(buf != NULL);
     
+    // See FrameBuffer_Add: `initialized` is externally serialized, not lock-guarded.
     if (!buf || !buf->initialized || buf->count == 0) return 0.0;
     
     EnterCriticalSection(&buf->lock);
@@ -252,6 +259,7 @@ int FrameBuffer_GetCount(FrameBuffer* buf) {
     // Precondition
     LWSR_ASSERT(buf != NULL);
     
+    // See FrameBuffer_Add: `initialized` is externally serialized, not lock-guarded.
     if (!buf || !buf->initialized) return 0;
     
     EnterCriticalSection(&buf->lock);
@@ -265,6 +273,7 @@ size_t FrameBuffer_GetMemoryUsage(FrameBuffer* buf) {
     // Precondition
     LWSR_ASSERT(buf != NULL);
     
+    // See FrameBuffer_Add: `initialized` is externally serialized, not lock-guarded.
     if (!buf || !buf->initialized) return 0;
     
     EnterCriticalSection(&buf->lock);
@@ -291,6 +300,7 @@ BOOL FrameBuffer_GetFramesForMuxing(FrameBuffer* buf, MuxerSample** outFrames, i
     LWSR_ASSERT(outFrames != NULL);
     LWSR_ASSERT(outCount != NULL);
     
+    // See FrameBuffer_Add: `initialized` is externally serialized, not lock-guarded.
     if (!buf || !buf->initialized || !outFrames || !outCount) return FALSE;
     
     *outFrames = NULL;
@@ -328,9 +338,9 @@ BOOL FrameBuffer_GetFramesForMuxing(FrameBuffer* buf, MuxerSample** outFrames, i
         return FALSE;
     }
     
-    // Allocate output array with overflow check
+    // Allocate output array with overflow check (actualCount > 0 guaranteed above).
     size_t allocSize = (size_t)actualCount * sizeof(MuxerSample);
-    if (actualCount > 0 && allocSize / (size_t)actualCount != sizeof(MuxerSample)) {
+    if (allocSize / (size_t)actualCount != sizeof(MuxerSample)) {
         LeaveCriticalSection(&buf->lock);
         return FALSE;  // Overflow
     }
@@ -351,7 +361,9 @@ BOOL FrameBuffer_GetFramesForMuxing(FrameBuffer* buf, MuxerSample** outFrames, i
     // Zero-initialize to ensure safe cleanup on partial allocation failure
     memset(frames, 0, allocSize);
     
-    // Deep copy frames starting from keyframe while holding lock (prevents use-after-free)
+    // Deep copy under lock prevents use-after-free vs concurrent eviction.
+    // Bound: up to MAX_BUFFER_CAPACITY (~27 min @60fps) malloc+memcpy stalls the producer;
+    // acceptable because save is a deliberate user action, not realtime.
     int copiedCount = 0;
     BOOL allocFailed = FALSE;
     for (int i = startOffset; i < count && !allocFailed; i++) {
@@ -389,6 +401,9 @@ BOOL FrameBuffer_GetFramesForMuxing(FrameBuffer* buf, MuxerSample** outFrames, i
     return TRUE;
 }
 
+// Written once at startup before any consumer touches seqHeader/seqHeaderSize.
+// Lock is taken here for symmetry only; readers (replay_buffer.c HandleSaveRequest)
+// access these fields lock-free, which is safe under the write-once contract.
 void FrameBuffer_SetSequenceHeader(FrameBuffer* buf, const BYTE* header, DWORD size) {
     // Preconditions
     LWSR_ASSERT(buf != NULL);

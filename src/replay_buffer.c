@@ -502,11 +502,11 @@ void ReplayBuffer_Stop(ReplayBufferState* state) {
              * for NVENC threads). The thread handle is closed below but the thread
              * itself and its resources (encoder, textures, etc.) are leaked. */
             ReplayLog("WARNING: Buffer thread hung (5s timeout), leaking resources\n");
-            
-            /* Mark encoder as leaked so session can be recovered later */
+
+            /* Drop our handle on the encoder; the hung thread still owns it.
+             * NVENC session cannot be safely destroyed from this thread. */
             ReplayVideoState* video = &g_internal.video;
             if (video->encoder) {
-                NVENCEncoder_MarkLeaked(video->encoder);
                 video->encoder = NULL;
             }
         }
@@ -858,14 +858,11 @@ static void ShutdownAudioPipeline(ReplayAudioState* audio) {
  */
 static void ShutdownVideoPipeline(ReplayVideoState* video, GPUConverter* gpuConverter) {
     GPUConverter_Shutdown(gpuConverter);
-    
+
     if (video->encoder) {
-        /* Flush remaining frames */
-        EncodedFrame flushed = {0};
-        while (NVENCEncoder_Flush(video->encoder, &flushed)) {
-            FrameBuffer_Add(&video->frameBuffer, &flushed);
-        }
-        
+        /* Sync NVENC path with frameIntervalP=1 produces output on every
+         * SubmitFrame call; nothing is queued to drain here. Destroy sends
+         * the EOS marker internally. */
         NVENCEncoder_Destroy(video->encoder);
         video->encoder = NULL;
     }
@@ -1083,6 +1080,8 @@ static BOOL HandleSaveRequest(ReplayBufferState* state, ReplayVideoState* video,
     videoConfig.height = video->frameBuffer.height;
     videoConfig.fps = video->frameBuffer.fps;
     videoConfig.quality = video->frameBuffer.quality;
+    /* seqHeader/seqHeaderSize are write-once (set during StartCapture before any save
+     * can fire); lock-free read here is safe. See FrameBuffer_SetSequenceHeader. */
     videoConfig.seqHeader = video->frameBuffer.seqHeaderSize > 0 ? video->frameBuffer.seqHeader : NULL;
     videoConfig.seqHeaderSize = video->frameBuffer.seqHeaderSize;
     
@@ -1532,10 +1531,6 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                 double actualFPS = frameCount / logElapsedSec;
                 double attemptFPS = attemptCount / logElapsedSec;
                 
-                /* Get encoder stats */
-                int encFrames = 0;
-                double avgEncMs = 0;
-                NVENCEncoder_GetStats(video->encoder, &encFrames, &avgEncMs);
                 int currentQP = NVENCEncoder_GetQP(video->encoder);
                 
                 /* Get frame size stats to detect quality drift */

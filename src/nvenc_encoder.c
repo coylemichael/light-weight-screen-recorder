@@ -91,8 +91,6 @@ typedef CUresult (*CU_CTX_POP_CURRENT)(CUcontext*);
 typedef CUresult (*CU_ARRAY3D_CREATE)(CUarray*, const CUDA_ARRAY3D_DESCRIPTOR*);
 typedef CUresult (*CU_ARRAY_DESTROY)(CUarray);
 typedef CUresult (*CU_MEMCPY2D)(const CUDA_MEMCPY2D*);
-typedef CUresult (*CU_MEM_HOST_REGISTER)(void*, size_t, unsigned int);
-typedef CUresult (*CU_MEM_HOST_UNREGISTER)(void*);
 typedef CUresult (*CU_GET_ERROR_NAME)(CUresult, const char**);
 typedef CUresult (*CU_GET_ERROR_STRING)(CUresult, const char**);
 
@@ -108,8 +106,6 @@ typedef struct {
     CU_ARRAY3D_CREATE cuArray3DCreate;
     CU_ARRAY_DESTROY cuArrayDestroy;
     CU_MEMCPY2D cuMemcpy2D;
-    CU_MEM_HOST_REGISTER cuMemHostRegister;
-    CU_MEM_HOST_UNREGISTER cuMemHostUnregister;
     CU_GET_ERROR_NAME cuGetErrorName;
     CU_GET_ERROR_STRING cuGetErrorString;
 } CudaFunctions;
@@ -223,8 +219,6 @@ static BOOL init_cuda(void) {
     cu->cuArray3DCreate = (CU_ARRAY3D_CREATE)load_cuda_func("cuArray3DCreate_v2");
     cu->cuArrayDestroy = (CU_ARRAY_DESTROY)load_cuda_func("cuArrayDestroy");
     cu->cuMemcpy2D = (CU_MEMCPY2D)load_cuda_func("cuMemcpy2D_v2");
-    cu->cuMemHostRegister = (CU_MEM_HOST_REGISTER)load_cuda_func("cuMemHostRegister_v2");
-    cu->cuMemHostUnregister = (CU_MEM_HOST_UNREGISTER)load_cuda_func("cuMemHostUnregister");
     cu->cuGetErrorName = (CU_GET_ERROR_NAME)load_cuda_func("cuGetErrorName");
     cu->cuGetErrorString = (CU_GET_ERROR_STRING)load_cuda_func("cuGetErrorString");
     
@@ -232,13 +226,28 @@ static BOOL init_cuda(void) {
     if (!cu->cuInit || !cu->cuDeviceGetCount || !cu->cuDeviceGet ||
         !cu->cuCtxCreate || !cu->cuCtxDestroy || !cu->cuCtxPushCurrent ||
         !cu->cuCtxPopCurrent || !cu->cuArray3DCreate || !cu->cuArrayDestroy ||
-        !cu->cuMemcpy2D || !cu->cuMemHostRegister || !cu->cuMemHostUnregister) {
+        !cu->cuMemcpy2D) {
         free(cu);
         cu = NULL;
         return FALSE;
     }
     
     return TRUE;
+}
+
+// One-time, thread-safe init wrapper for the CUDA bootstrap globals.
+static INIT_ONCE g_cudaInitOnce = INIT_ONCE_STATIC_INIT;
+static BOOL g_cudaInitOk = FALSE;
+
+static BOOL CALLBACK init_cuda_once(PINIT_ONCE once, PVOID param, PVOID* ctx) {
+    (void)once; (void)param; (void)ctx;
+    g_cudaInitOk = init_cuda();
+    return TRUE;
+}
+
+static BOOL ensure_cuda(void) {
+    InitOnceExecuteOnce(&g_cudaInitOnce, init_cuda_once, NULL, NULL);
+    return g_cudaInitOk;
 }
 
 // ============================================================================
@@ -255,15 +264,6 @@ static BOOL init_cuda(void) {
             if (cu->cuGetErrorString) cu->cuGetErrorString(_res, &_desc); \
             NvLog("NVENC CUDA: %s failed: %s (%d) - %s\n", #call, _name, _res, _desc); \
             return FALSE; \
-        } \
-    } while(0)
-
-#define CU_CHECK(call) \
-    do { \
-        CUresult _res = (call); \
-        if (_res != CUDA_SUCCESS) { \
-            success = FALSE; \
-            goto unmap; \
         } \
     } while(0)
 
@@ -293,7 +293,10 @@ static BOOL cuda_ctx_init(NVENCEncoder* enc) {
 
 static void cuda_ctx_free(NVENCEncoder* enc) {
     if (enc->cu_ctx) {
-        cu->cuCtxPopCurrent(NULL);
+        // Do NOT pop here: the Destroy thread never pushed this context
+        // (cuda_ctx_init pops after create; cuda_free_surfaces pushes/pops
+        // its own scope). Unconditional pop would clobber an unrelated
+        // CUDA user's current context.
         cu->cuCtxDestroy(enc->cu_ctx);
         enc->cu_ctx = NULL;
     }
@@ -390,8 +393,8 @@ NVENCEncoder* NVENCEncoder_Create(ID3D11Device* d3dDevice, int width, int height
     
     NvLog("NVENC: Creating encoder (%dx%d @ %d fps, quality=%d)...\n", width, height, fps, quality);
     
-    // Init CUDA
-    if (!init_cuda()) {
+    // Init CUDA (thread-safe one-shot bootstrap)
+    if (!ensure_cuda()) {
         NvLog("NVENC: CUDA init failed\n");
         return NULL;
     }
@@ -641,6 +644,16 @@ int NVENCEncoder_SubmitFrame(NVENCEncoder* enc, BYTE* data[2], int linesize[2], 
         surf->mapped_res = NULL;
         return 0;
     }
+    if (st == NV_ENC_ERR_NEED_MORE_INPUT) {
+        // With frameIntervalP=1 (no B-frames) + sync mode this should not
+        // occur. Guard against falling through to LockBitstream on a buffer
+        // with no produced data.
+        enc->fn.nvEncUnmapInputResource(enc->encoder, surf->mapped_res);
+        surf->mapped_res = NULL;
+        enc->next_bitstream = (enc->next_bitstream + 1) % enc->buf_count;
+        enc->frameNumber++;
+        return 1;
+    }
     
     // Lock bitstream (sync mode - blocks until encode done)
     NV_ENC_LOCK_BITSTREAM lock = {0};
@@ -710,12 +723,6 @@ BOOL NVENCEncoder_GetSequenceHeader(NVENCEncoder* enc, BYTE* buffer, DWORD buffe
     
     *outSize = payloadSize;
     return TRUE;
-}
-
-void NVENCEncoder_GetStats(NVENCEncoder* enc, int* framesEncoded, double* avgEncodeTimeMs) {
-    if (!enc) return;
-    if (framesEncoded) *framesEncoded = (int)enc->frameNumber;
-    if (avgEncodeTimeMs) *avgEncodeTimeMs = 0.0;
 }
 
 int NVENCEncoder_GetQP(NVENCEncoder* enc) {
@@ -818,7 +825,7 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Texture, 
     int linesize[2];
     
     data[0] = (BYTE*)mapped.pData;
-    data[1] = (BYTE*)mapped.pData + enc->height * mapped.RowPitch;
+    data[1] = (BYTE*)mapped.pData + (size_t)enc->height * mapped.RowPitch;
     linesize[0] = mapped.RowPitch;
     linesize[1] = mapped.RowPitch;
     
@@ -831,6 +838,4 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Texture, 
     return result;
 }
 
-// Legacy stubs (no-ops in CUDA path) - declared in header, used by replay_buffer.c
-BOOL NVENCEncoder_Flush(NVENCEncoder* enc, EncodedFrame* out) { (void)enc; (void)out; return FALSE; }
-void NVENCEncoder_MarkLeaked(NVENCEncoder* enc) { (void)enc; }
+

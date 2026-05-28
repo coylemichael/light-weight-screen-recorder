@@ -20,7 +20,9 @@
 
 /*
  * Global MMDevice enumerator for device listing.
- * Thread Access: [Main thread only - used for settings UI]
+ * Thread Access: Write-once at init (main thread, AudioDevice_Init); read from
+ *   multiple threads (settings UI on main, audio_capture/replay_buffer workers).
+ *   Safe because the write completes before any reads occur.
  * Lifetime: Init to Shutdown
  * Note: Separate from g_audioEnumerator in audio_capture.c
  */
@@ -89,7 +91,10 @@ static int EnumerateDeviceType(AudioDeviceList* list, EDataFlow dataFlow, AudioD
         LPWSTR wideId = NULL;
         HRESULT hrId = defaultDevice->lpVtbl->GetId(defaultDevice, &wideId);
         if (SUCCEEDED(hrId) && wideId) {
-            Util_WideToUtf8(wideId, defaultId, sizeof(defaultId));
+            if (Util_WideToUtf8(wideId, defaultId, sizeof(defaultId)) <= 0) {
+                Logger_Log("AudioDevice: default device ID truncated or conversion failed\n");
+                defaultId[0] = '\0';
+            }
             CoTaskMemFree(wideId);
         }
     }
@@ -100,12 +105,16 @@ static int EnumerateDeviceType(AudioDeviceList* list, EDataFlow dataFlow, AudioD
         if (FAILED(hr)) continue;
         
         AudioDeviceInfo* info = &list->devices[list->count];
+        memset(info, 0, sizeof(*info));
         
         // Get device ID
         LPWSTR wideId = NULL;
         HRESULT hrId = device->lpVtbl->GetId(device, &wideId);
         if (SUCCEEDED(hrId) && wideId) {
-            Util_WideToUtf8(wideId, info->id, sizeof(info->id));
+            if (Util_WideToUtf8(wideId, info->id, sizeof(info->id)) <= 0) {
+                Logger_Log("AudioDevice: device ID truncated or conversion failed\n");
+                info->id[0] = '\0';
+            }
             CoTaskMemFree(wideId);
         }
         
@@ -117,10 +126,13 @@ static int EnumerateDeviceType(AudioDeviceList* list, EDataFlow dataFlow, AudioD
             PropVariantInit(&varName);
             hr = props->lpVtbl->GetValue(props, &PKEY_Device_FriendlyName, &varName);
             if (SUCCEEDED(hr) && varName.vt == VT_LPWSTR) {
-                Util_WideToUtf8(varName.pwszVal, info->name, sizeof(info->name));
+                if (Util_WideToUtf8(varName.pwszVal, info->name, sizeof(info->name)) <= 0) {
+                    Logger_Log("AudioDevice: device name truncated or conversion failed\n");
+                    info->name[0] = '\0';
+                }
             }
             PropVariantClear(&varName);
-            props->lpVtbl->Release(props);
+            SAFE_RELEASE(props);
         }
         
         // If no name, use ID
@@ -129,9 +141,11 @@ static int EnumerateDeviceType(AudioDeviceList* list, EDataFlow dataFlow, AudioD
         }
         
         info->type = type;
-        info->isDefault = (strcmp(info->id, defaultId) == 0);
+        // Guard against false positive when either ID is empty (e.g. GetId failed)
+        info->isDefault = (info->id[0] != '\0' && defaultId[0] != '\0' &&
+                           strcmp(info->id, defaultId) == 0);
         
-        device->lpVtbl->Release(device);
+        SAFE_RELEASE(device);
         
         list->count++;
         added++;
@@ -200,7 +214,7 @@ BOOL AudioDevice_GetById(const char* deviceId, AudioDeviceInfo* info) {
             strncpy(info->name, deviceId, sizeof(info->name) - 1);
         }
         PropVariantClear(&varName);
-        props->lpVtbl->Release(props);
+        SAFE_RELEASE(props);
     } else {
         // Fallback to device ID as name
         strncpy(info->name, deviceId, sizeof(info->name) - 1);
@@ -218,7 +232,7 @@ BOOL AudioDevice_GetById(const char* deviceId, AudioDeviceInfo* info) {
         } else {
             info->type = AUDIO_DEVICE_OUTPUT;  // Default assumption
         }
-        endpoint->lpVtbl->Release(endpoint);
+        SAFE_RELEASE(endpoint);
     } else {
         // QueryInterface failed - device is still valid, continue with default type
         info->type = AUDIO_DEVICE_OUTPUT;
@@ -236,10 +250,10 @@ BOOL AudioDevice_GetById(const char* deviceId, AudioDeviceInfo* info) {
             info->isDefault = (wcscmp(wideId, defaultWideId) == 0);
             CoTaskMemFree(defaultWideId);
         }
-        defaultDevice->lpVtbl->Release(defaultDevice);
+        SAFE_RELEASE(defaultDevice);
     }
     
-    device->lpVtbl->Release(device);
+    SAFE_RELEASE(device);
     return TRUE;
 }
 

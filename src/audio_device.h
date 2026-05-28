@@ -1,6 +1,5 @@
 /*
- * Audio Device Enumeration
- * Uses Windows Core Audio (MMDevice) API to enumerate audio devices
+ * audio_device.h - Enumerate/select WASAPI devices, owns shared IMMDeviceEnumerator
  */
 
 #ifndef AUDIO_DEVICE_H
@@ -18,6 +17,8 @@ typedef enum {
 } AudioDeviceType;
 
 // Audio device info
+// Note: id/name are 128 bytes. UTF-8 encoding can exceed wide-char source length
+// for multi-byte sequences; Util_WideToUtf8 truncation is logged in audio_device.c.
 typedef struct {
     char id[128];               // Device ID (for WASAPI)
     char name[128];             // Friendly name (for display)

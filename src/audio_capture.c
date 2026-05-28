@@ -56,6 +56,11 @@ struct AudioCaptureSource {
     
     /* Recovery tracking */
     LARGE_INTEGER lastRecoveryAttempt;
+
+    /* IAudioClient::Initialize succeeds at most once; reused across Stop/Start */
+    BOOL initialized;
+    /* Log unsupported wave format only once */
+    BOOL formatWarned;
 };
 
 /* Buffer size constants */
@@ -212,6 +217,9 @@ static BOOL TryRecoverSource(AudioCaptureSource* src) {
     SAFE_COTASKMEM_FREE(src->deviceFormat);
     SAFE_RELEASE(src->audioClient);
     SAFE_RELEASE(src->device);
+    /* Fresh IAudioClient must be re-Initialized */
+    src->initialized = FALSE;
+    src->formatWarned = FALSE;
     
     // Try to reacquire device
     WCHAR wideId[256];
@@ -283,12 +291,17 @@ static BOOL TryRecoverSource(AudioCaptureSource* src) {
 cleanup:
     // Release in reverse order of acquisition
     if (audioStarted && src->audioClient) {
-        src->audioClient->lpVtbl->Stop(src->audioClient);
+        HRESULT stopHr = src->audioClient->lpVtbl->Stop(src->audioClient);
+        if (FAILED(stopHr)) {
+            Logger_Log("TryRecoverSource cleanup: IAudioClient::Stop failed (0x%08X) for '%s'\n",
+                stopHr, src->deviceId);
+        }
     }
     SAFE_RELEASE(src->captureClient);
     SAFE_COTASKMEM_FREE(src->deviceFormat);
     SAFE_RELEASE(src->audioClient);
     SAFE_RELEASE(src->device);
+    src->initialized = FALSE;
     return FALSE;
 }
 
@@ -298,7 +311,13 @@ cleanup:
 // Initialize a source for capture
 static BOOL InitSourceCapture(AudioCaptureSource* src) {
     if (!src || !src->audioClient) return FALSE;
-    
+
+    /* IAudioClient::Initialize succeeds at most once per client instance.
+     * On Stop/Start cycles the same client is reused; skip re-init. */
+    if (src->initialized && src->captureClient) {
+        return TRUE;
+    }
+
     // Buffer duration in 100ns units (100ms)
     REFERENCE_TIME bufferDuration = WASAPI_BUFFER_DURATION_100NS;
     
@@ -344,6 +363,7 @@ static BOOL InitSourceCapture(AudioCaptureSource* src) {
     }
     
     Logger_Log("InitSourceCapture: GetService succeeded for '%s'\n", src->deviceId);
+    src->initialized = TRUE;
     return TRUE;
 }
 
@@ -353,10 +373,15 @@ static const GUID KSDATAFORMAT_SUBTYPE_IEEE_FLOAT_Local =
 
 // Convert audio samples to target format WITH RESAMPLING
 // Uses linear interpolation for sample rate conversion
+// outUnsupported (optional): set to TRUE if srcFmt is not 16-bit PCM, 24-bit PCM,
+//   or 32-bit IEEE float. Output bytes are still produced (as silence) so the
+//   caller can keep the timeline paced.
 static int ConvertSamples(
     const BYTE* srcData, int srcSamples, const WAVEFORMATEX* srcFmt,
-    BYTE* dstData, int dstMaxBytes, const WAVEFORMATEX* dstFmt
+    BYTE* dstData, int dstMaxBytes, const WAVEFORMATEX* dstFmt,
+    BOOL* outUnsupported
 ) {
+    if (outUnsupported) *outUnsupported = FALSE;
     if (!srcData || !dstData || srcSamples == 0) return 0;
     
     // Get source format details
@@ -395,7 +420,18 @@ static int ConvertSamples(
         dstSamples = dstMaxBytes / dstFmt->nBlockAlign;
     }
     if (dstSamples <= 0) return 0;
-    
+
+    /* Validate that we actually support this source format. If not, still emit
+     * silence so the timeline stays paced and let the caller log + recover. */
+    BOOL supported = (srcFloat && srcBits == 32) || srcBits == 16 || srcBits == 24;
+    if (!supported && outUnsupported) *outUnsupported = TRUE;
+    if (!supported) {
+        int totalBytes = dstSamples * dstFmt->nBlockAlign;
+        if (totalBytes > dstMaxBytes) totalBytes = dstMaxBytes;
+        memset(dstData, 0, totalBytes);
+        return totalBytes;
+    }
+
     // Helper function to read a source sample as float stereo
     #define READ_SRC_SAMPLE(idx, pLeft, pRight) do { \
         int _i = (idx); \
@@ -466,12 +502,18 @@ static int ConvertSamples(
 static DWORD WINAPI SourceCaptureThread(LPVOID param) {
     AudioCaptureSource* src = (AudioCaptureSource*)param;
     if (!src) return 0;
-    
+
+    /* COM must be initialized on every thread that touches IAudioClient /
+     * IAudioCaptureClient. RPC_E_CHANGED_MODE is fine (process is MTA). */
+    HRESULT coHr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    BOOL coOwned = SUCCEEDED(coHr);
+
     // Temporary buffer for format conversion
     BYTE* convBuffer = (BYTE*)malloc(SOURCE_BUFFER_SIZE);
     if (!convBuffer) {
         Logger_Log("SourceCaptureThread: malloc failed for convBuffer\n");
         InterlockedExchange(&src->active, FALSE);
+        if (coOwned) CoUninitialize();
         return 0;
     }
     
@@ -539,10 +581,22 @@ static DWORD WINAPI SourceCaptureThread(LPVOID param) {
                     memset(convBuffer, 0, convertedBytes);
                 } else {
                     // Convert to target format
+                    BOOL unsupported = FALSE;
                     convertedBytes = ConvertSamples(
                         data, numFrames, src->deviceFormat,
-                        convBuffer, SOURCE_BUFFER_SIZE, &src->targetFormat
+                        convBuffer, SOURCE_BUFFER_SIZE, &src->targetFormat,
+                        &unsupported
                     );
+                    if (unsupported && !src->formatWarned) {
+                        src->formatWarned = TRUE;
+                        Logger_Log("SourceCaptureThread: unsupported wave format for '%s' "
+                            "(tag=%u, bits=%u, channels=%u, rate=%u) - emitting silence\n",
+                            src->deviceId,
+                            (unsigned)src->deviceFormat->wFormatTag,
+                            (unsigned)src->deviceFormat->wBitsPerSample,
+                            (unsigned)src->deviceFormat->nChannels,
+                            (unsigned)src->deviceFormat->nSamplesPerSec);
+                    }
                 }
                 
                 // Write to source ring buffer
@@ -577,19 +631,28 @@ static DWORD WINAPI SourceCaptureThread(LPVOID param) {
                     LeaveCriticalSection(&src->lock);
                 }
             }
-            
-            src->captureClient->lpVtbl->ReleaseBuffer(src->captureClient, numFrames);
-            
+
+            HRESULT relHr = src->captureClient->lpVtbl->ReleaseBuffer(src->captureClient, numFrames);
+            if (FAILED(relHr)) {
+                Logger_Log("SourceCaptureThread: ReleaseBuffer failed (0x%08X) for '%s'\n",
+                    relHr, src->deviceId);
+                if (relHr == AUDCLNT_E_DEVICE_INVALIDATED || relHr == AUDCLNT_E_SERVICE_NOT_RUNNING) {
+                    InterlockedExchange(&src->deviceInvalidated, TRUE);
+                }
+                break;
+            }
+
             hr = src->captureClient->lpVtbl->GetNextPacketSize(
                 src->captureClient, &packetLength
             );
             if (FAILED(hr)) break;
         }
-        
+
         Sleep(AUDIO_POLL_INTERVAL_MS);  // Poll interval between checks
     }
     
     free(convBuffer);
+    if (coOwned) CoUninitialize();
     return 0;
 }
 
@@ -797,11 +860,58 @@ static void WriteMixedToBuffer(AudioCaptureContext* ctx, BYTE* mixChunk, int byt
     LeaveCriticalSection(&ctx->mixLock);
 }
 
+/*
+ * Apply per-source volume to a chunk and write it to the source's per-track
+ * ring buffer. volBuf is a scratch buffer (size >= processBytes) supplied by
+ * the caller to avoid per-iteration allocation.
+ */
+static void WriteMixedToSourceBuffer(
+    AudioCaptureContext* ctx, int sourceIndex,
+    const BYTE* srcChunk, int processBytes, int vol,
+    BYTE* volBuf)
+{
+    int nSamp = processBytes / AUDIO_BLOCK_ALIGN;
+    for (int s = 0; s < nSamp; s++) {
+        const short* in = (const short*)(srcChunk + s * AUDIO_BLOCK_ALIGN);
+        short* out = (short*)(volBuf + s * AUDIO_BLOCK_ALIGN);
+        int l = (in[0] * vol) / 100;
+        int r = (in[1] * vol) / 100;
+        if (l > 32767) l = 32767; if (l < -32768) l = -32768;
+        if (r > 32767) r = 32767; if (r < -32768) r = -32768;
+        out[0] = (short)l;
+        out[1] = (short)r;
+    }
+
+    EnterCriticalSection(&ctx->sourceOutLocks[sourceIndex]);
+    int space = ctx->sourceOutSize[sourceIndex] - ctx->sourceOutAvailable[sourceIndex];
+    if (processBytes > space) {
+        int drop = processBytes - space;
+        ctx->sourceOutAvailable[sourceIndex] -= drop;
+        ctx->sourceOutReadPos[sourceIndex] = (ctx->sourceOutReadPos[sourceIndex] + drop) % ctx->sourceOutSize[sourceIndex];
+    }
+    int wp = ctx->sourceOutWritePos[sourceIndex];
+    int toEnd = ctx->sourceOutSize[sourceIndex] - wp;
+    if (processBytes <= toEnd) {
+        memcpy(ctx->sourceOutBuffers[sourceIndex] + wp, volBuf, processBytes);
+    } else {
+        memcpy(ctx->sourceOutBuffers[sourceIndex] + wp, volBuf, toEnd);
+        memcpy(ctx->sourceOutBuffers[sourceIndex], volBuf + toEnd, processBytes - toEnd);
+    }
+    ctx->sourceOutWritePos[sourceIndex] = (wp + processBytes) % ctx->sourceOutSize[sourceIndex];
+    ctx->sourceOutAvailable[sourceIndex] += processBytes;
+    LeaveCriticalSection(&ctx->sourceOutLocks[sourceIndex]);
+}
+
 // Mix capture thread - reads from all sources and mixes
 static DWORD WINAPI MixCaptureThread(LPVOID param) {
     AudioCaptureContext* ctx = (AudioCaptureContext*)param;
     if (!ctx) return 0;
-    
+
+    /* COM init required: recovery path calls TryRecoverSource which uses
+     * IMMDeviceEnumerator / IMMDevice / IAudioClient. */
+    HRESULT coHr = CoInitializeEx(NULL, COINIT_MULTITHREADED);
+    BOOL coOwned = SUCCEEDED(coHr);
+
     // Peak tracking for logging - reset each session
     int peakLeft = 0, peakRight = 0;
     int logCounter = 0;
@@ -820,8 +930,25 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
                 if (srcBuffers[j]) free(srcBuffers[j]);
             }
             InterlockedExchange(&ctx->running, FALSE);
+            if (coOwned) CoUninitialize();
             return 0;
         }
+    }
+
+    /* Hoisted scratch buffers - both are bounded by AUDIO_MIX_CHUNK_SIZE.
+     * Allocate once instead of per-iteration malloc/free. */
+    BYTE* volBuf = (BYTE*)malloc(AUDIO_MIX_CHUNK_SIZE);
+    BYTE* mixChunk = (BYTE*)malloc(AUDIO_MIX_CHUNK_SIZE);
+    if (!volBuf || !mixChunk) {
+        Logger_Log("MixCaptureThread: malloc failed for scratch buffers\n");
+        for (int i = 0; i < ctx->sourceCount; i++) {
+            if (srcBuffers[i]) free(srcBuffers[i]);
+        }
+        if (volBuf) free(volBuf);
+        if (mixChunk) free(mixChunk);
+        InterlockedExchange(&ctx->running, FALSE);
+        if (coOwned) CoUninitialize();
+        return 0;
     }
     
     const int chunkSize = AUDIO_MIX_CHUNK_SIZE;  // Process in chunks
@@ -871,11 +998,21 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
                     if (msSinceLastAttempt >= AUDIO_RECOVERY_INTERVAL_MS || src->lastRecoveryAttempt.QuadPart == 0) {
                         src->lastRecoveryAttempt = now;
                         
-                        // Wait for thread to fully exit if handle exists
-                        if (src->captureThread) {
-                            WaitForSingleObject(src->captureThread, 1000);
-                            CloseHandle(src->captureThread);
-                            src->captureThread = NULL;
+                        // Atomically claim the thread handle so Stop() won't double-close.
+                        HANDLE h = (HANDLE)InterlockedExchangePointer((PVOID*)&src->captureThread, NULL);
+                        if (h) {
+                            DWORD wr = WaitForSingleObject(h, 1000);
+                            if (wr == WAIT_OBJECT_0) {
+                                CloseHandle(h);
+                            } else {
+                                /* Thread didn't exit - DON'T close (use-after-free risk)
+                                 * and DON'T recover (old thread still touching src). */
+                                Logger_Log("Audio source '%s' recovery: thread exit timeout (wr=%u) - skipping recovery\n",
+                                    src->deviceId, wr);
+                                /* Put it back so Stop() can deal with it. */
+                                InterlockedExchangePointer((PVOID*)&src->captureThread, h);
+                                continue;
+                            }
                         }
                         
                         TryRecoverSource(src);
@@ -967,45 +1104,8 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
             }
             srcBytes[i] = processBytes;
 
-            // Write per-source data to individual output buffer (for multi-track).
-            // Always processBytes long — silence-padded portions are zeroed PCM,
-            // so per-source tracks stay equal length with the mixed track.
-            BYTE* volBuf = (BYTE*)malloc(processBytes);
-            if (volBuf) {
-                int vol = ctx->volumes[i];
-                int nSamp = processBytes / AUDIO_BLOCK_ALIGN;
-                for (int s = 0; s < nSamp; s++) {
-                    short* in = (short*)(srcBuffers[i] + s * AUDIO_BLOCK_ALIGN);
-                    short* out = (short*)(volBuf + s * AUDIO_BLOCK_ALIGN);
-                    int l = (in[0] * vol) / 100;
-                    int r = (in[1] * vol) / 100;
-                    if (l > 32767) l = 32767; if (l < -32768) l = -32768;
-                    if (r > 32767) r = 32767; if (r < -32768) r = -32768;
-                    out[0] = (short)l;
-                    out[1] = (short)r;
-                }
-
-                EnterCriticalSection(&ctx->sourceOutLocks[i]);
-                int space = ctx->sourceOutSize[i] - ctx->sourceOutAvailable[i];
-                if (processBytes > space) {
-                    int drop = processBytes - space;
-                    ctx->sourceOutAvailable[i] -= drop;
-                    ctx->sourceOutReadPos[i] = (ctx->sourceOutReadPos[i] + drop) % ctx->sourceOutSize[i];
-                }
-                int wp = ctx->sourceOutWritePos[i];
-                int toEnd = ctx->sourceOutSize[i] - wp;
-                if (processBytes <= toEnd) {
-                    memcpy(ctx->sourceOutBuffers[i] + wp, volBuf, processBytes);
-                } else {
-                    memcpy(ctx->sourceOutBuffers[i] + wp, volBuf, toEnd);
-                    memcpy(ctx->sourceOutBuffers[i], volBuf + toEnd, processBytes - toEnd);
-                }
-                ctx->sourceOutWritePos[i] = (wp + processBytes) % ctx->sourceOutSize[i];
-                ctx->sourceOutAvailable[i] += processBytes;
-                LeaveCriticalSection(&ctx->sourceOutLocks[i]);
-
-                free(volBuf);
-            }
+            /* Write per-source data to per-track ring (uses hoisted volBuf). */
+            WriteMixedToSourceBuffer(ctx, i, srcBuffers[i], processBytes, ctx->volumes[i], volBuf);
         }
         
         // All sources now contribute exactly processBytes (real PCM + silence pad),
@@ -1014,12 +1114,6 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
 
         // Mix sources using helper function
         if (bytesToMix > 0) {
-            BYTE* mixChunk = (BYTE*)malloc(bytesToMix);
-            if (!mixChunk) {
-                Logger_Log("MixCaptureThread: malloc failed for mixChunk (%d bytes)\n", bytesToMix);
-                Sleep(10);  // Back off on allocation failure
-                continue;
-            }
             memset(mixChunk, 0, bytesToMix);
             int numSamples = bytesToMix / AUDIO_BLOCK_ALIGN;
             
@@ -1052,14 +1146,15 @@ static DWORD WINAPI MixCaptureThread(LPVOID param) {
             
             // Track total output for rate limiting
             totalBytesOutput += bytesToMix;
-            
-            free(mixChunk);
         }
     }
     
     for (int i = 0; i < ctx->sourceCount; i++) {
         if (srcBuffers[i]) free(srcBuffers[i]);
     }
+    free(volBuf);
+    free(mixChunk);
+    if (coOwned) CoUninitialize();
     
     return 0;
 }
@@ -1108,7 +1203,11 @@ BOOL AudioCapture_StartAt(AudioCaptureContext* ctx, LARGE_INTEGER t0) {
         src->captureThread = CreateThread(NULL, 0, SourceCaptureThread, src, 0, NULL);
         if (!src->captureThread) {
             Logger_Log("AudioCapture: CreateThread failed for source %s\n", src->deviceId);
-            src->audioClient->lpVtbl->Stop(src->audioClient);
+            HRESULT stopHr = src->audioClient->lpVtbl->Stop(src->audioClient);
+            if (FAILED(stopHr)) {
+                Logger_Log("AudioCapture: IAudioClient::Stop failed (0x%08X) after CreateThread failure for '%s'\n",
+                    stopHr, src->deviceId);
+            }
             InterlockedExchange(&src->active, FALSE);
         }
     }
@@ -1130,12 +1229,21 @@ BOOL AudioCapture_StartAt(AudioCaptureContext* ctx, LARGE_INTEGER t0) {
             
             InterlockedExchange(&src->active, FALSE);
             if (src->audioClient) {
-                src->audioClient->lpVtbl->Stop(src->audioClient);
+                HRESULT stopHr = src->audioClient->lpVtbl->Stop(src->audioClient);
+                if (FAILED(stopHr)) {
+                    Logger_Log("AudioCapture_StartAt cleanup: IAudioClient::Stop failed (0x%08X) for '%s'\n",
+                        stopHr, src->deviceId);
+                }
             }
-            if (src->captureThread) {
-                WaitForSingleObject(src->captureThread, 1000);
-                CloseHandle(src->captureThread);
-                src->captureThread = NULL;
+            HANDLE h = (HANDLE)InterlockedExchangePointer((PVOID*)&src->captureThread, NULL);
+            if (h) {
+                DWORD wr = WaitForSingleObject(h, 1000);
+                if (wr == WAIT_OBJECT_0) {
+                    CloseHandle(h);
+                } else {
+                    Logger_Log("AudioCapture_StartAt cleanup: source thread did not exit for '%s'\n",
+                        src->deviceId);
+                }
             }
         }
         return FALSE;
@@ -1159,28 +1267,39 @@ void AudioCapture_Stop(AudioCaptureContext* ctx) {
         InterlockedExchange(&src->active, FALSE);
         
         if (src->audioClient) {
-            src->audioClient->lpVtbl->Stop(src->audioClient);
+            HRESULT stopHr = src->audioClient->lpVtbl->Stop(src->audioClient);
+            if (FAILED(stopHr)) {
+                Logger_Log("AudioCapture_Stop: IAudioClient::Stop failed (0x%08X) for '%s'\n",
+                    stopHr, src->deviceId);
+                InterlockedExchange(&src->deviceInvalidated, TRUE);
+            }
         }
         
-        // Wait for source capture thread to finish
-        if (src->captureThread) {
-            DWORD waitResult = WaitForSingleObject(src->captureThread, 3000);
-            if (waitResult == WAIT_TIMEOUT) {
-                Logger_Log("AudioCapture_Stop: Warning - source thread %d did not exit in time\n", i);
+        // Wait for source capture thread to finish.
+        // Atomically claim the handle so the mix-thread recovery path can't double-close.
+        HANDLE h = (HANDLE)InterlockedExchangePointer((PVOID*)&src->captureThread, NULL);
+        if (h) {
+            DWORD waitResult = WaitForSingleObject(h, 3000);
+            if (waitResult == WAIT_OBJECT_0) {
+                CloseHandle(h);
+            } else {
+                Logger_Log("AudioCapture_Stop: source thread %d did not exit (wr=%u) - leaking handle to avoid use-after-free\n",
+                    i, waitResult);
+                /* Intentional handle leak: closing while the thread is still running
+                 * would risk touching freed src memory after Destroy. */
             }
-            CloseHandle(src->captureThread);
-            src->captureThread = NULL;
         }
     }
     
     // Wait for mix thread
-    if (ctx->captureThread) {
-        DWORD waitResult = WaitForSingleObject(ctx->captureThread, 3000);
-        if (waitResult == WAIT_TIMEOUT) {
-            Logger_Log("AudioCapture_Stop: Warning - mix thread did not exit in time\n");
+    HANDLE mh = (HANDLE)InterlockedExchangePointer((PVOID*)&ctx->captureThread, NULL);
+    if (mh) {
+        DWORD waitResult = WaitForSingleObject(mh, 3000);
+        if (waitResult == WAIT_OBJECT_0) {
+            CloseHandle(mh);
+        } else {
+            Logger_Log("AudioCapture_Stop: mix thread did not exit (wr=%u) - leaking handle\n", waitResult);
         }
-        CloseHandle(ctx->captureThread);
-        ctx->captureThread = NULL;
     }
 }
 

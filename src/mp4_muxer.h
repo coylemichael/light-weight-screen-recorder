@@ -1,9 +1,13 @@
 /*
- * mp4_muxer.h - MP4 Container Muxer (HEVC Passthrough)
- * 
+ * mp4_muxer.h - Media Foundation IMFSinkWriter - passthrough mux to MP4
+ *
  * SHARED BY: replay_buffer.c (batch API), recording.c (streaming API)
- * 
+ *
  * Writes HEVC-encoded frames to MP4 via IMFSinkWriter.
+ *
+ * Precondition: Caller must have initialized COM (CoInitializeEx) and
+ * Media Foundation (MFStartup) before using any function in this module.
+ * This module does not call CoInitializeEx or MFStartup itself.
  */
 
 #ifndef MP4_MUXER_H

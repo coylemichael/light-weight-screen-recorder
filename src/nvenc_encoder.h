@@ -1,9 +1,19 @@
 /*
  * nvenc_encoder.h - NVENC Hardware Encoder (CUDA Path)
- * 
+ *
  * SHARED BY: replay_buffer.c, recording.c
- * 
+ *
  * HEVC hardware encoding via NVIDIA NVENC API.
+ *
+ * Thread-safety contract:
+ *   - NVENCEncoder is NOT thread-safe. All operations on a given encoder
+ *     instance (SubmitFrame, SubmitTexture, GetSequenceHeader, GetQP,
+ *     GetFrameSizeStats, Destroy) MUST be called from a single owning
+ *     thread. The underlying CUDA context is thread-affine; calling from
+ *     a different thread will push the context onto the wrong thread and
+ *     corrupt encoder state.
+ *   - NVENCEncoder_Create may be called concurrently from multiple
+ *     threads; module-level CUDA bootstrap is guarded internally.
  */
 
 #ifndef NVENC_ENCODER_H
@@ -46,13 +56,8 @@ int NVENCEncoder_SubmitTexture(NVENCEncoder* enc, ID3D11Texture2D* nv12Texture, 
 BOOL NVENCEncoder_GetSequenceHeader(NVENCEncoder* enc, BYTE* buffer, DWORD bufferSize, DWORD* outSize);
 
 // Stats
-void NVENCEncoder_GetStats(NVENCEncoder* enc, int* framesEncoded, double* avgEncodeTimeMs);
 int NVENCEncoder_GetQP(NVENCEncoder* enc);
 void NVENCEncoder_GetFrameSizeStats(NVENCEncoder* enc, UINT32* lastSize, UINT32* minSize, UINT32* maxSize, UINT32* avgSize);
-
-// Legacy stubs (no-ops in CUDA path)
-void NVENCEncoder_MarkLeaked(NVENCEncoder* enc);
-BOOL NVENCEncoder_Flush(NVENCEncoder* enc, EncodedFrame* outFrame);
 
 // Cleanup
 void NVENCEncoder_Destroy(NVENCEncoder* enc);
