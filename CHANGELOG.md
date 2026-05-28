@@ -6,6 +6,9 @@ Each entry: `**Title** — short description.`
 
 ## [Unreleased]
 
+### Fixed
+- **Spurious "Buffer thread hung" warning on stop** — `ReplayBuffer_Stop`'s 5 s join was shorter than the sum of inner cleanup waits (kill-feed 5 s + audio up to 12 s), so the warning fired and the AAC/FrameBuffer queues were abandoned whenever the auto-clip scanner happened to be busy at stop time. `ScanWorkerProc` in `src/kill_feed_sampler.c` now polls `hStopEvent` between templates so it exits within one template's worth of work; `KillFeedSampler_Shutdown` join reduced 5000 → 1000 ms; `ReplayBuffer_Stop` join raised 5000 → 10000 ms for audio worst-case margin. Verified on a 30 s record/stop cycle: buffer thread now exits cleanly 1.2 s after stop event.
+
 ## [1.4.1] - 2026-05-28
 
 ### Added

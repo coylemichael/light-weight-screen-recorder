@@ -517,6 +517,13 @@ static DWORD WINAPI ScanWorkerProc(LPVOID param)
         int bestMx = 0, bestMy = 0;
 
         for (int i = 0; i < s->templateCount; i++) {
+            /* Bail out mid-scan if shutdown was requested — template matching
+             * is multi-ms per template and would otherwise block Shutdown. */
+            if (WaitForSingleObject(s->hStopEvent, 0) == WAIT_OBJECT_0) {
+                free(work.gray);
+                work.gray = NULL;
+                goto worker_exit;
+            }
             if (!s->templates[i].loaded) continue;
             int mx, my;
             float score = TemplateMatchMultiScale(work.gray, work.w, work.h,
@@ -623,6 +630,7 @@ static DWORD WINAPI ScanWorkerProc(LPVOID param)
         free(work.bgra);
     }
 
+worker_exit:
     return 0;
 }
 
@@ -843,7 +851,7 @@ void KillFeedSampler_Shutdown(KillFeedSampler* s)
     /* Signal worker to stop and wait */
     if (s->hStopEvent) SetEvent(s->hStopEvent);
     if (s->workerThread) {
-        WaitForSingleObject(s->workerThread, 5000);
+        WaitForSingleObject(s->workerThread, 1000);
         SAFE_CLOSE_HANDLE(s->workerThread);
     }
     SAFE_CLOSE_HANDLE(s->hWorkReady);

@@ -495,13 +495,16 @@ void ReplayBuffer_Stop(ReplayBufferState* state) {
     SetEvent(state->hStopEvent);
     
     if (state->bufferThread) {
-        DWORD waitResult = WaitForSingleObject(state->bufferThread, 5000);
+        /* 10s budget covers worst-case inner waits: kill-feed shutdown (1s),
+         * audio-capture stop (3s/source + 3s mix = up to 12s theoretical but
+         * < 3s in practice), and NVENC destroy (no inner timeout). */
+        DWORD waitResult = WaitForSingleObject(state->bufferThread, 10000);
         
         if (waitResult == WAIT_TIMEOUT) {
             /* Thread is hung - leak resources safely (TerminateThread doesn't work
              * for NVENC threads). The thread handle is closed below but the thread
              * itself and its resources (encoder, textures, etc.) are leaked. */
-            ReplayLog("WARNING: Buffer thread hung (5s timeout), leaking resources\n");
+            ReplayLog("WARNING: Buffer thread hung (10s timeout), leaking resources\n");
 
             /* Drop our handle on the encoder; the hung thread still owns it.
              * NVENC session cannot be safely destroyed from this thread. */
