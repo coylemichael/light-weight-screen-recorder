@@ -6,10 +6,17 @@ Each entry: `**Title** — short description.`
 
 ## [Unreleased]
 
+### Added
+- **Producer-side kill-feed diagnostic counters** — `KillFeedSampler_FeedFrame` now tallies `feed_calls` (how many frames the capture loop offered) and `feed_queued` (how many actually replaced the worker's pending slot) per heartbeat window. Surfaces the producer/consumer gap when the worker is bottlenecked (`feed_queued` ≪ `feed_calls`) versus the calibration / template-cost path. Heartbeat line in `src/kill_feed_sampler.c` extended accordingly.
+
 ### Changed
 - **Settings dialog child-control creation now logs failures** — Added a `CHECK_CTL` macro and post-create NULL checks at all 63 `CreateWindow*` callsites in `CreateGeneralSection` / `CreateVideoSection` / `CreateAudioSection`, plus the two `LoadImageA` icon loads and the top-level `s_settingsWnd` / `s_regionOverlayWnd` window creates in `src/settings_dialog.c`. Failures log file/line/`GetLastError`; downstream `SendMessage` / `AddToSection` / `ShowSection` already tolerate NULL HWNDs so the dialog still constructs. Closes item 9 of `docs/tracking/may26review/plan/settings_dialog.md`.
 
+### Removed
+- **Auto-clip `runner_down_assist` template** — `KillFeedSampler_Init` no longer loads `runner_down_assist.png`; only `runner_down.png` is matched. Combined with a tighter calibrated scan region the worst-case per-scan cost drops from ~10 s to ~50 ms in measurement, eliminating the worker bottleneck that was causing dropped frames (`feed_queued` ≪ `feed_calls`) and occasional missed auto-clips. The `runner_down_assist.png` asset itself is left in `bin\static\` and can be deleted; the loader no longer references it.
+
 ### Fixed
+- **`AreaSelector` window class was never registered → region-preview broken** — `AreaSelector_Init` (window-class registration in `src/border.c`) was defined but had no caller, so every `AreaSelector_Show` silently failed against an unregistered class and the auto-clip "show regions" preview did nothing. `WinMain` (`src/main.c`) now calls `AreaSelector_Init()` immediately after `Overlay_Create()`, logging a non-fatal warning on failure.
 - **Spurious "Buffer thread hung" warning on stop** — `ReplayBuffer_Stop`'s 5 s join was shorter than the sum of inner cleanup waits (kill-feed 5 s + audio up to 12 s), so the warning fired and the AAC/FrameBuffer queues were abandoned whenever the auto-clip scanner happened to be busy at stop time. `ScanWorkerProc` in `src/kill_feed_sampler.c` now polls `hStopEvent` between templates so it exits within one template's worth of work; `KillFeedSampler_Shutdown` join reduced 5000 → 1000 ms; `ReplayBuffer_Stop` join raised 5000 → 10000 ms for audio worst-case margin. Verified on a 30 s record/stop cycle: buffer thread now exits cleanly 1.2 s after stop event.
 
 ## [1.4.1] - 2026-05-28

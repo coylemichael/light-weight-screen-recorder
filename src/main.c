@@ -62,6 +62,7 @@
 #include "config.h"
 #include "capture.h"
 #include "overlay.h"
+#include "border.h"
 #include "replay_buffer.h"
 #include "logger.h"
 #include "crash_handler.h"
@@ -249,6 +250,13 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
         goto cleanup;
     }
     overlayCreated = TRUE;
+
+    // Register the AreaSelector window class so UpdateReplayPreview() can
+    // actually show the draggable region-preview overlay. Non-fatal if it fails;
+    // the preview just won't appear.
+    if (!AreaSelector_Init()) {
+        Logger_Log("AreaSelector_Init failed (GetLastError=%lu); region preview disabled\n", GetLastError());
+    }
 
     // Initialize replay buffer
     ReplayBuffer_Init(&g_replayBuffer);

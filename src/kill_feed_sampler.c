@@ -128,6 +128,8 @@ struct KillFeedSampler {
     ULONGLONG lastHeartbeatMs;
     ULONGLONG lastReadbackFailLogMs;
     unsigned int scansWindow;
+    unsigned int feedFrameCallsWindow;   /* raw FeedFrame invocations (producer rate) */
+    unsigned int feedFrameQueuedWindow;  /* invocations that passed throttle + readback and queued work */
     unsigned int readbackFails;       /* producer writes, worker reads/resets */
     unsigned int readbackFailsTotal;  /* lifetime, never reset */
     float bestScoreWindow;
@@ -450,6 +452,8 @@ static void EmitHeartbeatIfDue(KillFeedSampler* s, ULONGLONG now)
     }
 
     unsigned int scans   = s->scansWindow;
+    unsigned int feedCalls  = s->feedFrameCallsWindow;
+    unsigned int feedQueued = s->feedFrameQueuedWindow;
     unsigned int rbFail  = s->readbackFails;
     unsigned int rbTotal = s->readbackFailsTotal;
     float bestScore      = s->bestScoreWindow;
@@ -459,6 +463,8 @@ static void EmitHeartbeatIfDue(KillFeedSampler* s, ULONGLONG now)
     ULONGLONG lastTrig   = s->lastTriggerMs;
 
     s->scansWindow = 0;
+    s->feedFrameCallsWindow = 0;
+    s->feedFrameQueuedWindow = 0;
     s->readbackFails = 0;
     s->bestScoreWindow = -1.0f;
     s->cooldownRejects = 0;
@@ -471,13 +477,13 @@ static void EmitHeartbeatIfDue(KillFeedSampler* s, ULONGLONG now)
 
     long long ageMs = (lastTrig == 0) ? -1 : (long long)(now - lastTrig);
     float displayScore = (bestScore < 0.0f) ? 0.0f : bestScore;
-    Logger_Log("KillFeedSampler: heartbeat scans=%u readback_fails=%u (total=%u) best_score=%.3f "
+    Logger_Log("KillFeedSampler: heartbeat feed_calls=%u feed_queued=%u scans=%u readback_fails=%u (total=%u) best_score=%.3f "
                "last_match_age_ms=%lld rejects[cd=%u fg=%u lo=%u]\n",
-               scans, rbFail, rbTotal, displayScore,
+               feedCalls, feedQueued, scans, rbFail, rbTotal, displayScore,
                ageMs, cdRej, fgRej, loCnt);
-    DebugConsole_Print("HEARTBEAT: scans=%u/min best=%.3f rb_fails=%u (total=%u) "
+    DebugConsole_Print("HEARTBEAT: feed=%u queued=%u scans=%u/min best=%.3f rb_fails=%u (total=%u) "
                        "last_match=%llds ago rejects[cd=%u fg=%u lo=%u]\n",
-                       scans, displayScore, rbFail, rbTotal,
+                       feedCalls, feedQueued, scans, displayScore, rbFail, rbTotal,
                        (ageMs < 0) ? -1LL : (ageMs / 1000),
                        cdRej, fgRej, loCnt);
 }
@@ -707,13 +713,6 @@ KillFeedSampler* KillFeedSampler_Init(const AppConfig* config, const CaptureStat
             s->templateCount++;
         else
             Logger_Log("KillFeedSampler: WARNING - runner_down.png not found: %s\n", pngPath);
-
-        /* Template 2: runner_down_assist.png */
-        snprintf(pngPath, MAX_PATH, "%sstatic\\runner_down_assist.png", exePath);
-        if (LoadTemplatePNG(&s->templates[s->templateCount], pngPath, "runner_down_assist"))
-            s->templateCount++;
-        else
-            Logger_Log("KillFeedSampler: WARNING - runner_down_assist.png not found: %s\n", pngPath);
     }
 
     if (s->templateCount == 0) {
@@ -782,6 +781,12 @@ void KillFeedSampler_FeedFrame(KillFeedSampler* s, CaptureState* capture,
         return;
     }
 
+    /* Count raw producer invocations (before throttle) so the heartbeat can
+     * discriminate worker-bottleneck vs producer-starvation. */
+    EnterCriticalSection(&s->workLock);
+    s->feedFrameCallsWindow++;
+    LeaveCriticalSection(&s->workLock);
+
     /* Throttle: only scan every SCAN_INTERVAL_MS */
     ULONGLONG now = GetTickCount64();
     if ((now - s->lastScanMs) < SCAN_INTERVAL_MS) return;
@@ -839,6 +844,7 @@ void KillFeedSampler_FeedFrame(KillFeedSampler* s, CaptureState* capture,
     s->pendingWork.bgraStride = s->kfW * 4;
     s->pendingWork.timestamp = now;
     s->hasPendingWork = TRUE;
+    s->feedFrameQueuedWindow++;
     LeaveCriticalSection(&s->workLock);
 
     SetEvent(s->hWorkReady);
