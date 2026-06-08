@@ -81,6 +81,19 @@ typedef struct {
 
 /* ─── Module state ─── */
 
+/* Published "last best match" for the settings region-overlay timer to poll.
+ * Coordinates are in monitor-overlay space (same coord system the static green
+ * KILL-FEED rect uses, i.e. compatible with a layered window at (0,0,SM_CXSCREEN,SM_CYSCREEN)).
+ * SRWLOCK is statically initializable (SRWLOCK_INIT) so no Init function needed,
+ * and singleton across all sampler instances (only one active at a time anyway). */
+static SRWLOCK g_lastMatchLock = SRWLOCK_INIT;
+static struct {
+    BOOL hasValue;
+    int x, y, w, h;          /* match rect top-left + size, monitor-overlay coords */
+    float score;
+    ULONGLONG timestampMs;   /* GetTickCount64() at publish */
+} g_lastMatch;
+
 /* Pending work item for the worker thread */
 typedef struct {
     BYTE* gray;         /* Grayscale image (worker owns, frees after use) */
@@ -93,6 +106,9 @@ typedef struct {
 struct KillFeedSampler {
     /* Detection region in capture-texture coordinates */
     int kfX, kfY, kfW, kfH;
+    /* Monitor origin (capture rect top-left). Stored so per-scan match coords
+     * can be republished in overlay/monitor space without re-reading CaptureState. */
+    int cropX, cropY;
 
     /* Templates */
     Template templates[MAX_TEMPLATES];
@@ -269,11 +285,14 @@ static float TemplateMatchNCC(const BYTE* image, int imgW, int imgH,
 
 static float TemplateMatchMultiScale(const BYTE* imageGray, int imgW, int imgH,
                                      const Template* tmpl,
-                                     int* bestX, int* bestY)
+                                     int* bestX, int* bestY,
+                                     int* bestMatchW, int* bestMatchH)
 {
     float overallBest = -1.0f;
     *bestX = 0;
     *bestY = 0;
+    *bestMatchW = 0;
+    *bestMatchH = 0;
 
     for (int s = 0; s < (int)NUM_TEMPLATE_SCALES; s++) {
         float scale = TEMPLATE_SCALES[s];
@@ -310,6 +329,8 @@ static float TemplateMatchMultiScale(const BYTE* imageGray, int imgW, int imgH,
             overallBest = score;
             *bestX = mx + useW / 2;
             *bestY = my + useH / 2;
+            *bestMatchW = useW;
+            *bestMatchH = useH;
         }
         free(scaledTmpl);
     }
@@ -521,6 +542,7 @@ static DWORD WINAPI ScanWorkerProc(LPVOID param)
         float bestScore = -1.0f;
         int bestIdx = -1;
         int bestMx = 0, bestMy = 0;
+        int bestMxW = 0, bestMxH = 0;
 
         for (int i = 0; i < s->templateCount; i++) {
             /* Bail out mid-scan if shutdown was requested — template matching
@@ -531,9 +553,9 @@ static DWORD WINAPI ScanWorkerProc(LPVOID param)
                 goto worker_exit;
             }
             if (!s->templates[i].loaded) continue;
-            int mx, my;
+            int mx, my, mxW, mxH;
             float score = TemplateMatchMultiScale(work.gray, work.w, work.h,
-                                                  &s->templates[i], &mx, &my);
+                                                  &s->templates[i], &mx, &my, &mxW, &mxH);
             if (score > 0.60f)
                 DebugConsole_Print("SCAN: %s score=%.3f\n", s->templates[i].name, score);
             if (score > bestScore) {
@@ -541,6 +563,8 @@ static DWORD WINAPI ScanWorkerProc(LPVOID param)
                 bestIdx = i;
                 bestMx = mx;
                 bestMy = my;
+                bestMxW = mxW;
+                bestMxH = mxH;
             }
         }
 
@@ -550,6 +574,24 @@ static DWORD WINAPI ScanWorkerProc(LPVOID param)
         EnterCriticalSection(&s->workLock);
         if (bestScore > s->bestScoreWindow) s->bestScoreWindow = bestScore;
         LeaveCriticalSection(&s->workLock);
+
+        /* Publish best match for the debug region-overlay (red/orange rect).
+         * Only worth showing scores >= 0.50; lower would just be visual noise.
+         * bestMx/bestMy are CENTER coords in (kfW x kfH) sub-image space; convert
+         * to monitor-overlay top-left by undoing crop + adding region offset. */
+        AcquireSRWLockExclusive(&g_lastMatchLock);
+        if (bestScore >= 0.50f && bestIdx >= 0 && bestMxW > 0 && bestMxH > 0) {
+            g_lastMatch.hasValue = TRUE;
+            g_lastMatch.x = s->kfX + s->cropX + bestMx - bestMxW / 2;
+            g_lastMatch.y = s->kfY + s->cropY + bestMy - bestMxH / 2;
+            g_lastMatch.w = bestMxW;
+            g_lastMatch.h = bestMxH;
+            g_lastMatch.score = bestScore;
+            g_lastMatch.timestampMs = GetTickCount64();
+        } else {
+            g_lastMatch.hasValue = FALSE;
+        }
+        ReleaseSRWLockExclusive(&g_lastMatchLock);
 
         /* Check threshold */
         if (bestScore < MATCH_THRESHOLD || bestIdx < 0) {
@@ -679,6 +721,8 @@ KillFeedSampler* KillFeedSampler_Init(const AppConfig* config, const CaptureStat
     s->kfY = (int)(config->killfeedYPct * monH) - cropY;
     s->kfW = (int)(config->killfeedWPct * monW);
     s->kfH = (int)(config->killfeedHPct * monH);
+    s->cropX = cropX;
+    s->cropY = cropY;
 
     /* Clamp to capture bounds */
     if (s->kfX < 0) { s->kfW += s->kfX; s->kfX = 0; }
@@ -850,6 +894,26 @@ void KillFeedSampler_FeedFrame(KillFeedSampler* s, CaptureState* capture,
     SetEvent(s->hWorkReady);
 }
 
+BOOL KillFeedSampler_GetLastMatch(int* outX, int* outY, int* outW, int* outH, float* outScore)
+{
+    BOOL ok = FALSE;
+    AcquireSRWLockShared(&g_lastMatchLock);
+    if (g_lastMatch.hasValue) {
+        /* Treat anything older than 3 scan intervals as stale (sampler stopped). */
+        ULONGLONG ageMs = GetTickCount64() - g_lastMatch.timestampMs;
+        if (ageMs <= (ULONGLONG)(SCAN_INTERVAL_MS * 3)) {
+            if (outX)     *outX = g_lastMatch.x;
+            if (outY)     *outY = g_lastMatch.y;
+            if (outW)     *outW = g_lastMatch.w;
+            if (outH)     *outH = g_lastMatch.h;
+            if (outScore) *outScore = g_lastMatch.score;
+            ok = TRUE;
+        }
+    }
+    ReleaseSRWLockShared(&g_lastMatchLock);
+    return ok;
+}
+
 void KillFeedSampler_Shutdown(KillFeedSampler* s)
 {
     if (!s) return;
@@ -874,6 +938,11 @@ void KillFeedSampler_Shutdown(KillFeedSampler* s)
         SAFE_FREE(s->templates[i].gray);
     SAFE_FREE(s->triggerBmp);
     free(s);
+
+    /* Clear published match so a stale rect doesn't flash on next start. */
+    AcquireSRWLockExclusive(&g_lastMatchLock);
+    g_lastMatch.hasValue = FALSE;
+    ReleaseSRWLockExclusive(&g_lastMatchLock);
 }
 
 void KillFeedSampler_WriteTriggerContext(KillFeedSampler* s, const char* clipPath, BOOL debugMode)

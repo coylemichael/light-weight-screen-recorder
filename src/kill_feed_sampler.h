@@ -34,6 +34,12 @@ void KillFeedSampler_FeedFrame(KillFeedSampler* sampler, CaptureState* capture,
  * Call after the auto-clip save completes. Consumes stored trigger context. */
 void KillFeedSampler_WriteTriggerContext(KillFeedSampler* sampler, const char* clipPath, BOOL debugMode);
 
+/* Last best NCC match from the most recent scan, in monitor-overlay coordinates
+ * (compatible with the settings_dialog region-overlay window at (0,0,SM_CXSCREEN,SM_CYSCREEN)).
+ * Returns TRUE only if a value was published within the last ~3s and score >= 0.50.
+ * Safe to call from any thread; no sampler pointer needed (single-instance assumption). */
+BOOL KillFeedSampler_GetLastMatch(int* outX, int* outY, int* outW, int* outH, float* outScore);
+
 /* Shutdown and free resources. */
 void KillFeedSampler_Shutdown(KillFeedSampler* sampler);
 

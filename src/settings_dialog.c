@@ -1813,9 +1813,15 @@ void SettingsDialog_SwitchTab(SettingsTab tab) {
  * ============================================================================ */
 
 #include "layered_window.h"
+#include "kill_feed_sampler.h"
 
 static HWND s_regionOverlayWnd = NULL;
 static const char* REGION_OVERLAY_CLASS = "LWSRRegionOverlay";
+/* Repaint the region overlay 5x/sec so the dynamic match rect tracks the
+ * sampler (which scans every SCAN_INTERVAL_MS ≈ 2s). Cheap — just redraws a
+ * full-screen layered bitmap with two rects + a label. */
+#define REGION_OVERLAY_TIMER_ID  1
+#define REGION_OVERLAY_TIMER_MS  200
 
 /* Draw a 2px outline rectangle into a LayeredBitmap at the given coords */
 static void DrawOutlineRect(LayeredBitmap* lb, int rx, int ry, int rw, int rh,
@@ -1899,7 +1905,30 @@ static void UpdateRegionOverlayBitmap(void)
         DrawOutlineRect(&lb, kx, ky, kw, kh, 0, 255, 0, 200);
         DrawLabelOnBitmap(&lb, kx, ky, kw, kh, "KILL FEED", 0, 255, 0);
     }
-    
+
+    /* Dynamic best-match rect from the live scanner:
+     *   score >= 0.80  -> red   (would fire save)
+     *   0.50 <= s <0.80 -> orange (near miss, useful for debugging missed kills)
+     *   < 0.50          -> not published, nothing drawn
+     * Score is rendered as text just below the rect. */
+    int mx, my, mw, mh;
+    float mscore;
+    if (KillFeedSampler_GetLastMatch(&mx, &my, &mw, &mh, &mscore)) {
+        BYTE r, g, b;
+        if (mscore >= 0.80f) { r = 255; g = 0;   b = 0;   }  /* red  */
+        else                 { r = 255; g = 140; b = 0;   }  /* orange */
+        DrawOutlineRect(&lb, mx, my, mw, mh, r, g, b, 230);
+
+        char label[32];
+        snprintf(label, sizeof(label), "%.2f", mscore);
+        /* Label box below the rect; clamp inside screen. */
+        int lx = mx;
+        int ly = my + mh + 2;
+        int lw = 60, lh = 18;
+        if (ly + lh > monH) ly = my - lh - 2;
+        DrawLabelOnBitmap(&lb, lx, ly, lw, lh, label, r, g, b);
+    }
+
     LayeredBitmap_Apply(&lb, s_regionOverlayWnd, 0, 0);
     LayeredBitmap_Destroy(&lb);
 }
@@ -1909,6 +1938,12 @@ static LRESULT CALLBACK RegionOverlayWndProc(HWND hwnd, UINT msg, WPARAM wParam,
     switch (msg) {
         case WM_NCHITTEST:
             return HTTRANSPARENT;
+        case WM_TIMER:
+            if (wParam == REGION_OVERLAY_TIMER_ID) {
+                UpdateRegionOverlayBitmap();
+                return 0;
+            }
+            break;
     }
     return DefWindowProc(hwnd, msg, wParam, lParam);
 }
@@ -1946,12 +1981,14 @@ static void AutoClipRegionOverlay_Show(void)
     }
     
     UpdateRegionOverlayBitmap();
+    SetTimer(s_regionOverlayWnd, REGION_OVERLAY_TIMER_ID, REGION_OVERLAY_TIMER_MS, NULL);
     ShowWindow(s_regionOverlayWnd, SW_SHOWNA);
 }
 
 static void AutoClipRegionOverlay_Hide(void)
 {
     if (s_regionOverlayWnd) {
+        KillTimer(s_regionOverlayWnd, REGION_OVERLAY_TIMER_ID);
         DestroyWindow(s_regionOverlayWnd);
         s_regionOverlayWnd = NULL;
     }

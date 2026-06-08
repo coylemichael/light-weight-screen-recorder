@@ -7,6 +7,7 @@ Each entry: `**Title** — short description.`
 ## [Unreleased]
 
 ### Added
+- **Auto-clip live detection overlay** — When *Show detection regions* is enabled in the Auto-Clip settings tab, the region overlay now also draws the live best-NCC-match rect on a 200 ms timer: **red** for scores ≥ 0.80 (would fire a save), **orange** for 0.50–0.80 (near miss). Score rendered as a `%.2f` label below the rect. New public `KillFeedSampler_GetLastMatch` in `src/kill_feed_sampler.h` exposes the published last-match state in monitor-overlay coordinates; `TemplateMatchMultiScale` extended to also out-param the matched scale's pixel dimensions; publish path in `ScanWorkerProc` guarded by a module-static `SRWLOCK`. Stale matches (> 3× scan interval) are suppressed.
 - **Producer-side kill-feed diagnostic counters** — `KillFeedSampler_FeedFrame` now tallies `feed_calls` (how many frames the capture loop offered) and `feed_queued` (how many actually replaced the worker's pending slot) per heartbeat window. Surfaces the producer/consumer gap when the worker is bottlenecked (`feed_queued` ≪ `feed_calls`) versus the calibration / template-cost path. Heartbeat line in `src/kill_feed_sampler.c` extended accordingly.
 
 ### Changed
