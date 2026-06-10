@@ -200,7 +200,26 @@ static BOOL InitDuplicationForOutput(CaptureState* state, IDXGIAdapter* adapter,
                           localDesc.DesktopCoordinates.left;
     state->monitorHeight = localDesc.DesktopCoordinates.bottom -
                            localDesc.DesktopCoordinates.top;
-    
+
+    // Lock the physical-monitor identity on the very first successful bind.
+    // Reinits / region switches must not overwrite this — that's how the
+    // pre-fix KVM-swap bug silently re-bound to a different output.
+    if (state->targetMonitorId[0] == '\0') {
+        char nameA[32];
+        WideCharToMultiByte(CP_ACP, 0, localDesc.DeviceName, -1, nameA, sizeof(nameA), NULL, NULL);
+        DISPLAY_DEVICEA dd = { .cb = sizeof(dd) };
+        if (EnumDisplayDevicesA(nameA, 0, &dd, EDD_GET_DEVICE_INTERFACE_NAME)
+            && dd.DeviceID[0]) {
+            strncpy_s(state->targetMonitorId, sizeof(state->targetMonitorId),
+                      dd.DeviceID, _TRUNCATE);
+            Logger_Log("Capture: target monitor locked to PnP ID %s\n", state->targetMonitorId);
+        } else {
+            Logger_Log("Capture: WARNING - could not resolve PnP ID for %s (GetLastError=%lu); "
+                       "reinit will fall back to index-based behaviour\n",
+                       nameA, GetLastError());
+        }
+    }
+
     // Default capture region is full monitor
     state->captureRect = localDesc.DesktopCoordinates;
     state->captureWidth = state->monitorWidth;
@@ -214,6 +233,33 @@ cleanup:
     SAFE_RELEASE(dxgiOutput);
     
     return result;
+}
+
+// Find the DXGI output index whose PnP ID matches state->targetMonitorId.
+// Returns -1 if no match (target monitor currently absent — e.g. KVM swapped
+// away) or if no target ID is set. Caller should treat -1 as "retry later",
+// not "give up".
+static int FindTargetOutput(CaptureState* state) {
+    if (!state || !state->adapter || state->targetMonitorId[0] == '\0') return -1;
+
+    for (int i = 0; i < LWSR_MAX_MONITORS; i++) {
+        IDXGIOutput* out = NULL;
+        if (FAILED(state->adapter->lpVtbl->EnumOutputs(state->adapter, i, &out))) break;
+
+        DXGI_OUTPUT_DESC desc = {0};
+        HRESULT hr = out->lpVtbl->GetDesc(out, &desc);
+        out->lpVtbl->Release(out);
+        if (FAILED(hr)) continue;
+
+        char nameA[32];
+        WideCharToMultiByte(CP_ACP, 0, desc.DeviceName, -1, nameA, sizeof(nameA), NULL, NULL);
+        DISPLAY_DEVICEA dd = { .cb = sizeof(dd) };
+        if (EnumDisplayDevicesA(nameA, 0, &dd, EDD_GET_DEVICE_INTERFACE_NAME)
+            && strcmp(dd.DeviceID, state->targetMonitorId) == 0) {
+            return i;
+        }
+    }
+    return -1;
 }
 
 // Find which DXGI output contains most of the given region
@@ -320,6 +366,15 @@ BOOL Capture_SetRegion(CaptureState* state, RECT region) {
     // Check if region is on a different monitor than current
     int targetOutput = FindOutputForRegion(state->adapter, region);
     if (targetOutput != state->monitorIndex) {
+        // Refuse to follow the rect to a different physical monitor once we've
+        // locked an identity. Without this gate, a topology change that shuffled
+        // DXGI indices would let the recorder silently re-bind to whatever
+        // output the saved rect happens to overlap (the KVM-swap bug).
+        if (state->targetMonitorId[0] != '\0' && FindTargetOutput(state) != targetOutput) {
+            Logger_Log("Capture_SetRegion: refusing to switch to non-target output %d (target PnP=%s)\n",
+                       targetOutput, state->targetMonitorId);
+            return FALSE;
+        }
         // Need to switch to a different output
         ReleaseDuplication(state);
         if (!InitDuplicationForOutput(state, state->adapter, targetOutput)) {
@@ -644,9 +699,25 @@ BOOL Capture_ReinitDuplication(CaptureState* state) {
     // Release old duplication and GPU texture (has stale frames)
     ReleaseDuplication(state);
     SAFE_RELEASE(state->gpuTexture);
-    
-    // Recreate duplication on same output
-    if (!InitDuplicationForOutput(state, state->adapter, state->monitorIndex)) {
+
+    // Prefer rebinding to the same physical monitor (PnP ID) rather than the
+    // same DXGI index — indices can be reassigned after a KVM swap / hot-plug.
+    int targetIdx;
+    if (state->targetMonitorId[0] != '\0') {
+        targetIdx = FindTargetOutput(state);
+        if (targetIdx < 0) {
+            Logger_Log("Capture_ReinitDuplication: target monitor (PnP %s) absent, will retry\n",
+                       state->targetMonitorId);
+            // Leave state->accessLost = TRUE so the buffer thread keeps polling
+            // until the real monitor reappears.
+            return FALSE;
+        }
+    } else {
+        // Legacy fallback for RDP / virtual displays with no PnP ID.
+        targetIdx = state->monitorIndex;
+    }
+
+    if (!InitDuplicationForOutput(state, state->adapter, targetIdx)) {
         return FALSE;
     }
     

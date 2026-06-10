@@ -24,7 +24,10 @@ typedef struct {
     int monitorWidth;
     int monitorHeight;
     int monitorRefreshRate;
-    
+
+    // PnP DeviceID of the originally-bound output; empty if unresolvable (RDP / virtual display).
+    char targetMonitorId[256];
+
     // Capture region
     RECT captureRect;
     int captureWidth;
