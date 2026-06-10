@@ -39,7 +39,7 @@
 static const float TEMPLATE_SCALES[] = { 1.0f, 1.5f, 2.0f, 0.75f };
 #define NUM_TEMPLATE_SCALES     (sizeof(TEMPLATE_SCALES) / sizeof(TEMPLATE_SCALES[0]))
 /* Number of templates */
-#define MAX_TEMPLATES           2
+#define MAX_TEMPLATES           4
 
 /* ─── GDI+ bitmap types (for PNG loading) ─── */
 
@@ -757,6 +757,20 @@ KillFeedSampler* KillFeedSampler_Init(const AppConfig* config, const CaptureStat
             s->templateCount++;
         else
             Logger_Log("KillFeedSampler: WARNING - runner_down.png not found: %s\n", pngPath);
+
+        /* Template 2: finisher.png */
+        snprintf(pngPath, MAX_PATH, "%sstatic\\finisher.png", exePath);
+        if (LoadTemplatePNG(&s->templates[s->templateCount], pngPath, "finisher"))
+            s->templateCount++;
+        else
+            Logger_Log("KillFeedSampler: WARNING - finisher.png not found: %s\n", pngPath);
+
+        /* Template 3: runner_elim.png */
+        snprintf(pngPath, MAX_PATH, "%sstatic\\runner_elim.png", exePath);
+        if (LoadTemplatePNG(&s->templates[s->templateCount], pngPath, "runner_elim"))
+            s->templateCount++;
+        else
+            Logger_Log("KillFeedSampler: WARNING - runner_elim.png not found: %s\n", pngPath);
     }
 
     if (s->templateCount == 0) {
