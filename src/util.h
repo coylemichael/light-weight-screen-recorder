@@ -41,4 +41,14 @@ int Util_WideToUtf8(const WCHAR* wide, char* utf8, int maxLen);
 // or 0 on empty input OR API failure. Callers should treat 0 as "not available".
 int Util_Utf8ToWide(const char* utf8, WCHAR* wide, int maxLen);
 
+// ============================================================================
+// Timing Utilities
+// ============================================================================
+
+// Convert a QPC tick delta to 100ns units (the MFT / DXGI / NVENC time base).
+// The naive `(end - start) * 10000000LL / freq` overflows LONGLONG at ~25.6h
+// on a 10MHz QPC and is the source of the "long sessions silently die" class
+// of bug — always use this helper instead of inlining the math.
+LONGLONG Util_QpcDeltaToHns(LARGE_INTEGER end, LARGE_INTEGER start, LARGE_INTEGER freq);
+
 #endif // UTIL_H

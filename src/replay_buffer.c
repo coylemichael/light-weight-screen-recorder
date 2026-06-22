@@ -1355,6 +1355,15 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     int encodeFailCount = 0;  // Diagnostic counter only (no threshold logic)
     double totalCaptureMs = 0, totalConvertMs = 0, totalSubmitMs = 0;
     int timingCount = 0;
+
+    /* Staleness self-check: catches "loop alive but produces nothing" failures
+     * (the 25.6h QPC overflow that motivated this check, plus any future encoder
+     * hang / GPU lost without flag). Uses GetTickCount64 so it can't itself be
+     * broken by a bad QPC calculation. */
+    ULONGLONG lastStaleCheckTick = 0;
+    int lastStaleCheckFrames = 0;
+    int lastStaleCheckAttempts = 0;
+    const ULONGLONG STALE_CHECK_INTERVAL_MS = 10000;
     
     // Transition to CAPTURING state and signal ready
     // (but don't signal hReadyEvent until we have frames)
@@ -1368,7 +1377,31 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     while (InterlockedCompareExchange(&state->state, 0, 0) == REPLAY_STATE_CAPTURING) {
         // Heartbeat every iteration (non-blocking)
         Logger_Heartbeat(THREAD_BUFFER);
-        
+
+        /* Staleness check: loop iterating but frameCount frozen for 10s straight
+         * means something silently broke (the buffer is going stale on disk). Done
+         * here so it can't be skipped by any `continue` further down. */
+        {
+            ULONGLONG nowTick = GetTickCount64();
+            if (lastStaleCheckTick == 0) {
+                lastStaleCheckTick = nowTick;
+                lastStaleCheckFrames = frameCount;
+                lastStaleCheckAttempts = attemptCount;
+            } else if (nowTick - lastStaleCheckTick >= STALE_CHECK_INTERVAL_MS) {
+                int attemptsAdvanced = attemptCount - lastStaleCheckAttempts;
+                int framesAdvanced = frameCount - lastStaleCheckFrames;
+                if (framesAdvanced == 0 && attemptsAdvanced > 0) {
+                    ReplayLog("WARNING: Capture loop alive but produced 0 frames in %llums "
+                              "(attemptCount=%d advancing, frameCount=%d stuck) "
+                              "-- buffer going stale, autoclip will not fire\n",
+                              nowTick - lastStaleCheckTick, attemptCount, frameCount);
+                }
+                lastStaleCheckTick = nowTick;
+                lastStaleCheckFrames = frameCount;
+                lastStaleCheckAttempts = attemptCount;
+            }
+        }
+
         // Check for stop/save events with 1ms timeout (allows frame timing)
         DWORD waitResult = WaitForMultipleObjects(2, waitHandles, FALSE, 1);
         
@@ -1474,9 +1507,13 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
              * grid; in VFR mode we use the raw elapsed time so the file
              * carries true capture jitter. Both keep the audio/video time
              * base in agreement, fixing the "video buffer covers more real
-             * seconds than audio buffer" desync (see research notes). */
-            LONGLONG elapsedHns = (currentTime.QuadPart - captureStartTime.QuadPart)
-                                    * 10000000LL / perfFreq.QuadPart;
+             * seconds than audio buffer" desync (see research notes).
+             *
+             * Must use the split-divide helper: the inline `delta * 1e7 / freq`
+             * pattern overflows LONGLONG at ~25.6h on a 10MHz QPC, silently
+             * freezing the buffer (currentSlot wraps negative, every subsequent
+             * frame is rejected by the `currentSlot <= lastSubmittedSlot` skip). */
+            LONGLONG elapsedHns = Util_QpcDeltaToHns(currentTime, captureStartTime, perfFreq);
             LONGLONG currentSlot = (timingMode == FRAME_TIMING_CFR)
                 ? (LONGLONG)(((double)elapsedHns * fps + 5000000.0) / 10000000.0)  /* round */
                 : -1;  /* unused in VFR mode */

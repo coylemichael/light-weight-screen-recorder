@@ -168,3 +168,18 @@ void Util_GenerateRecordingFilename(char* buffer, size_t size,
     snprintf(buffer, size, "%s\\Recording_%s%s", 
              basePath, timestamp, Config_GetFormatExtension(format));
 }
+
+// ============================================================================
+// Timing Utilities
+// ============================================================================
+
+LONGLONG Util_QpcDeltaToHns(LARGE_INTEGER end, LARGE_INTEGER start, LARGE_INTEGER freq) {
+    // Split the divide so the (delta * 1e7) intermediate never blows up.
+    // seconds * 1e7 is fine for ~29,000 years; the remainder fraction is < freq
+    // so (remainder * 1e7) tops out at freq * 1e7 — safe for any QPC frequency
+    // up to ~922 GHz (real hardware is 10 MHz on modern Windows).
+    LONGLONG delta = end.QuadPart - start.QuadPart;
+    LONGLONG seconds   = delta / freq.QuadPart;
+    LONGLONG remainder = delta - seconds * freq.QuadPart;
+    return seconds * 10000000LL + (remainder * 10000000LL) / freq.QuadPart;
+}
