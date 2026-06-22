@@ -23,6 +23,7 @@
 #include "mem_utils.h"
 #include "overlay.h"
 #include "debug_console.h"
+#include "game_profile.h"
 
 #pragma comment(lib, "comctl32.lib")
 
@@ -88,6 +89,13 @@ static int s_generalControlCount = 0;
 static int s_audioControlCount = 0;
 static int s_videoControlCount = 0;
 static int s_autoClipControlCount = 0;
+
+/* Auto-clip region debug overlay state (definitions live further down with
+ * the overlay window proc; forward-declared here so the per-game UI created
+ * in CreateGeneralSection and the WM_COMMAND handlers can reference them). */
+static HWND s_regionOverlayWnd = NULL;
+static GameProfile* s_selectedProfile = NULL;
+static void UpdateRegionOverlayBitmap(void);
 
 /* ============================================================================
  * HELPER FUNCTIONS
@@ -595,7 +603,7 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     layout->y += 14;
     
     /* Enable auto-clip checkbox */
-    ctl = CreateWindowW(L"BUTTON", L"Kill feed instant clipping (requires Tesseract OCR)",
+    ctl = CreateWindowW(L"BUTTON", L"Per-game auto-clip (kill / event detection)",
         WS_CHILD | BS_AUTOCHECKBOX,
         layout->labelX, layout->y, 420, 24, hwnd, (HMENU)ID_CHK_AUTOCLIP_ENABLED, s_hInstance, NULL);
     CHECK_CTL(ctl);
@@ -603,9 +611,62 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     CheckDlgButton(hwnd, ID_CHK_AUTOCLIP_ENABLED, g_config.autoClipEnabled ? BST_CHECKED : BST_UNCHECKED);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
     layout->y += layout->rowH;
-    
+
+    /* Game dropdown — populated from game catalog (bin/games/*.ini) */
+    {
+        if (!s_selectedProfile && GameProfile_GetCount() > 0) {
+            s_selectedProfile = GameProfile_GetByIndex(0);
+        }
+
+        ctl = CreateWindowW(L"STATIC", L"Game",
+            WS_CHILD | SS_CENTERIMAGE,
+            layout->labelX, layout->y, layout->labelW, 22, hwnd, NULL, s_hInstance, NULL);
+        CHECK_CTL(ctl);
+        SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
+        AddToSection(ctl, s_generalControls, &s_generalControlCount);
+
+        HWND combo = CreateWindowW(L"COMBOBOX", L"",
+            WS_CHILD | WS_VSCROLL | CBS_DROPDOWNLIST | WS_TABSTOP,
+            layout->controlX, layout->y, 200, 200, hwnd,
+            (HMENU)ID_CMB_AUTOCLIP_GAME, s_hInstance, NULL);
+        CHECK_CTL(combo);
+        SendMessage(combo, WM_SETFONT, (WPARAM)layout->font, TRUE);
+
+        int catalogCount = GameProfile_GetCount();
+        int selectedIdx = 0;
+        if (catalogCount == 0) {
+            SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)"(no games installed)");
+            EnableWindow(combo, FALSE);
+        } else {
+            for (int i = 0; i < catalogCount; i++) {
+                GameProfile* p = GameProfile_GetByIndex(i);
+                if (!p) continue;
+                SendMessageA(combo, CB_ADDSTRING, 0, (LPARAM)p->displayName);
+                if (p == s_selectedProfile) selectedIdx = i;
+            }
+        }
+        SendMessage(combo, CB_SETCURSEL, (WPARAM)selectedIdx, 0);
+        AddToSection(combo, s_generalControls, &s_generalControlCount);
+        layout->y += layout->rowH;
+    }
+
+    /* Per-game enabled checkbox (toggles s_selectedProfile->userEnabled) */
+    {
+        BOOL gameEnabled = s_selectedProfile ? s_selectedProfile->userEnabled : FALSE;
+        ctl = CreateWindowW(L"BUTTON", L"Enable detection for this game",
+            WS_CHILD | BS_AUTOCHECKBOX,
+            layout->labelX + 16, layout->y, 300, 24, hwnd,
+            (HMENU)ID_CHK_AUTOCLIP_GAME_ENABLED, s_hInstance, NULL);
+        CHECK_CTL(ctl);
+        SendMessage(ctl, WM_SETFONT, (WPARAM)layout->font, TRUE);
+        CheckDlgButton(hwnd, ID_CHK_AUTOCLIP_GAME_ENABLED, gameEnabled ? BST_CHECKED : BST_UNCHECKED);
+        EnableWindow(ctl, s_selectedProfile != NULL);
+        AddToSection(ctl, s_generalControls, &s_generalControlCount);
+        layout->y += layout->rowH;
+    }
+
     /* Show regions checkbox (debug overlay) */
-    ctl = CreateWindowW(L"BUTTON", L"Show detection regions (calibration)",
+    ctl = CreateWindowW(L"BUTTON", L"Show detection region (calibration)",
         WS_CHILD | BS_AUTOCHECKBOX,
         layout->labelX + 16, layout->y, 300, 24, hwnd, (HMENU)ID_CHK_AUTOCLIP_SHOW_REGIONS, s_hInstance, NULL);
     CHECK_CTL(ctl);
@@ -613,9 +674,9 @@ static void CreateGeneralSection(HWND hwnd, SettingsLayout* layout) {
     CheckDlgButton(hwnd, ID_CHK_AUTOCLIP_SHOW_REGIONS, g_config.autoClipShowRegions ? BST_CHECKED : BST_UNCHECKED);
     AddToSection(ctl, s_generalControls, &s_generalControlCount);
     layout->y += layout->rowH;
-    
+
     /* Debug console checkbox */
-    ctl = CreateWindowW(L"BUTTON", L"Debug console (live OCR feed)",
+    ctl = CreateWindowW(L"BUTTON", L"Debug console (live detector feed)",
         WS_CHILD | BS_AUTOCHECKBOX,
         layout->labelX + 16, layout->y, 300, 24, hwnd, (HMENU)ID_CHK_AUTOCLIP_DEBUG_CONSOLE, s_hInstance, NULL);
     CHECK_CTL(ctl);
@@ -1482,6 +1543,29 @@ static LRESULT CALLBACK SettingsWndProc(HWND hwnd, UINT msg, WPARAM wParam, LPAR
                     else
                         DebugConsole_Close();
                     break;
+
+                case ID_CMB_AUTOCLIP_GAME:
+                    if (HIWORD(wParam) == CBN_SELCHANGE) {
+                        int idx = (int)SendMessage(GetDlgItem(hwnd, ID_CMB_AUTOCLIP_GAME), CB_GETCURSEL, 0, 0);
+                        GameProfile* p = GameProfile_GetByIndex(idx);
+                        if (p) {
+                            s_selectedProfile = p;
+                            CheckDlgButton(hwnd, ID_CHK_AUTOCLIP_GAME_ENABLED,
+                                p->userEnabled ? BST_CHECKED : BST_UNCHECKED);
+                            EnableWindow(GetDlgItem(hwnd, ID_CHK_AUTOCLIP_GAME_ENABLED), TRUE);
+                            if (s_regionOverlayWnd) UpdateRegionOverlayBitmap();
+                        }
+                    }
+                    break;
+
+                case ID_CHK_AUTOCLIP_GAME_ENABLED:
+                    if (s_selectedProfile) {
+                        BOOL on = IsDlgButtonChecked(hwnd, ID_CHK_AUTOCLIP_GAME_ENABLED) == BST_CHECKED;
+                        s_selectedProfile->userEnabled = on;
+                        GameProfile_SaveUserOverrides(s_selectedProfile);
+                        ScheduleReplayReload("per-game auto-clip toggle");
+                    }
+                    break;
                 
                 case ID_CMB_AUDIO_SOURCE1:
                     if (HIWORD(wParam) == CBN_SELCHANGE) {
@@ -1815,7 +1899,8 @@ void SettingsDialog_SwitchTab(SettingsTab tab) {
 #include "layered_window.h"
 #include "kill_feed_sampler.h"
 
-static HWND s_regionOverlayWnd = NULL;
+/* s_regionOverlayWnd and s_selectedProfile are defined at top of file so the
+ * per-game UI in CreateGeneralSection can reference them. */
 static const char* REGION_OVERLAY_CLASS = "LWSRRegionOverlay";
 /* Repaint the region overlay 5x/sec so the dynamic match rect tracks the
  * sampler (which scans every SCAN_INTERVAL_MS ≈ 2s). Cheap — just redraws a
@@ -1896,14 +1981,18 @@ static void UpdateRegionOverlayBitmap(void)
     LayeredBitmap lb = {0};
     if (!LayeredBitmap_Create(&lb, monW, monH)) return;
     
-    /* Kill feed region - green outline */
-    if (g_config.killfeedWPct > 0.0f) {
-        int kx = (int)(g_config.killfeedXPct * monW);
-        int ky = (int)(g_config.killfeedYPct * monH);
-        int kw = (int)(g_config.killfeedWPct * monW);
-        int kh = (int)(g_config.killfeedHPct * monH);
+    /* Kill feed region - green outline (selected profile's active region) */
+    float rx, ry, rw, rh;
+    if (s_selectedProfile && GameProfile_GetActiveRegion(s_selectedProfile, &rx, &ry, &rw, &rh)) {
+        int kx = (int)(rx * monW);
+        int ky = (int)(ry * monH);
+        int kw = (int)(rw * monW);
+        int kh = (int)(rh * monH);
         DrawOutlineRect(&lb, kx, ky, kw, kh, 0, 255, 0, 200);
-        DrawLabelOnBitmap(&lb, kx, ky, kw, kh, "KILL FEED", 0, 255, 0);
+        char regionLabel[96];
+        snprintf(regionLabel, sizeof(regionLabel), "%s region",
+                 s_selectedProfile->displayName);
+        DrawLabelOnBitmap(&lb, kx, ky, kw, kh, regionLabel, 0, 255, 0);
     }
 
     /* Dynamic best-match rect from the live scanner:

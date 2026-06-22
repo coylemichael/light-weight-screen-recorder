@@ -29,6 +29,12 @@ typedef enum {
     QUALITY_LOSSLESS
 } QualityPreset;
 
+// Frame timing mode (advanced, no UI; INI-only)
+typedef enum {
+    FRAME_TIMING_CFR = 0,  // Pad gaps with duplicate frames; output is true constant FPS
+    FRAME_TIMING_VFR       // Honest variable frame rate; each frame carries its real capture PTS
+} FrameTimingMode;
+
 typedef struct {
     // Recording settings
     OutputFormat outputFormat;
@@ -68,20 +74,20 @@ typedef struct {
     // Debug/logging settings
     BOOL debugLogging;               // Enable debug logging to file (includes leak tracking)
     
-    // Auto-clip settings (kill feed detection)
-    BOOL autoClipEnabled;            // Enable kill feed instant clipping
+    // Auto-clip settings (kill feed detection) — per-game profile data
+    // (templates, region, cooldown) lives in game_profile.h / [AutoClip.<id>]
+    BOOL autoClipEnabled;            // Master switch for auto-clip
     BOOL autoClipShowRegions;        // Draw detection region overlay (debug/calibration)
-    int autoClipCooldownSec;         // Minimum seconds between auto-clip saves (5-30)
+    int autoClipCooldownSec;         // Default cooldown when profile has none (5-30)
     int autoClipDelaySec;            // Seconds to wait after kill before saving (0-30)
-    float killfeedXPct;              // Kill feed region (screen percentages 0.0-1.0)
-    float killfeedYPct;
-    float killfeedWPct;
-    float killfeedHPct;
     
     // Last capture area (for quick re-record)
     RECT lastCaptureRect;
     CaptureMode lastMode;
-    
+
+    // Advanced: not exposed in any UI. Edit lwsr_config.ini [Advanced] FrameTiming.
+    FrameTimingMode frameTimingMode;
+
 } AppConfig;
 
 // Load config from INI file.

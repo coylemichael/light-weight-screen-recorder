@@ -73,6 +73,7 @@
 #include "aac_encoder.h"
 #include "mem_utils.h"
 #include "debug_console.h"
+#include "game_profile.h"
 
 #include "constants.h"
 
@@ -223,6 +224,10 @@ int WINAPI WinMain(_In_ HINSTANCE hInstance, _In_opt_ HINSTANCE hPrevInstance,
     // Load configuration
     Config_Load(&g_config);
     configLoaded = TRUE;
+
+    // Load per-game auto-clip profiles (catalog reads bin/games/*.ini and
+    // applies user overrides from [AutoClip.<id>] in lwsr_config.ini)
+    GameProfile_LoadCatalog();
 
     // Initialize leak tracker (runtime-controlled via config)
     LeakTracker_Init();
@@ -387,6 +392,8 @@ cleanup:
     if (configLoaded) {
         Config_Save(&g_config);
     }
+
+    GameProfile_Shutdown();
 
     if (gdiInited) {
         GdiplusAPI_Shutdown();

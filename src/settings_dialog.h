@@ -85,6 +85,8 @@ typedef enum {
 #define ID_SLD_AUTOCLIP_DELAY    8007
 #define ID_LBL_AUTOCLIP_DELAY    8008
 #define ID_CHK_AUTOCLIP_DEBUG_CONSOLE 8009
+#define ID_CMB_AUTOCLIP_GAME     8010
+#define ID_CHK_AUTOCLIP_GAME_ENABLED 8011
 
 /**
  * Register the settings window class.

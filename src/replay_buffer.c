@@ -730,10 +730,13 @@ static BOOL InitVideoPipeline(CaptureState* capture, ReplayVideoState* video,
  * 
  * @param state Replay buffer state with audio configuration
  * @param audio Audio state to initialize
+ * @param t0    Shared QPC anchor — audio and video PTS must use the same wall-clock
+ *              origin or every save will be misaligned at the front edge.
  * @param outAudioError [out] Receives AAC encoder error code if encoder fails (may be NULL)
  * @return TRUE if audio is active and ready
  */
-static BOOL InitAudioPipeline(ReplayBufferState* state, ReplayAudioState* audio, AACEncoderError* outAudioError) {
+static BOOL InitAudioPipeline(ReplayBufferState* state, ReplayAudioState* audio,
+                              LARGE_INTEGER t0, AACEncoderError* outAudioError) {
     if (outAudioError) *outAudioError = AAC_OK;
     
     if (!state->audioEnabled) return FALSE;
@@ -780,8 +783,8 @@ static BOOL InitAudioPipeline(ReplayBufferState* state, ReplayAudioState* audio,
     /* Get AAC config for muxer */
     AACEncoder_GetConfig(audio->encoder, &audio->configData, &audio->configSize);
     
-    if (!AudioCapture_Start(audio->capture)) {
-        ReplayLog("AudioCapture_Start failed\n");
+    if (!AudioCapture_StartAt(audio->capture, t0)) {
+        ReplayLog("AudioCapture_StartAt failed\n");
         AACEncoder_Destroy(audio->encoder);
         AudioCapture_Destroy(audio->capture);
         audio->encoder = NULL;
@@ -904,10 +907,11 @@ static BOOL CopyAudioSamplesForMuxing(ReplayAudioState* audio, MuxerAudioSample*
     
     /* Zero-initialize to ensure safe cleanup on partial allocation failure */
     memset(audioCopy, 0, allocSize);
-    
-    LONGLONG firstAudioTs = audio->samples[0].timestamp;
+
+    /* PTS preserved as absolute (100ns since shared t0). AlignAudioToVideoWindow
+     * later rebases against the video origin so audio and video share a front edge. */
     int copiedCount = 0;
-    
+
     for (int i = 0; i < audioCount; i++) {
         /* Defensive: skip zero-size or null entries (callback should already reject them) */
         if (audio->samples[i].size <= 0 || !audio->samples[i].data) {
@@ -917,7 +921,7 @@ static BOOL CopyAudioSamplesForMuxing(ReplayAudioState* audio, MuxerAudioSample*
         if (audioCopy[i].data) {
             memcpy(audioCopy[i].data, audio->samples[i].data, audio->samples[i].size);
             audioCopy[i].size = audio->samples[i].size;
-            audioCopy[i].timestamp = audio->samples[i].timestamp - firstAudioTs;
+            audioCopy[i].timestamp = audio->samples[i].timestamp;
             audioCopy[i].duration = audio->samples[i].duration;
             copiedCount++;
         } else {
@@ -951,36 +955,67 @@ static void FreeAudioSampleCopies(MuxerAudioSample* samples, int count) {
 }
 
 /**
- * Trim audio samples to match video duration (rebase timestamps).
- * Modifies the array in-place.
+ * Align an audio track to the shared video window.
+ *
+ * Audio samples arrive carrying absolute PTS (100ns since the shared QPC t0
+ * established at capture start). Video has been rebased to start at 0 inside
+ * FrameBuffer_GetFramesForMuxing after skipping leading non-keyframes; the
+ * caller passes videoOriginTs (the absolute PTS of the first kept video
+ * frame) so we can re-express audio in the same 0-based timebase and discard
+ * any samples that fall outside the video window.
+ *
+ * Modifies the array in place.
+ *
+ * @param audio          Audio sample array (timestamps absolute, in 100ns).
+ * @param audioCount     [in/out] Sample count, updated to reflect drops.
+ * @param videoOriginTs  Absolute PTS of the first kept video frame.
+ * @param videoDuration  Video duration in 100ns (relative, post-rebase).
+ * @param label          Track label for log line.
  */
-static void TrimAudioToVideo(MuxerAudioSample* audio, int* audioCount, LONGLONG videoDuration, const char* label) {
-    if (!audio || *audioCount <= 0 || videoDuration <= 0) return;
-    
-    LONGLONG audioDuration = audio[*audioCount - 1].timestamp + audio[*audioCount - 1].duration;
-    if (audioDuration <= videoDuration) return;
-    
-    LONGLONG excess = audioDuration - videoDuration;
-    int trimCount = 0;
-    
-    while (trimCount < *audioCount &&
-           (audio[trimCount].timestamp + audio[trimCount].duration) <= excess) {
-        if (audio[trimCount].data) free(audio[trimCount].data);
-        audio[trimCount].data = NULL;
-        trimCount++;
-    }
-    
-    if (trimCount > 0) {
-        int newCount = *audioCount - trimCount;
-        LONGLONG newBase = audio[trimCount].timestamp;
-        for (int i = 0; i < newCount; i++) {
-            audio[i] = audio[trimCount + i];
-            audio[i].timestamp -= newBase;
+static void AlignAudioToVideoWindow(MuxerAudioSample* audio, int* audioCount,
+                                    LONGLONG videoOriginTs, LONGLONG videoDuration,
+                                    const char* label) {
+    if (!audio || !audioCount || *audioCount <= 0 || videoDuration <= 0) return;
+
+    int n = *audioCount;
+    int writeIdx = 0;
+    int droppedLeading = 0;
+    int droppedTrailing = 0;
+
+    for (int i = 0; i < n; i++) {
+        LONGLONG relTs = audio[i].timestamp - videoOriginTs;
+        LONGLONG relEnd = relTs + audio[i].duration;
+
+        if (relEnd <= 0) {
+            /* Fully before video starts \u2014 free and drop. */
+            if (audio[i].data) free(audio[i].data);
+            audio[i].data = NULL;
+            droppedLeading++;
+            continue;
         }
-        ReplayLog("  %s trimmed: removed %d samples (%.2fs excess), %d remain\n",
-                  label, trimCount, (double)excess / 10000000.0, newCount);
-        *audioCount = newCount;
+        if (relTs >= videoDuration) {
+            /* Fully after video ends. */
+            if (audio[i].data) free(audio[i].data);
+            audio[i].data = NULL;
+            droppedTrailing++;
+            continue;
+        }
+
+        /* Clamp first kept sample to t=0 if it straddles the front edge so the
+         * track starts at exactly the same instant as video. Subsequent samples
+         * keep their natural spacing. */
+        audio[writeIdx] = audio[i];
+        audio[writeIdx].timestamp = relTs < 0 ? 0 : relTs;
+        writeIdx++;
     }
+
+    if (droppedLeading > 0 || droppedTrailing > 0) {
+        ReplayLog("  %s aligned: dropped %d leading + %d trailing, %d remain (videoOrigin=%lldms, videoDur=%lldms)\n",
+                  label, droppedLeading, droppedTrailing, writeIdx,
+                  videoOriginTs / 10000, videoDuration / 10000);
+    }
+
+    *audioCount = writeIdx;
 }
 
 /**
@@ -1008,10 +1043,10 @@ static BOOL CopyPerSourceSamplesForMuxing(ReplayAudioState* audio, int srcIdx,
         return TRUE;
     }
     memset(copy, 0, (size_t)count * sizeof(MuxerAudioSample));
-    
-    LONGLONG firstTs = audio->perSourceSamples[srcIdx][0].timestamp;
+
+    /* PTS preserved as absolute (100ns since shared t0); AlignAudioToVideoWindow rebases later. */
     int copied = 0;
-    
+
     for (int i = 0; i < count; i++) {
         MuxerAudioSample* src = &audio->perSourceSamples[srcIdx][i];
         if (src->size <= 0 || !src->data) {
@@ -1021,7 +1056,7 @@ static BOOL CopyPerSourceSamplesForMuxing(ReplayAudioState* audio, int srcIdx,
         if (copy[i].data) {
             memcpy(copy[i].data, src->data, src->size);
             copy[i].size = src->size;
-            copy[i].timestamp = src->timestamp - firstTs;
+            copy[i].timestamp = src->timestamp;
             copy[i].duration = src->duration;
             copied++;
         } else {
@@ -1066,11 +1101,14 @@ static BOOL HandleSaveRequest(ReplayBufferState* state, ReplayVideoState* video,
         CopyPerSourceSamplesForMuxing(audio, i, &perSourceCopies[i], &perSourceCounts[i]);
     }
     
-    /* Get video samples */
+    /* Get video samples \u2014 videoOriginTs is the absolute (shared-t0) PTS of the
+     * first kept video frame. Audio is aligned against this so all tracks
+     * start at exactly the same wall-clock instant. */
     MuxerSample* videoSamples = NULL;
     int videoCount = 0;
-    
-    if (!FrameBuffer_GetFramesForMuxing(&video->frameBuffer, &videoSamples, &videoCount, NULL)) {
+    LONGLONG videoOriginTs = 0;
+
+    if (!FrameBuffer_GetFramesForMuxing(&video->frameBuffer, &videoSamples, &videoCount, &videoOriginTs)) {
         ReplayLog("  FrameBuffer_GetFramesForMuxing failed\n");
         FreeAudioSampleCopies(audioCopy, audioCount);
         for (int i = 0; i < audio->perSourceCount; i++) FreeAudioSampleCopies(perSourceCopies[i], perSourceCounts[i]);
@@ -1088,20 +1126,20 @@ static BOOL HandleSaveRequest(ReplayBufferState* state, ReplayVideoState* video,
     videoConfig.seqHeader = video->frameBuffer.seqHeaderSize > 0 ? video->frameBuffer.seqHeader : NULL;
     videoConfig.seqHeaderSize = video->frameBuffer.seqHeaderSize;
     
-    /* Trim all audio tracks to match video duration */
+    /* Align each audio track to the shared video window. */
     LONGLONG videoDuration = 0;
     if (videoSamples && videoCount > 0) {
         videoDuration = videoSamples[videoCount - 1].timestamp + videoSamples[videoCount - 1].duration;
     }
-    
+
     if (audioCopy && audioCount > 0 && videoDuration > 0) {
-        TrimAudioToVideo(audioCopy, &audioCount, videoDuration, "Mixed audio");
+        AlignAudioToVideoWindow(audioCopy, &audioCount, videoOriginTs, videoDuration, "Mixed audio");
     }
     for (int i = 0; i < audio->perSourceCount; i++) {
         if (perSourceCopies[i] && perSourceCounts[i] > 0 && videoDuration > 0) {
             char label[32];
             snprintf(label, sizeof(label), "Source %d audio", i);
-            TrimAudioToVideo(perSourceCopies[i], &perSourceCounts[i], videoDuration, label);
+            AlignAudioToVideoWindow(perSourceCopies[i], &perSourceCounts[i], videoOriginTs, videoDuration, label);
         }
     }
     
@@ -1254,20 +1292,31 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
         return 1;
     }
     
+    /* Shared wall-clock anchor: audio and video MUST share this QPC value or
+     * every save will be misaligned at the front edge (audio appears early /
+     * video appears delayed). See AlignAudioToVideoWindow. Captured here \u2014
+     * before audio init \u2014 so AudioCapture_StartAt receives the same t0 the
+     * capture loop will use for video PTS. */
+    LARGE_INTEGER perfFreq, lastFrameTime, captureStartTime;
+    QueryPerformanceFrequency(&perfFreq);
+    QueryPerformanceCounter(&captureStartTime);
+    lastFrameTime = captureStartTime;
+
     /* Initialize audio capture if enabled */
     ReplayAudioState* audio = &g_internal.audio;
     AACEncoderError audioErr = AAC_OK;
-    BOOL audioActive = InitAudioPipeline(state, audio, &audioErr);
+    BOOL audioActive = InitAudioPipeline(state, audio, captureStartTime, &audioErr);
     
-    /* Initialize kill feed sampler (auto-clip) if enabled */
+    /* Kill feed sampler lifecycle — bound to whichever GameProfile matches
+     * the current foreground window. Created/destroyed inside the capture
+     * loop based on GetForegroundWindow polling (cheap; only does real
+     * lookup work when HWND actually changes). */
     KillFeedSampler* kfSampler = NULL;
-    if (g_config.autoClipEnabled) {
-        kfSampler = KillFeedSampler_Init(&g_config, capture, state->autoClipWnd);
-        if (kfSampler) {
-            ReplayLog("Kill feed sampler initialized for auto-clip\n");
-        }
-    }
-    state->killFeedSampler = kfSampler;
+    GameProfile* currentProfile = NULL;
+    HWND lastForegroundHwnd = NULL;
+    ULONGLONG lastForegroundPollMs = 0;
+    BOOL lastAutoClipEnabled = FALSE;
+    state->killFeedSampler = NULL;
     
     /* Store audio error for caller to check */
     if (state->audioEnabled && !audioActive && audioErr != AAC_OK) {
@@ -1276,19 +1325,29 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
     
     // Timing - use floating point for precise frame intervals
     double frameIntervalMs = 1000.0 / (double)fps;  // 16.667ms for 60fps
-    ReplayLog("Frame interval: %.4f ms (target fps=%d)\n", frameIntervalMs, fps);
-    
+    const FrameTimingMode timingMode = g_config.frameTimingMode;
+    ReplayLog("Frame interval: %.4f ms (target fps=%d, timing=%s)\n",
+              frameIntervalMs, fps,
+              timingMode == FRAME_TIMING_VFR ? "vfr" : "cfr");
+
     // Request high-resolution timer (1ms precision)
     timeBeginPeriod(1);
     
-    LARGE_INTEGER perfFreq, lastFrameTime, captureStartTime;
-    QueryPerformanceFrequency(&perfFreq);
-    QueryPerformanceCounter(&lastFrameTime);
-    captureStartTime = lastFrameTime;
-    
     int frameCount = 0;
     int lastLogFrame = 0;
-    
+
+    /* CFR mode tracks wall-clock "slots" of size 1/fps. Each emitted frame
+     * lands on a slot; gaps from slow capture are padded with duplicates of
+     * the most recent frame so output is true CFR. lastSubmittedSlot = -1
+     * means no frame submitted yet; haveLastFrame gates dup injection until
+     * we have valid prior NV12 content in the GPUConverter output texture. */
+    LONGLONG lastSubmittedSlot = -1;
+    BOOL haveLastFrame = FALSE;
+    int dupFramesEmitted = 0;
+    /* Cap dups per iteration so a long stall (e.g. 5s freeze) doesn't try to
+     * inject hundreds of frames in one loop pass and stall the buffer thread. */
+    const int MAX_DUP_FRAMES_PER_ITER = 6;
+
     // Diagnostic counters (reset each run)
     int attemptCount = 0;
     int captureNullCount = 0;
@@ -1408,13 +1467,55 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
             }
             
             attemptCount++;
-            
-            // Synthetic timestamp: frameCount * interval (like OBS)
-            // This produces smooth playback regardless of actual capture jitter
-            // frameIntervalMs is target interval (e.g., 8.33ms for 120fps)
-            // Convert to 100-ns units: ms * 10000 = 100-ns
-            UINT64 syntheticTimestamp = (UINT64)(frameCount * frameIntervalMs * 10000.0);
-            
+
+            /* Wall-clock PTS: the timestamp this frame *should* have if the
+             * loop were running on the ideal grid. In CFR mode we snap to the
+             * nearest 1/fps slot so output stays on a constant-frame-rate
+             * grid; in VFR mode we use the raw elapsed time so the file
+             * carries true capture jitter. Both keep the audio/video time
+             * base in agreement, fixing the "video buffer covers more real
+             * seconds than audio buffer" desync (see research notes). */
+            LONGLONG elapsedHns = (currentTime.QuadPart - captureStartTime.QuadPart)
+                                    * 10000000LL / perfFreq.QuadPart;
+            LONGLONG currentSlot = (timingMode == FRAME_TIMING_CFR)
+                ? (LONGLONG)(((double)elapsedHns * fps + 5000000.0) / 10000000.0)  /* round */
+                : -1;  /* unused in VFR mode */
+            UINT64 newFrameTimestamp = (timingMode == FRAME_TIMING_CFR)
+                ? (UINT64)((double)currentSlot * frameIntervalMs * 10000.0)
+                : (UINT64)elapsedHns;
+
+            /* CFR gap fill: re-submit the previous frame's NV12 data (still
+             * present in GPUConverter outputTexture from the prior iteration
+             * since we haven't called Convert yet) for every missing slot. */
+            if (timingMode == FRAME_TIMING_CFR && haveLastFrame && video->encoder &&
+                gpuConverter.outputTexture && currentSlot > lastSubmittedSlot + 1) {
+                LONGLONG gapStart = lastSubmittedSlot + 1;
+                LONGLONG gapEnd = currentSlot - 1;
+                int dupsThisIter = 0;
+                for (LONGLONG s = gapStart; s <= gapEnd && dupsThisIter < MAX_DUP_FRAMES_PER_ITER; s++) {
+                    UINT64 dupTs = (UINT64)((double)s * frameIntervalMs * 10000.0);
+                    int dupResult = NVENCEncoder_SubmitTexture(video->encoder,
+                                                               gpuConverter.outputTexture,
+                                                               dupTs);
+                    if (dupResult != 1) break;  /* stop on failure; new frame attempt follows */
+                    frameCount++;
+                    dupFramesEmitted++;
+                    dupsThisIter++;
+                    lastSubmittedSlot = s;
+                    LONG newCount = InterlockedIncrement(&state->framesCaptured);
+                    if (newCount == MIN_FRAMES_FOR_SAVE) {
+                        SetEvent(state->hReadyEvent);
+                        ReplayLog("Minimum frames captured (%d), ready for saves\n", MIN_FRAMES_FOR_SAVE);
+                    }
+                }
+            }
+
+            /* In CFR mode, skip if this slot was already filled by a dup or
+             * the loop is firing faster than the slot rate. */
+            if (timingMode == FRAME_TIMING_CFR && currentSlot <= lastSubmittedSlot) {
+                continue;
+            }
+
             // GPU path: capture → color convert → NVENC (all on GPU)
             
             // Pipeline timing for diagnostics
@@ -1426,6 +1527,48 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                 QueryPerformanceCounter(&t2);
                 
                 if (bgraTexture) {
+                    /* Auto-clip: poll foreground at ~2Hz and swap the sampler
+                     * when the active game changes. The sampler doesn't even
+                     * exist when the foreground exe isn't in our catalog. */
+                    if (g_config.autoClipEnabled) {
+                        ULONGLONG nowMs = GetTickCount64();
+                        BOOL justEnabled = !lastAutoClipEnabled;
+                        lastAutoClipEnabled = TRUE;
+                        if (justEnabled || nowMs - lastForegroundPollMs >= 500) {
+                            lastForegroundPollMs = nowMs;
+                            BOOL fgChanged = GameProfile_ForegroundChanged(&lastForegroundHwnd);
+                            if (fgChanged || justEnabled) {
+                                GameProfile* matched = GameProfile_GetForegroundMatch();
+                                if (matched != currentProfile) {
+                                    if (kfSampler) {
+                                        KillFeedSampler_Shutdown(kfSampler);
+                                        kfSampler = NULL;
+                                        state->killFeedSampler = NULL;
+                                        ReplayLog("Auto-clip sampler shut down (game lost focus)\n");
+                                    }
+                                    currentProfile = matched;
+                                    if (matched && matched->userEnabled) {
+                                        kfSampler = KillFeedSampler_Init(matched, capture,
+                                                                         state->autoClipWnd);
+                                        if (kfSampler) {
+                                            state->killFeedSampler = kfSampler;
+                                            ReplayLog("Auto-clip sampler initialized for '%s'\n",
+                                                      matched->id);
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                    } else {
+                        lastAutoClipEnabled = FALSE;
+                        if (kfSampler) {
+                            KillFeedSampler_Shutdown(kfSampler);
+                            kfSampler = NULL;
+                            state->killFeedSampler = NULL;
+                            currentProfile = NULL;
+                        }
+                    }
+
                     /* Feed kill feed sampler (handles scan interval internally) */
                     if (kfSampler) {
                         KillFeedSampler_FeedFrame(kfSampler, capture, bgraTexture);
@@ -1438,12 +1581,16 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                         /* Async API: Submit frame (fast, non-blocking)
                          * Output thread will call DrainCallback when frame completes
                          * Returns: 1=success, 0=transient failure, -1=device lost */
-                        int submitResult = NVENCEncoder_SubmitTexture(video->encoder, nv12Texture, syntheticTimestamp);
+                        int submitResult = NVENCEncoder_SubmitTexture(video->encoder, nv12Texture, newFrameTimestamp);
                         QueryPerformanceCounter(&t4);
                         
                         if (submitResult == 1) {
                             frameCount++;  // Count submissions (frames delivered via callback)
                             encodeFailCount = 0;  // Reset consecutive failure counter
+                            haveLastFrame = TRUE;
+                            if (timingMode == FRAME_TIMING_CFR) {
+                                lastSubmittedSlot = currentSlot;
+                            }
                             
                             // Update state machine frame count
                             LONG newCount = InterlockedIncrement(&state->framesCaptured);
@@ -1545,8 +1692,8 @@ static DWORD WINAPI BufferThreadProc(LPVOID param) {
                 size_t memMB = FrameBuffer_GetMemoryUsage(&video->frameBuffer) / (1024 * 1024);
                 size_t memKB = FrameBuffer_GetMemoryUsage(&video->frameBuffer) / 1024;
                 int avgKBPerFrame = bufCount > 0 ? (int)(memKB / bufCount) : 0;
-                ReplayLog("Status: %d/%d frames in %.1fs (encode=%.1f fps, attempt=%.1f fps, target=%d fps), buffer=%.1fs (%d samples, %zu MB, %d KB/frame, QP=%d)\n", 
-                          frameCount, attemptCount, logElapsedSec, actualFPS, attemptFPS, fps, duration, bufCount, memMB, avgKBPerFrame, currentQP);
+                ReplayLog("Status: %d/%d frames in %.1fs (encode=%.1f fps, attempt=%.1f fps, target=%d fps, dups=%d), buffer=%.1fs (%d samples, %zu MB, %d KB/frame, QP=%d)\n",
+                          frameCount, attemptCount, logElapsedSec, actualFPS, attemptFPS, fps, dupFramesEmitted, duration, bufCount, memMB, avgKBPerFrame, currentQP);
                 
                 /* Log leak tracker status if enabled (rate-limited internally) */
                 LeakTracker_LogStatus();

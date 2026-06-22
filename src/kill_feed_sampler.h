@@ -4,26 +4,30 @@
 /*
  * Kill Feed Sampler - Template-only kill detection
  *
- * Scans a calibrated screen region for "RUNNER DOWN" / "RUNNER DOWN [ASSIST]"
- * banner templates using NCC (Normalized Cross-Correlation) matching.
+ * Scans a calibrated screen region for game-specific banner templates using
+ * multi-scale NCC (Normalized Cross-Correlation). The active game and its
+ * templates/region/threshold/cooldown come from a GameProfile selected by
+ * the buffer thread based on the current foreground exe.
  *
- * On match: triggers WM_AUTOCLIP_SAVE with "Marathon_Kill".
- * Foreground check: only triggers when Marathon is in front.
+ * On match: posts WM_AUTOCLIP_SAVE with the profile's SaveLabel.
  *
- * - Scans every 2 seconds
- * - Replay trigger cooldown: 30 seconds
+ * Foreground gating happens upstream in replay_buffer.c — when a sampler
+ * exists, it is for the foreground game. This module no longer makes any
+ * "is game X in front" decisions.
  */
 
 #include <windows.h>
 #include <d3d11.h>
-#include "config.h"
 #include "capture.h"
+#include "game_profile.h"
 
 typedef struct KillFeedSampler KillFeedSampler;
 
-/* Initialize. Returns NULL if detection region not calibrated.
- * overlayWnd receives WM_AUTOCLIP_SAVE when a kill is detected. */
-KillFeedSampler* KillFeedSampler_Init(const AppConfig* config, const CaptureState* capture,
+/* Initialize a sampler bound to a GameProfile. Returns NULL if the profile
+ * has no valid region, no templates load, or any resource fails. The sampler
+ * holds the profile pointer (for cooldown bookkeeping); the profile must
+ * outlive the sampler (catalog lives for the process). */
+KillFeedSampler* KillFeedSampler_Init(GameProfile* profile, const CaptureState* capture,
                                       HWND overlayWnd);
 
 /* Call every frame from capture thread. Handles internal timing. */
@@ -39,6 +43,9 @@ void KillFeedSampler_WriteTriggerContext(KillFeedSampler* sampler, const char* c
  * Returns TRUE only if a value was published within the last ~3s and score >= 0.50.
  * Safe to call from any thread; no sampler pointer needed (single-instance assumption). */
 BOOL KillFeedSampler_GetLastMatch(int* outX, int* outY, int* outW, int* outH, float* outScore);
+
+/* Return the GameProfile this sampler is bound to. NULL if sampler is NULL. */
+const GameProfile* KillFeedSampler_GetProfile(const KillFeedSampler* sampler);
 
 /* Shutdown and free resources. */
 void KillFeedSampler_Shutdown(KillFeedSampler* sampler);

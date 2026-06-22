@@ -1,21 +1,23 @@
 /*
- * kill_feed_sampler.c - Template-only kill detection (NCC match on calibrated kill-feed region) + auto-clip trigger
+ * kill_feed_sampler.c - Template-only kill detection (NCC match on calibrated region) + auto-clip trigger
  *
- * Scans a calibrated screen region for "RUNNER DOWN" / "RUNNER DOWN [ASSIST]"
- * banner templates using multi-scale NCC (Normalized Cross-Correlation).
+ * Scans a calibrated screen region for the active game's banner templates
+ * using multi-scale NCC. Templates, threshold, region, cooldown, and the
+ * posted save label all come from the GameProfile passed to Init.
  *
- * On match: triggers WM_AUTOCLIP_SAVE to save replay as "Marathon_Kill".
- * Foreground check: only triggers when Marathon is in front.
+ * Foreground gating happens upstream in replay_buffer.c (the sampler only
+ * exists when a profile-matched game is in front). This module does not
+ * inspect the foreground window.
  *
- * Scan cadence: every 2 seconds. Replay trigger cooldown: 30 seconds.
+ * Scan cadence: every 2 seconds. Cooldown: profile-defined (default 10s).
  *
- * USES: gdiplus_api (PNG loading), capture (readback)
+ * USES: gdiplus_api (PNG loading), capture (readback), game_profile
  */
 
 #include "kill_feed_sampler.h"
 #include "gdiplus_api.h"
 #include "capture.h"
-#include "config.h"
+#include "game_profile.h"
 #include "logger.h"
 #include "debug_console.h"
 #include "constants.h"
@@ -26,10 +28,6 @@
 
 /* How often to scan the detection region */
 #define SCAN_INTERVAL_MS        2000
-/* Minimum time between replay save triggers */
-#define TRIGGER_COOLDOWN_MS     30000
-/* NCC threshold for template match */
-#define MATCH_THRESHOLD         0.80f
 /* Diagnostic heartbeat / throttle intervals (gated on DebugConsole_IsOpen) */
 #define SAMPLER_HEARTBEAT_MS        60000
 #define SAMPLER_READBACK_LOG_MS     30000
@@ -38,8 +36,8 @@
 /* Template scale factors to try */
 static const float TEMPLATE_SCALES[] = { 1.0f, 1.5f, 2.0f, 0.75f };
 #define NUM_TEMPLATE_SCALES     (sizeof(TEMPLATE_SCALES) / sizeof(TEMPLATE_SCALES[0]))
-/* Number of templates */
-#define MAX_TEMPLATES           4
+/* Max templates per sampler (kept in sync with GAME_PROFILE_MAX_TEMPLATES) */
+#define MAX_TEMPLATES           GAME_PROFILE_MAX_TEMPLATES
 
 /* ─── GDI+ bitmap types (for PNG loading) ─── */
 
@@ -126,8 +124,12 @@ struct KillFeedSampler {
     ScanWork pendingWork;   /* Protected by workLock */
     BOOL hasPendingWork;    /* Protected by workLock */
 
-    /* Trigger state (worker thread writes, main thread reads via WriteTriggerContext) */
-    ULONGLONG lastTriggerMs;  /* Worker thread only */
+    /* Bound game profile (catalog-owned; outlives sampler). Profile owns
+     * lastTriggerMs so cooldown persists across Alt-Tab sampler restarts. */
+    GameProfile* profile;
+    float matchThreshold;
+    DWORD cooldownMs;
+    char saveLabel[GAME_PROFILE_LABEL_LEN];
 
     /* Overlay window for WM_AUTOCLIP_SAVE */
     HWND overlayWnd;
@@ -434,31 +436,6 @@ static BOOL LoadTemplatePNG(Template* t, const char* pngPath, const char* name)
     return TRUE;
 }
 
-/* ─── Foreground check ─── */
-
-static BOOL IsMarathonInForeground(void)
-{
-    HWND fgWnd = GetForegroundWindow();
-    DWORD fgPid = 0;
-    if (fgWnd) GetWindowThreadProcessId(fgWnd, &fgPid);
-    if (!fgPid) return FALSE;
-
-    HANDLE hProc = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, FALSE, fgPid);
-    if (!hProc) return FALSE;
-
-    BOOL result = FALSE;
-    char exePath[MAX_PATH];
-    DWORD pathSize = MAX_PATH;
-    if (QueryFullProcessImageNameA(hProc, 0, exePath, &pathSize)) {
-        char* slash = strrchr(exePath, '\\');
-        char* base = slash ? slash + 1 : exePath;
-        if (_strnicmp(base, "marathon", 8) == 0)
-            result = TRUE;
-    }
-    CloseHandle(hProc);
-    return result;
-}
-
 /* ─── Worker thread ─── */
 
 /* Emit a throttled diagnostic heartbeat to the main log (gated on debug console).
@@ -481,7 +458,7 @@ static void EmitHeartbeatIfDue(KillFeedSampler* s, ULONGLONG now)
     unsigned int cdRej   = s->cooldownRejects;
     unsigned int fgRej   = s->foregroundRejects;
     unsigned int loCnt   = s->belowThresholdCount;
-    ULONGLONG lastTrig   = s->lastTriggerMs;
+    ULONGLONG lastTrig   = s->profile ? s->profile->lastTriggerMs : 0;
 
     s->scansWindow = 0;
     s->feedFrameCallsWindow = 0;
@@ -593,14 +570,14 @@ static DWORD WINAPI ScanWorkerProc(LPVOID param)
         }
         ReleaseSRWLockExclusive(&g_lastMatchLock);
 
-        /* Check threshold */
-        if (bestScore < MATCH_THRESHOLD || bestIdx < 0) {
+        /* Check threshold (profile-defined) */
+        if (bestScore < s->matchThreshold || bestIdx < 0) {
             EnterCriticalSection(&s->workLock);
             s->belowThresholdCount++;
             LeaveCriticalSection(&s->workLock);
             if (bestScore > 0.60f)
                 DebugConsole_Print("SCAN: no match (best=%.3f, need %.2f)\n",
-                                  bestScore, MATCH_THRESHOLD);
+                                  bestScore, s->matchThreshold);
             free(work.bgra);
             continue;
         }
@@ -609,49 +586,41 @@ static DWORD WINAPI ScanWorkerProc(LPVOID param)
         DebugConsole_Print("MATCH: %s at (%d,%d) score=%.3f\n",
                           matchedName, bestMx, bestMy, bestScore);
 
-        /* Check cooldown */
+        /* Check cooldown (profile-defined; persists across sampler restarts) */
         ULONGLONG now = work.timestamp;
-        if ((now - s->lastTriggerMs) < TRIGGER_COOLDOWN_MS) {
+        ULONGLONG lastTrigger = s->profile ? s->profile->lastTriggerMs : 0;
+        if (lastTrigger != 0 && (now - lastTrigger) < s->cooldownMs) {
             EnterCriticalSection(&s->workLock);
             s->cooldownRejects++;
             LeaveCriticalSection(&s->workLock);
             DebugConsole_Print("MATCH: cooldown active (%llums left)\n",
-                              TRIGGER_COOLDOWN_MS - (now - s->lastTriggerMs));
+                              s->cooldownMs - (now - lastTrigger));
             free(work.bgra);
             continue;
         }
 
-        /* Foreground check */
-        if (!IsMarathonInForeground()) {
-            EnterCriticalSection(&s->workLock);
-            s->foregroundRejects++;
-            LeaveCriticalSection(&s->workLock);
-            DebugConsole_Print("MATCH: game not in foreground, skipping\n");
-            free(work.bgra);
-            continue;
-        }
+        /* Foreground gating is upstream: replay_buffer.c shuts the sampler
+         * down when the foreground app stops matching this profile. */
 
         /* ─── Trigger! ─── */
-        EnterCriticalSection(&s->workLock);
-        s->lastTriggerMs = now;
-        LeaveCriticalSection(&s->workLock);
+        if (s->profile) s->profile->lastTriggerMs = now;
 
-        Logger_Log("KillFeedSampler: Kill detected! (%s, score=%.3f) Triggering replay save.\n",
-                   matchedName, bestScore);
-        DebugConsole_Print("TRIGGER: Marathon_Kill (%s, score=%.3f) -> saving replay\n",
-                          matchedName, bestScore);
+        Logger_Log("KillFeedSampler: Detection (%s) for '%s' score=%.3f -> triggering save.\n",
+                   matchedName, s->saveLabel, bestScore);
+        DebugConsole_Print("TRIGGER: %s (%s, score=%.3f) -> saving replay\n",
+                          s->saveLabel, matchedName, bestScore);
 
         /* Store trigger context (protected by triggerLock) */
         EnterCriticalSection(&s->triggerLock);
         snprintf(s->triggerReason, sizeof(s->triggerReason),
                  "Auto-Clip Trigger Report\n"
                  "========================\n"
-                 "Type: Kill\n"
+                 "Game: %s\n"
                  "Template: %s\n"
                  "Match Score: %.4f (threshold: %.2f)\n"
                  "Match Position: (%d, %d)\n"
                  "Detection Region: (%d,%d) %dx%d\n",
-                 matchedName, bestScore, MATCH_THRESHOLD,
+                 s->saveLabel, matchedName, bestScore, s->matchThreshold,
                  bestMx, bestMy,
                  s->kfX, s->kfY, s->kfW, s->kfH);
 
@@ -664,13 +633,12 @@ static DWORD WINAPI ScanWorkerProc(LPVOID param)
         s->triggerPending = TRUE;
         LeaveCriticalSection(&s->triggerLock);
 
-        /* PostMessage with heap-allocated game name */
+        /* PostMessage with heap-allocated game name (overlay frees) */
         if (s->overlayWnd) {
-            const char* gameName = "Marathon_Kill";
-            size_t len = strlen(gameName) + 1;
+            size_t len = strlen(s->saveLabel) + 1;
             char* nameCopy = (char*)malloc(len);
             if (nameCopy) {
-                memcpy(nameCopy, gameName, len);
+                memcpy(nameCopy, s->saveLabel, len);
                 PostMessage(s->overlayWnd, WM_AUTOCLIP_SAVE, 0, (LPARAM)nameCopy);
             }
         }
@@ -684,14 +652,15 @@ worker_exit:
 
 /* ─── Public API ─── */
 
-KillFeedSampler* KillFeedSampler_Init(const AppConfig* config, const CaptureState* capture,
+KillFeedSampler* KillFeedSampler_Init(GameProfile* profile, const CaptureState* capture,
                                       HWND overlayWnd)
 {
-    if (!config || !capture) return NULL;
+    if (!profile || !capture) return NULL;
 
-    /* Detection region must be calibrated */
-    if (config->killfeedWPct <= 0.0f || config->killfeedHPct <= 0.0f) {
-        Logger_Log("KillFeedSampler: Detection region not calibrated - disabled\n");
+    /* Detection region must be available (user override or catalog default) */
+    float rx, ry, rw, rh;
+    if (!GameProfile_GetActiveRegion(profile, &rx, &ry, &rw, &rh)) {
+        Logger_Log("KillFeedSampler: '%s' has no calibrated region - disabled\n", profile->id);
         return NULL;
     }
 
@@ -703,6 +672,11 @@ KillFeedSampler* KillFeedSampler_Init(const AppConfig* config, const CaptureStat
     if (!s) return NULL;
 
     s->bestScoreWindow = -1.0f;
+    s->profile = profile;
+    s->matchThreshold = profile->templateThreshold;
+    s->cooldownMs = (DWORD)(GameProfile_GetActiveCooldownSec(profile) * 1000);
+    strncpy(s->saveLabel, profile->saveLabel, sizeof(s->saveLabel) - 1);
+    s->saveLabel[sizeof(s->saveLabel) - 1] = '\0';
 
     /* Resolve detection region */
     int monW = capture->monitorWidth;
@@ -717,10 +691,10 @@ KillFeedSampler* KillFeedSampler_Init(const AppConfig* config, const CaptureStat
         cropY = 0;
     }
 
-    s->kfX = (int)(config->killfeedXPct * monW) - cropX;
-    s->kfY = (int)(config->killfeedYPct * monH) - cropY;
-    s->kfW = (int)(config->killfeedWPct * monW);
-    s->kfH = (int)(config->killfeedHPct * monH);
+    s->kfX = (int)(rx * monW) - cropX;
+    s->kfY = (int)(ry * monH) - cropY;
+    s->kfW = (int)(rw * monW);
+    s->kfH = (int)(rh * monH);
     s->cropX = cropX;
     s->cropY = cropY;
 
@@ -731,12 +705,12 @@ KillFeedSampler* KillFeedSampler_Init(const AppConfig* config, const CaptureStat
     if (s->kfY + s->kfH > captureHeight) s->kfH = captureHeight - s->kfY;
 
     if (s->kfW <= 0 || s->kfH <= 0) {
-        Logger_Log("KillFeedSampler: Detection region outside capture area\n");
+        Logger_Log("KillFeedSampler: '%s' region outside capture area\n", profile->id);
         free(s);
         return NULL;
     }
 
-    /* Load templates */
+    /* Load templates from <exeDir>\static\<templatesDir>\<name>.png */
     {
         char exePath[MAX_PATH];
         DWORD gmfn = GetModuleFileNameA(NULL, exePath, MAX_PATH);
@@ -749,39 +723,27 @@ KillFeedSampler* KillFeedSampler_Init(const AppConfig* config, const CaptureStat
         char* slash = strrchr(exePath, '\\');
         if (slash) *(slash + 1) = '\0';
 
-        char pngPath[MAX_PATH];
-
-        /* Template 1: runner_down.png */
-        snprintf(pngPath, MAX_PATH, "%sstatic\\runner_down.png", exePath);
-        if (LoadTemplatePNG(&s->templates[s->templateCount], pngPath, "runner_down"))
-            s->templateCount++;
-        else
-            Logger_Log("KillFeedSampler: WARNING - runner_down.png not found: %s\n", pngPath);
-
-        /* Template 2: finisher.png */
-        snprintf(pngPath, MAX_PATH, "%sstatic\\finisher.png", exePath);
-        if (LoadTemplatePNG(&s->templates[s->templateCount], pngPath, "finisher"))
-            s->templateCount++;
-        else
-            Logger_Log("KillFeedSampler: WARNING - finisher.png not found: %s\n", pngPath);
-
-        /* Template 3: runner_elim.png */
-        snprintf(pngPath, MAX_PATH, "%sstatic\\runner_elim.png", exePath);
-        if (LoadTemplatePNG(&s->templates[s->templateCount], pngPath, "runner_elim"))
-            s->templateCount++;
-        else
-            Logger_Log("KillFeedSampler: WARNING - runner_elim.png not found: %s\n", pngPath);
+        const char* subdir = profile->templatesDir[0] ? profile->templatesDir : profile->id;
+        int loadCap = profile->templateCount < MAX_TEMPLATES ? profile->templateCount : MAX_TEMPLATES;
+        for (int i = 0; i < loadCap; i++) {
+            char pngPath[MAX_PATH];
+            snprintf(pngPath, MAX_PATH, "%sstatic\\%s\\%s.png",
+                     exePath, subdir, profile->templates[i]);
+            if (LoadTemplatePNG(&s->templates[s->templateCount], pngPath, profile->templates[i]))
+                s->templateCount++;
+            else
+                Logger_Log("KillFeedSampler: WARNING - template not found: %s\n", pngPath);
+        }
     }
 
     if (s->templateCount == 0) {
-        Logger_Log("KillFeedSampler: No templates loaded - disabled\n");
+        Logger_Log("KillFeedSampler: '%s' has no loadable templates - disabled\n", profile->id);
         free(s);
         return NULL;
     }
 
     s->overlayWnd = overlayWnd;
     s->lastScanMs = 0;
-    s->lastTriggerMs = 0;
     s->captureThreadId = 0;  /* Captured on first FeedFrame call */
 
     /*
@@ -810,8 +772,9 @@ KillFeedSampler* KillFeedSampler_Init(const AppConfig* config, const CaptureStat
         goto init_fail;
     }
 
-    Logger_Log("KillFeedSampler: Initialized, region (%d,%d) %dx%d, %d templates loaded\n",
-               s->kfX, s->kfY, s->kfW, s->kfH, s->templateCount);
+    Logger_Log("KillFeedSampler: Initialized for '%s', region (%d,%d) %dx%d, %d templates, threshold=%.2f, cooldown=%lums\n",
+               s->profile->id, s->kfX, s->kfY, s->kfW, s->kfH,
+               s->templateCount, s->matchThreshold, s->cooldownMs);
 
     return s;
 
@@ -1013,4 +976,9 @@ void KillFeedSampler_WriteTriggerContext(KillFeedSampler* s, const char* clipPat
     s->triggerPending = FALSE;
     SAFE_FREE(s->triggerBmp);
     LeaveCriticalSection(&s->triggerLock);
+}
+
+const GameProfile* KillFeedSampler_GetProfile(const KillFeedSampler* s)
+{
+    return s ? s->profile : NULL;
 }

@@ -96,10 +96,6 @@ void Config_Load(AppConfig* config) {
     config->autoClipShowRegions = FALSE;
     config->autoClipCooldownSec = 10;
     config->autoClipDelaySec = 10;
-    config->killfeedXPct = 0.0f;
-    config->killfeedYPct = 0.0f;
-    config->killfeedWPct = 0.0f;
-    config->killfeedHPct = 0.0f;
     
     // Default save path to Videos folder.
     // Note: SHGetFolderPathA is deprecated since Vista in favor of SHGetKnownFolderPath
@@ -114,7 +110,11 @@ void Config_Load(AppConfig* config) {
     
     SetRectEmpty(&config->lastCaptureRect);
     config->lastMode = MODE_AREA;
-    
+
+    // Advanced (INI-only). Default CFR keeps editor/player compatibility; flip to VFR
+    // only if you understand the tradeoff (see [Advanced] FrameTiming in lwsr_config.ini).
+    config->frameTimingMode = FRAME_TIMING_CFR;
+
     // Load from INI if exists
     if (GetFileAttributesA(configPath) != INVALID_FILE_ATTRIBUTES) {
         // Note: Format INI key intentionally not read/written. Only FORMAT_MP4 is
@@ -174,27 +174,14 @@ void Config_Load(AppConfig* config) {
         // Debug logging
         config->debugLogging = GetPrivateProfileIntA("Debug", "Logging", 0, configPath);
         
-        // Auto-clip settings
+        // Auto-clip settings (global; per-game region/cooldown live in
+        // [AutoClip.<id>] sections, owned by game_profile.c)
         config->autoClipEnabled = GetPrivateProfileIntA(
             "AutoClip", "Enabled", FALSE, configPath);
         config->autoClipCooldownSec = GetPrivateProfileIntA(
             "AutoClip", "CooldownSec", 10, configPath);
         config->autoClipDelaySec = GetPrivateProfileIntA(
             "AutoClip", "DelaySec", 10, configPath);
-        {
-            // Note: atof returns 0.0 on parse failure, indistinguishable from a legitimate
-            // "0". Acceptable here because the default is also 0.0 and values are clamped
-            // to [0,1] below; corrupt INI yields zeroed killfeed rect, not undefined behavior.
-            char floatBuf[32];
-            GetPrivateProfileStringA("AutoClip", "killfeedXPct", "0", floatBuf, sizeof(floatBuf), configPath);
-            config->killfeedXPct = (float)atof(floatBuf);
-            GetPrivateProfileStringA("AutoClip", "killfeedYPct", "0", floatBuf, sizeof(floatBuf), configPath);
-            config->killfeedYPct = (float)atof(floatBuf);
-            GetPrivateProfileStringA("AutoClip", "killfeedWPct", "0", floatBuf, sizeof(floatBuf), configPath);
-            config->killfeedWPct = (float)atof(floatBuf);
-            GetPrivateProfileStringA("AutoClip", "killfeedHPct", "0", floatBuf, sizeof(floatBuf), configPath);
-            config->killfeedHPct = (float)atof(floatBuf);
-        }
         
         GetPrivateProfileStringA("Recording", "SavePath", config->savePath,
             config->savePath, MAX_PATH, configPath);
@@ -209,7 +196,19 @@ void Config_Load(AppConfig* config) {
             "LastCapture", "Bottom", 0, configPath);
         config->lastMode = (CaptureMode)GetPrivateProfileIntA(
             "LastCapture", "Mode", MODE_AREA, configPath);
-        
+
+        // Advanced section (no UI). Accept "cfr"/"vfr" (case-insensitive); anything else
+        // falls back to the default. Numeric 0/1 also accepted for back-compat with
+        // hand-edited INIs.
+        char frameTimingStr[16] = "";
+        GetPrivateProfileStringA("Advanced", "FrameTiming", "cfr",
+            frameTimingStr, sizeof(frameTimingStr), configPath);
+        if (_stricmp(frameTimingStr, "vfr") == 0 || strcmp(frameTimingStr, "1") == 0) {
+            config->frameTimingMode = FRAME_TIMING_VFR;
+        } else {
+            config->frameTimingMode = FRAME_TIMING_CFR;
+        }
+
         // Validate/clamp loaded values to prevent corrupted INI from causing issues.
         // Defend at point of use: INI is an untrusted boundary (user-editable).
         if (config->outputFormat < 0 || config->outputFormat >= FORMAT_COUNT)
@@ -275,16 +274,6 @@ void Config_Load(AppConfig* config) {
 
         if (config->maxRecordingSeconds < 0)
             config->maxRecordingSeconds = 0;
-
-        // Kill-feed region is stored as screen-relative percentages; clamp to [0,1].
-        if (config->killfeedXPct < 0.0f) config->killfeedXPct = 0.0f;
-        if (config->killfeedXPct > 1.0f) config->killfeedXPct = 1.0f;
-        if (config->killfeedYPct < 0.0f) config->killfeedYPct = 0.0f;
-        if (config->killfeedYPct > 1.0f) config->killfeedYPct = 1.0f;
-        if (config->killfeedWPct < 0.0f) config->killfeedWPct = 0.0f;
-        if (config->killfeedWPct > 1.0f) config->killfeedWPct = 1.0f;
-        if (config->killfeedHPct < 0.0f) config->killfeedHPct = 0.0f;
-        if (config->killfeedHPct > 1.0f) config->killfeedHPct = 1.0f;
     }
     
     // Ensure save directory exists (ignore ERROR_ALREADY_EXISTS)
@@ -377,24 +366,14 @@ void Config_Save(const AppConfig* config) {
     snprintf(buffer, sizeof(buffer), "%d", config->debugLogging);
     WritePrivateProfileStringA("Debug", "Logging", buffer, configPath);
     
-    // Auto-clip settings
+    // Auto-clip settings (global; per-game region/cooldown is persisted by
+    // game_profile.c into [AutoClip.<id>] sections)
     snprintf(buffer, sizeof(buffer), "%d", config->autoClipEnabled);
     WritePrivateProfileStringA("AutoClip", "Enabled", buffer, configPath);
     snprintf(buffer, sizeof(buffer), "%d", config->autoClipCooldownSec);
     WritePrivateProfileStringA("AutoClip", "CooldownSec", buffer, configPath);
     snprintf(buffer, sizeof(buffer), "%d", config->autoClipDelaySec);
     WritePrivateProfileStringA("AutoClip", "DelaySec", buffer, configPath);
-    {
-        char floatBuf[32];
-        snprintf(floatBuf, sizeof(floatBuf), "%.4f", config->killfeedXPct);
-        WritePrivateProfileStringA("AutoClip", "killfeedXPct", floatBuf, configPath);
-        snprintf(floatBuf, sizeof(floatBuf), "%.4f", config->killfeedYPct);
-        WritePrivateProfileStringA("AutoClip", "killfeedYPct", floatBuf, configPath);
-        snprintf(floatBuf, sizeof(floatBuf), "%.4f", config->killfeedWPct);
-        WritePrivateProfileStringA("AutoClip", "killfeedWPct", floatBuf, configPath);
-        snprintf(floatBuf, sizeof(floatBuf), "%.4f", config->killfeedHPct);
-        WritePrivateProfileStringA("AutoClip", "killfeedHPct", floatBuf, configPath);
-    }
     
     WritePrivateProfileStringA("Recording", "SavePath", config->savePath, configPath);
     
@@ -412,6 +391,11 @@ void Config_Save(const AppConfig* config) {
     
     snprintf(buffer, sizeof(buffer), "%d", config->lastMode);
     WritePrivateProfileStringA("LastCapture", "Mode", buffer, configPath);
+
+    // Advanced (INI-only, no UI). Round-trip as "cfr"/"vfr" so the file stays
+    // self-documenting for power users who open it in a text editor.
+    WritePrivateProfileStringA("Advanced", "FrameTiming",
+        config->frameTimingMode == FRAME_TIMING_VFR ? "vfr" : "cfr", configPath);
 }
 
 const char* Config_GetFormatExtension(OutputFormat format) {
